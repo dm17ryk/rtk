@@ -75,11 +75,11 @@ rtk gain  # MUST show the savings dashboard, not "command not found"
   Do you want RTK active across ALL Claude Code projects?
   │
   ├─ YES → rtk init -g              (recommended)
-  │         Hook + RTK.md (~10 tokens in context)
+  │         Hook + RTK.md + local MCP registration
   │         Commands auto-rewritten transparently
   │
   ├─ YES, minimal → rtk init -g --hook-only
-  │         Hook only, nothing added to CLAUDE.md
+  │         Hook only, no RTK.md or MCP registration
   │         Zero tokens in context
   │
   └─ NO, single project → rtk init
@@ -93,15 +93,17 @@ rtk gain  # MUST show the savings dashboard, not "command not found"
 
 ```bash
 rtk init -g
-# → Installs hook to ~/.claude/hooks/rtk-rewrite.sh
+# → Registers the native `rtk hook claude` hook
 # → Creates ~/.claude/RTK.md (10 lines, meta commands only)
 # → Adds @RTK.md reference to ~/.claude/CLAUDE.md
 # → Prompts: "Patch settings.json? [y/N]"
 # → If yes: patches + creates backup (~/.claude/settings.json.bak)
+# → Registers the local stdio MCP server in ~/.claude.json
 
 # Automated alternatives:
 rtk init -g --auto-patch    # Patch without prompting
 rtk init -g --no-patch      # Print manual instructions instead
+rtk init -g --no-mcp        # Skip MCP registration
 
 # Verify installation
 rtk init --show  # Check hook is installed and executable

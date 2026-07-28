@@ -102,7 +102,7 @@ struct GolangciRunParts<'a> {
 
 /// Classify a single (already-split) command.
 pub fn classify_command(cmd: &str) -> Classification {
-    let trimmed = cmd.trim();
+    let trimmed = normalize_windows_alias(cmd.trim());
     if trimmed.is_empty() {
         return Classification::Ignored;
     }
@@ -120,7 +120,7 @@ pub fn classify_command(cmd: &str) -> Classification {
     }
 
     // Strip env prefixes (sudo, env VAR=val, VAR=val)
-    let stripped = ENV_PREFIX.replace(trimmed, "");
+    let stripped = ENV_PREFIX.replace(&trimmed, "");
     let cmd_clean = stripped.trim();
     if cmd_clean.is_empty() {
         return Classification::Ignored;
@@ -826,7 +826,7 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
 
 /// Transparent wrappers that RULES can also match as a whole string, so an
 /// unfiltered inner command falls through instead of dropping the rewrite.
-const ROUTABLE_WRAPPER_PREFIXES: &[&str] = &["uv run"];
+const ROUTABLE_WRAPPER_PREFIXES: &[&str] = &["uv run", "poetry run"];
 
 /// Shell keywords that wrap a command without changing which one runs. They are
 /// not spawnable, so they must never fall through: `rtk exec foo` cannot run.
@@ -866,7 +866,47 @@ fn search_uses_pattern_file(cmd: &str) -> bool {
 }
 
 fn pipeline_final_command_is_safe(rtk_cmd: &str, cmd: &str) -> bool {
-    !matches!(rtk_cmd, "rtk grep" | "rtk rg") || !search_uses_pattern_file(cmd)
+    if matches!(rtk_cmd, "rtk grep" | "rtk rg") && search_uses_pattern_file(cmd) {
+        return false;
+    }
+
+    // A compact producer must never be introduced into a pipeline whose
+    // consumer depends on exact line/byte semantics. Intermediate stages are
+    // already kept raw by analyze_pipeline; this guard covers the final stage.
+    let consumer = cmd.split_whitespace().next();
+    let exact_output_consumer = match consumer {
+        Some("wc" | "sed" | "awk" | "sort" | "uniq" | "xargs") => true,
+        Some("grep" | "rg") => shell_split(cmd)
+            .into_iter()
+            .any(|arg| arg == "-c" || arg == "--count"),
+        _ => false,
+    };
+    if exact_output_consumer && debug_enabled() {
+        eprintln!(
+            "[rtk-debug] pipeline decision=raw-final consumer={} rtk_command={}",
+            consumer.unwrap_or("<missing>"),
+            rtk_cmd
+        );
+    }
+    !exact_output_consumer || !matches!(rtk_cmd, "rtk wc" | "rtk grep" | "rtk rg")
+}
+
+fn debug_enabled() -> bool {
+    crate::service::debug_enabled()
+}
+
+fn normalize_windows_alias(command: &str) -> String {
+    #[cfg(windows)]
+    {
+        let alias = "dir";
+        if command == alias {
+            return "ls".to_string();
+        }
+        if let Some(rest) = command.strip_prefix(&format!("{alias} ")) {
+            return format!("ls {rest}");
+        }
+    }
+    command.to_string()
 }
 
 enum ExcludePattern {
@@ -1011,6 +1051,8 @@ fn rewrite_segment_inner(
     // Strip trailing stderr/stdout redirects before matching (#530)
     // e.g. "git status 2>&1" → match "git status", re-append " 2>&1"
     let (cmd_part, redirect_suffix) = strip_trailing_redirects(trimmed);
+    let normalized_cmd_part = normalize_windows_alias(cmd_part);
+    let cmd_part = normalized_cmd_part.as_str();
 
     // Already RTK — pass through unchanged
     if cmd_part.starts_with("rtk ") || cmd_part == "rtk" {
@@ -4990,6 +5032,35 @@ mod tests {
         assert_eq!(
             normalize_php_tool_command_with_dirs("./tools/bin/pest", &dirs),
             "pest"
+        );
+    }
+
+    #[test]
+    fn test_poetry_run_rewrites_inner_supported_command() {
+        assert_eq!(
+            rewrite_command_no_prefixes("poetry run pytest tests/", &[]),
+            Some("poetry run rtk pytest tests/".to_string())
+        );
+    }
+
+    #[test]
+    fn test_exact_output_pipeline_stays_raw() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log -10 | wc -l", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git log -10 | sort | uniq", &[]),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_dir_alias_rewrites_to_ls() {
+        assert_eq!(
+            rewrite_command_no_prefixes("dir /a", &[]),
+            Some("rtk ls /a".to_string())
         );
     }
 }

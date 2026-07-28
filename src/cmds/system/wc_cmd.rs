@@ -7,10 +7,19 @@
 /// - `wc -c file.py`  → `978`
 /// - `wc -l *.py`     → table with common path prefix stripped
 use crate::core::runner::{self, RunOptions};
-use crate::core::utils::resolved_command;
+use crate::core::utils::{resolve_host_command, resolved_command, HostCommand};
 use anyhow::Result;
+#[cfg(windows)]
+use std::io::Read;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    #[cfg(windows)]
+    if matches!(resolve_host_command("wc"), HostCommand::Missing)
+        && windows_wc_args_supported(args)
+    {
+        return run_windows_native(args, verbose);
+    }
+
     let mut cmd = resolved_command("wc");
     for arg in args {
         cmd.arg(arg);
@@ -38,6 +47,109 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         |stdout| filter_wc_output(stdout, &mode),
         opts,
     )
+}
+
+#[cfg(windows)]
+fn windows_wc_args_supported(args: &[String]) -> bool {
+    args.iter().filter(|arg| arg.starts_with('-')).all(|arg| {
+        matches!(
+            arg.as_str(),
+            "-l" | "-w" | "-c" | "-m" | "--lines" | "--words" | "--bytes" | "--chars"
+        ) || (arg.starts_with('-')
+            && !arg.starts_with("--")
+            && arg[1..].chars().all(|flag| matches!(flag, 'l' | 'w' | 'c' | 'm'))
+            && !arg[1..].is_empty())
+    })
+}
+
+#[cfg(windows)]
+fn run_windows_native(args: &[String], verbose: u8) -> Result<i32> {
+    let mode = detect_mode(args);
+    let files = args
+        .iter()
+        .filter(|arg| !arg.starts_with('-'))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let file_count = files.len();
+    let mut rows = Vec::new();
+    let mut total = (0usize, 0usize, 0usize, 0usize);
+
+    if files.is_empty() {
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .read_to_end(&mut bytes)
+            .map_err(|error| anyhow::anyhow!("wc: failed to read stdin: {error}"))?;
+        let counts = windows_counts(&bytes);
+        rows.push(format_windows_counts(counts, &mode, None));
+    } else {
+        for file in files {
+            let bytes = std::fs::read(file)
+                .map_err(|error| anyhow::anyhow!("wc: {}: {}", file, error))?;
+            let counts = windows_counts(&bytes);
+            rows.push(format_windows_counts(counts, &mode, Some(file)));
+            total.0 += counts.0;
+            total.1 += counts.1;
+            total.2 += counts.2;
+            total.3 += counts.3;
+        }
+        if file_count > 1 {
+            rows.push(format_windows_counts(total, &mode, Some("total")));
+        }
+    }
+
+    let rendered = rows.join("\n");
+    if verbose > 0 {
+        eprintln!(
+            "[rtk-debug] windows-wc backend=native files={} mode={:?}",
+            file_count,
+            mode
+        );
+    }
+    println!("{}", rendered);
+    let timer = crate::core::tracking::TimedExecution::start();
+    timer.track(
+        &format!("wc {}", args.join(" ")),
+        &format!("rtk wc {}", args.join(" ")),
+        &rendered,
+        &rendered,
+    );
+    Ok(0)
+}
+
+#[cfg(windows)]
+fn windows_counts(bytes: &[u8]) -> (usize, usize, usize, usize) {
+    let text = String::from_utf8_lossy(bytes);
+    (
+        bytes.iter().filter(|byte| **byte == b'\n').count(),
+        text.split_whitespace().count(),
+        bytes.len(),
+        text.chars().count(),
+    )
+}
+
+#[cfg(windows)]
+fn format_windows_counts(
+    counts: (usize, usize, usize, usize),
+    mode: &WcMode,
+    name: Option<&str>,
+) -> String {
+    let values = match mode {
+        WcMode::Lines => format!("{}", counts.0),
+        WcMode::Words => format!("{}", counts.1),
+        WcMode::Bytes => format!("{}", counts.2),
+        WcMode::Chars => format!("{}", counts.3),
+        WcMode::Full | WcMode::Mixed => {
+            if matches!(mode, WcMode::Mixed) {
+                format!("{} {} {} {}", counts.0, counts.1, counts.2, counts.3)
+            } else {
+                format!("{}L {}W {}B", counts.0, counts.1, counts.2)
+            }
+        }
+    };
+    match name {
+        Some(name) => format!("{values} {name}"),
+        None => values,
+    }
 }
 
 /// Which columns the user requested

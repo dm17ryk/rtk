@@ -867,15 +867,17 @@ pub fn uninstall(
     Ok(())
 }
 
+pub fn uninstall_claude_local(ctx: InitContext) -> Result<()> {
+    uninstall_rtk_block_file(Path::new(CLAUDE_MD), "Claude project instructions", ctx)
+}
+
 fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    if !global {
-        anyhow::bail!(
-            "Uninstall only works with --global flag. For local projects, manually remove RTK from AGENTS.md"
-        );
-    }
-
-    let codex_dir = resolve_codex_dir()?;
+    let codex_dir = if global {
+        resolve_codex_dir()?
+    } else {
+        std::env::current_dir().context("Cannot determine current directory")?
+    };
     let removed = uninstall_codex_at(&codex_dir, ctx)?;
 
     if removed.is_empty() {
@@ -932,9 +934,16 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
         }
 
         if agents_changed {
-            atomic_write(&agents_md_path, &working_content).with_context(|| {
-                format!("Failed to write AGENTS.md: {}", agents_md_path.display())
-            })?;
+            if dry_run {
+                println!(
+                    "[dry-run] would update AGENTS.md: {}",
+                    agents_md_path.display()
+                );
+            } else {
+                atomic_write(&agents_md_path, &working_content).with_context(|| {
+                    format!("Failed to write AGENTS.md: {}", agents_md_path.display())
+                })?;
+            }
         }
     }
 
@@ -1675,6 +1684,10 @@ fn run_cline_mode(ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
+pub fn uninstall_cline_mode(ctx: InitContext) -> Result<()> {
+    uninstall_rules_file(Path::new(".clinerules"), CLINE_RULES, "Cline rules", ctx)
+}
+
 fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
     // Windsurf reads .windsurfrules from the project root (workspace-scoped).
@@ -1720,12 +1733,79 @@ fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
+pub fn uninstall_windsurf_mode(ctx: InitContext) -> Result<()> {
+    uninstall_rules_file(
+        Path::new(".windsurfrules"),
+        WINDSURF_RULES,
+        "Windsurf rules",
+        ctx,
+    )
+}
+
+fn uninstall_rules_file(
+    path: &Path,
+    installed_content: &str,
+    label: &str,
+    ctx: InitContext,
+) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    if !path.exists() {
+        println!("RTK {label} were not installed (nothing to remove)");
+        return Ok(());
+    }
+
+    let existing = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {label}: {}", path.display()))?;
+    let Some(offset) = existing.find(installed_content) else {
+        println!("RTK {label} were not installed (nothing to remove)");
+        return Ok(());
+    };
+    let end = offset + installed_content.len();
+    let before = existing[..offset].trim_end();
+    let after = existing[end..].trim_start();
+    let cleaned = match (before.is_empty(), after.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => format!("{before}\n"),
+        (true, false) => format!("{after}\n"),
+        (false, false) => format!("{before}\n\n{after}\n"),
+    };
+
+    if dry_run {
+        println!("[dry-run] would remove RTK {label}: {}", path.display());
+        return Ok(());
+    }
+
+    if cleaned.is_empty() {
+        // nosemgrep: filesystem-deletion -- removes an RTK-managed rules file only when no user content remains.
+        fs::remove_file(path)
+            .with_context(|| format!("Failed to remove {label}: {}", path.display()))?;
+    } else {
+        atomic_write(path, &cleaned)
+            .with_context(|| format!("Failed to update {label}: {}", path.display()))?;
+    }
+    if verbose > 0 {
+        eprintln!("Removed RTK {label}: {}", path.display());
+    }
+    println!("RTK {label} removed: {}", path.display());
+    Ok(())
+}
+
 // ─── Kilo Code support ────────────────────────────────────────
 
 const KILOCODE_RULES: &str = include_str!("../../hooks/kilocode/rules.md");
 
 pub fn run_kilocode_mode(ctx: InitContext) -> Result<()> {
     run_kilocode_mode_at(&std::env::current_dir()?, ctx)
+}
+
+pub fn uninstall_kilocode_mode(ctx: InitContext) -> Result<()> {
+    let base_dir = std::env::current_dir()?;
+    uninstall_rules_file(
+        &base_dir.join(".kilocode/rules/rtk-rules.md"),
+        KILOCODE_RULES,
+        "Kilo Code rules",
+        ctx,
+    )
 }
 
 fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
@@ -1784,6 +1864,16 @@ const ANTIGRAVITY_RULES: &str = include_str!("../../hooks/antigravity/rules.md")
 
 pub fn run_antigravity_mode(ctx: InitContext) -> Result<()> {
     run_antigravity_mode_at(&std::env::current_dir()?, ctx)
+}
+
+pub fn uninstall_antigravity_mode(ctx: InitContext) -> Result<()> {
+    let base_dir = std::env::current_dir()?;
+    uninstall_rules_file(
+        &base_dir.join(".agents/rules/antigravity-rtk-rules.md"),
+        ANTIGRAVITY_RULES,
+        "Antigravity rules",
+        ctx,
+    )
 }
 
 fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
@@ -1935,6 +2025,11 @@ pub fn run_kimi_mode(ctx: InitContext) -> Result<()> {
     run_kimi_mode_at(&std::env::current_dir()?, ctx)
 }
 
+pub fn uninstall_kimi_mode(ctx: InitContext) -> Result<()> {
+    let agents_md_path = std::env::current_dir()?.join(AGENTS_MD);
+    uninstall_rtk_block_file(&agents_md_path, "Kimi instructions", ctx)
+}
+
 fn run_kimi_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
     // Kimi reads AGENTS.md from the project root (workspace-scoped).
     let agents_md_path = base_dir.join(AGENTS_MD);
@@ -1954,6 +2049,34 @@ fn run_kimi_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
         println!("  Test with: git status\n");
     }
 
+    Ok(())
+}
+
+fn uninstall_rtk_block_file(path: &Path, label: &str, ctx: InitContext) -> Result<()> {
+    if !path.exists() {
+        println!("RTK {label} were not installed (nothing to remove)");
+        return Ok(());
+    }
+
+    let existing =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let (cleaned, removed) = remove_rtk_block(&existing);
+    if !removed {
+        println!("RTK {label} were not installed (nothing to remove)");
+        return Ok(());
+    }
+    if ctx.dry_run {
+        println!("[dry-run] would remove RTK {label} from {}", path.display());
+        return Ok(());
+    }
+    if cleaned.trim().is_empty() {
+        // nosemgrep: filesystem-deletion -- removes the instructions file only when RTK's managed block was its only content.
+        fs::remove_file(path).with_context(|| format!("Failed to remove {}", path.display()))?;
+    } else {
+        atomic_write(path, &cleaned)
+            .with_context(|| format!("Failed to update {}", path.display()))?;
+    }
+    println!("RTK {label} removed: {}", path.display());
     Ok(())
 }
 
@@ -4175,6 +4298,18 @@ fn run_opencode_only_mode(ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
+pub fn uninstall_opencode_mode(ctx: InitContext) -> Result<()> {
+    let removed = remove_opencode_plugin(ctx)?;
+    if removed.is_empty() {
+        println!("RTK OpenCode plugin was not installed (nothing to remove)");
+    } else {
+        for path in removed {
+            println!("RTK OpenCode plugin removed: {}", path.display());
+        }
+    }
+    Ok(())
+}
+
 // ─── Gemini CLI support ───────────────────────────────────────────
 
 /// Gemini hook wrapper script — delegates to `rtk hook gemini`
@@ -5045,6 +5180,55 @@ mod tests {
         run_antigravity_mode_at(temp.path(), InitContext::default()).unwrap();
         let second = fs::read_to_string(&path).unwrap();
         assert_eq!(first, second, "Idempotent: content should not change");
+    }
+
+    #[test]
+    fn test_uninstall_rules_file_preserves_user_content() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(".clinerules");
+        fs::write(&path, format!("user rule\n\n{CLINE_RULES}")).unwrap();
+
+        uninstall_rules_file(&path, CLINE_RULES, "Cline rules", InitContext::default()).unwrap();
+
+        assert_eq!(fs::read_to_string(path).unwrap(), "user rule\n");
+    }
+
+    #[test]
+    fn test_uninstall_rules_file_dry_run_preserves_file() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("rtk-rules.md");
+        fs::write(&path, KILOCODE_RULES).unwrap();
+
+        uninstall_rules_file(
+            &path,
+            KILOCODE_RULES,
+            "Kilo Code rules",
+            InitContext {
+                verbose: 1,
+                dry_run: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(path).unwrap(), KILOCODE_RULES);
+    }
+
+    #[test]
+    fn test_uninstall_rtk_block_file_preserves_user_content() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(AGENTS_MD);
+        fs::write(
+            &path,
+            format!("# User rules\n\n{RTK_INSTRUCTIONS}\n\nKeep this\n"),
+        )
+        .unwrap();
+
+        uninstall_rtk_block_file(&path, "test instructions", InitContext::default()).unwrap();
+
+        let content = fs::read_to_string(path).unwrap();
+        assert!(content.contains("# User rules"));
+        assert!(content.contains("Keep this"));
+        assert!(!content.contains(RTK_BLOCK_START));
     }
 
     #[test]

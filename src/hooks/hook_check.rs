@@ -20,6 +20,34 @@ pub enum HookStatus {
     Missing,
 }
 
+/// Return true when any supported RTK integration is present for this user.
+///
+/// `rtk gain` must not report a missing Claude hook when the active agent uses
+/// a plugin or a different native hook integration.
+pub fn any_integration_installed() -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let paths = [
+        home.join(super::constants::CONFIG_DIR)
+            .join(super::constants::OPENCODE_SUBDIR)
+            .join(super::constants::PLUGIN_SUBDIR)
+            .join(super::constants::OPENCODE_PLUGIN_FILE),
+        home.join(super::constants::CURSOR_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(REWRITE_HOOK_FILE),
+        home.join(super::constants::CODEX_DIR).join("AGENTS.md"),
+        home.join(super::constants::GEMINI_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(super::constants::GEMINI_HOOK_FILE),
+        home.join(super::constants::HERMES_DIR)
+            .join(super::constants::HERMES_PLUGINS_SUBDIR)
+            .join(super::constants::HERMES_PLUGIN_NAME)
+            .join(super::constants::HERMES_PLUGIN_MANIFEST_FILE),
+    ];
+    paths.iter().any(|path| path.is_file())
+}
+
 /// Return the current hook status without printing anything.
 /// Returns `Ok` if no Claude Code is detected (not applicable).
 pub fn status() -> HookStatus {
@@ -45,7 +73,11 @@ pub fn status() -> HookStatus {
 
     // Fall back to legacy script file check
     let Some(hook_path) = hook_installed_path() else {
-        return HookStatus::Missing;
+        return if any_integration_installed() {
+            HookStatus::Ok
+        } else {
+            HookStatus::Missing
+        };
     };
     let Ok(content) = std::fs::read_to_string(&hook_path) else {
         return HookStatus::Outdated; // exists but unreadable — treat as needs-update

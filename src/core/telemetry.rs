@@ -372,6 +372,10 @@ fn detect_hook_type() -> String {
         }
     }
 
+    if crate::hooks::hook_check::any_integration_installed() {
+        return "plugin".to_string();
+    }
+
     // Check project-level hooks (Claude script + project-scoped Copilot config)
     if let Ok(cwd) = std::env::current_dir() {
         if cwd.join(".claude/hooks/rtk-rewrite.sh").exists() {
@@ -578,7 +582,7 @@ mod tests {
         assert!(stats.low_savings_commands.len() <= 5);
         assert!((0.0..=100.0).contains(&stats.avg_savings_per_command));
         assert!(
-            ["claude", "gemini", "codex", "cursor", "copilot", "none", "unknown"]
+            ["claude", "gemini", "codex", "cursor", "copilot", "plugin", "none", "unknown"]
                 .iter()
                 .any(|&h| stats.hook_type.starts_with(h)),
             "Unexpected hook type: {}",
@@ -590,7 +594,7 @@ mod tests {
     fn test_detect_hook_type_returns_known() {
         let ht = detect_hook_type();
         assert!(
-            ["claude", "gemini", "codex", "cursor", "copilot", "none", "unknown"]
+            ["claude", "gemini", "codex", "cursor", "copilot", "plugin", "none", "unknown"]
                 .contains(&ht.as_str()),
             "Unexpected hook type: {}",
             ht

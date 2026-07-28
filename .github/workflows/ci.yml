@@ -64,6 +64,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all
 
+  windows-native:
+    name: native Windows smoke tests
+    needs: clippy
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and smoke-test native command paths
+        shell: pwsh
+        run: |
+          cargo build
+          $env:RTK_DEBUG = "1"
+          cargo run -- --version
+          cargo run -- rewrite dir
+          cargo test service::mcp -- --nocapture
+          cargo test --all
+
   security:
     name: Security Scan
     needs: clippy

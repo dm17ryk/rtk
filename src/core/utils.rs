@@ -327,6 +327,69 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
     which::which(name).context(format!("Binary '{}' not found on PATH", name))
 }
 
+/// How a command name can be resolved by the current host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostCommand {
+    Executable(PathBuf),
+    PowerShellAlias(&'static str),
+    PowerShellBuiltin(&'static str),
+    Missing,
+}
+
+/// Resolve a command as a native executable or a known PowerShell command.
+///
+/// PowerShell aliases are reported separately because they cannot be passed to
+/// `std::process::Command::new`; callers must use a native implementation or
+/// an explicit PowerShell invocation when they need to execute one.
+pub fn resolve_host_command(name: &str) -> HostCommand {
+    if let Ok(path) = which::which(name) {
+        if crate::service::debug_enabled() {
+            eprintln!(
+                "[rtk-debug] resolver command={} decision=executable path={}",
+                name,
+                path.display()
+            );
+        }
+        return HostCommand::Executable(path);
+    }
+
+    #[cfg(windows)]
+    {
+        let alias = match name.to_ascii_lowercase().as_str() {
+            "ls" | "dir" => Some("Get-ChildItem"),
+            "echo" => Some("Write-Output"),
+            "pwd" => Some("Get-Location"),
+            _ => None,
+        };
+        if let Some(alias) = alias {
+            if crate::service::debug_enabled() {
+                eprintln!(
+                    "[rtk-debug] resolver command={} decision=powershell_alias target={}",
+                    name, alias
+                );
+            }
+            return HostCommand::PowerShellAlias(alias);
+        }
+
+        let builtin = match name.to_ascii_lowercase().as_str() {
+            "cd" => Some("Set-Location"),
+            "set" => Some("Set-Variable"),
+            _ => None,
+        };
+        if let Some(builtin) = builtin {
+            return HostCommand::PowerShellBuiltin(builtin);
+        }
+    }
+
+    if crate::service::debug_enabled() {
+        eprintln!(
+            "[rtk-debug] resolver command={} decision=missing fallback=direct_exec",
+            name
+        );
+    }
+    HostCommand::Missing
+}
+
 /// Create a `Command` with PATHEXT-aware binary resolution.
 ///
 /// Drop-in replacement for `Command::new(name)` that works on Windows
@@ -419,7 +482,7 @@ fn read_composer_bin_dir(composer_json: &str) -> Option<PathBuf> {
 ///
 /// Replaces manual `Command::new("which").arg(tool)` checks that fail on Windows.
 pub fn tool_exists(name: &str) -> bool {
-    which::which(name).is_ok()
+    !matches!(resolve_host_command(name), HostCommand::Missing)
 }
 
 /// Extract short name from AWS ARN.
@@ -493,6 +556,32 @@ mod tests {
         assert_eq!(
             composer_bin_dirs_from(None, None),
             vec![PathBuf::from("vendor/bin")]
+        );
+    }
+
+    #[test]
+    fn resolve_host_command_distinguishes_missing_commands() {
+        assert!(matches!(
+            resolve_host_command("__rtk_command_that_does_not_exist__"),
+            HostCommand::Missing
+        ));
+    }
+
+    #[test]
+    fn resolve_host_command_finds_a_known_executable() {
+        let command = if cfg!(windows) { "cmd" } else { "sh" };
+        assert!(matches!(
+            resolve_host_command(command),
+            HostCommand::Executable(_)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_host_command_recognizes_powershell_aliases() {
+        assert_eq!(
+            resolve_host_command("dir"),
+            HostCommand::PowerShellAlias("Get-ChildItem")
         );
     }
 
