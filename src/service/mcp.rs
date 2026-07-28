@@ -4,6 +4,7 @@ use super::{
     debug_enabled, redact_sensitive, rewrite, run_filtered, DEFAULT_MAX_OUTPUT_BYTES,
     DEFAULT_TIMEOUT_MS,
 };
+use crate::core::config::Config;
 use crate::core::tracking::Tracker;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -100,15 +101,15 @@ fn tool_definitions() -> Vec<Value> {
             "name": "gain_summary",
             "description": "Return RTK token savings statistics.",
             "inputSchema": { "type": "object", "properties": {
-                "project": { "type": "boolean" }
+                "project": { "type": "boolean" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 500 }
             }}
         }),
         json!({
             "name": "discover_unhandled",
-            "description": "Find commands from session history that RTK did not rewrite.",
+            "description": "Find RTK rewrite candidates in Claude pre-hook transcripts. Candidate counts are not confirmed misses; use gain_summary for executed RTK usage.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string" },
-                "all": { "type": "boolean" },
                 "since_days": { "type": "integer", "minimum": 1, "maximum": 3650 },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 500 }
             }}
@@ -215,13 +216,15 @@ fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 .get("project")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            let limit = bounded_usize(args, "limit", 10, 1, 500)?;
             let tracker = Tracker::new().context("Failed to initialize tracking database")?;
             let project_path = crate::core::tracking::current_project_path_string();
-            let summary = tracker.get_summary_filtered(if project {
+            let mut summary = tracker.get_summary_filtered(if project {
                 Some(project_path.as_str())
             } else {
                 None
             })?;
+            summary.by_command.truncate(limit);
             Ok(json!({
                 "total_commands": summary.total_commands,
                 "total_input": summary.total_input,
@@ -235,23 +238,7 @@ fn call_tool(name: &str, args: &Value) -> Result<Value> {
             }))
         }
         "discover_unhandled" => {
-            let mut command = vec!["discover".to_string()];
-            if let Some(project) = args.get("project").and_then(Value::as_str) {
-                command.extend(["--project".to_string(), project.to_string()]);
-            }
-            if args.get("all").and_then(Value::as_bool).unwrap_or(false) {
-                command.push("--all".to_string());
-            }
-            if let Some(days) = args.get("since_days").and_then(Value::as_u64) {
-                command.extend(["--since".to_string(), days.to_string()]);
-            }
-            let limit = bounded_usize(args, "limit", DEFAULT_LIST_LIMIT, 1, 500)?;
-            command.extend([
-                "--limit".to_string(),
-                limit.to_string(),
-                "--format".to_string(),
-                "json".to_string(),
-            ]);
+            let command = discover_command(args)?;
             let result = run_filtered(
                 &command,
                 None,
@@ -259,18 +246,26 @@ fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 DEFAULT_MAX_OUTPUT_BYTES,
                 true,
             )?;
-            Ok(json!({
-                "exit_code": result.exit_code,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "rewritten_command": result.rewritten_command,
-                "filtered": result.filtered,
-                "tee_path": result.tee_path,
-                "input_tokens": result.input_tokens,
-                "output_tokens": result.output_tokens,
-                "saved_tokens": result.saved_tokens,
-                "truncated": result.truncated
-            }))
+            if result.exit_code != 0 {
+                anyhow::bail!(
+                    "discover execution failed with exit code {}: {}",
+                    result.exit_code,
+                    result.stderr
+                );
+            }
+            let mut report: Value = serde_json::from_str(&result.stdout)
+                .context("discover returned invalid structured JSON")?;
+            if let Some(object) = report.as_object_mut() {
+                object.insert(
+                    "execution".to_string(),
+                    json!({
+                        "exit_code": result.exit_code,
+                        "truncated": result.truncated,
+                        "tee_path": result.tee_path
+                    }),
+                );
+            }
+            Ok(report)
         }
         "list_tee_artifacts" => {
             let limit = bounded_usize(args, "limit", DEFAULT_LIST_LIMIT, 1, 500)?;
@@ -295,10 +290,67 @@ fn call_tool(name: &str, args: &Value) -> Result<Value> {
     }
 }
 
+fn discover_command(args: &Value) -> Result<Vec<String>> {
+    let mut command = vec!["discover".to_string()];
+    match args.get("project") {
+        Some(Value::String(project)) if !project.trim().is_empty() => {
+            command.extend(["--project".to_string(), project.to_string()]);
+            if debug_enabled() {
+                eprintln!("[rtk-debug] mcp.discover scope=project");
+            }
+        }
+        Some(Value::Null) | None => {
+            // A global stdio MCP server usually inherits the AI client's launch
+            // directory, not the active project. Defaulting to all projects
+            // keeps since_days meaningful and matches the tool's global role.
+            command.push("--all".to_string());
+            if debug_enabled() {
+                eprintln!("[rtk-debug] mcp.discover scope=all-projects");
+            }
+        }
+        Some(Value::String(_)) => anyhow::bail!("project must be a non-empty string"),
+        Some(_) => anyhow::bail!("project must be a string"),
+    }
+    if let Some(days) = args.get("since_days") {
+        let days = days.as_u64().context("since_days must be an integer")?;
+        if !(1..=3650).contains(&days) {
+            anyhow::bail!("since_days must be between 1 and 3650");
+        }
+        command.extend(["--since".to_string(), days.to_string()]);
+    }
+    let limit = bounded_usize(args, "limit", DEFAULT_LIST_LIMIT, 1, 500)?;
+    command.extend([
+        "--limit".to_string(),
+        limit.to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+    ]);
+    Ok(command)
+}
+
 fn list_tee_artifacts(limit: usize) -> Result<Vec<Value>> {
     let dir = tee_dir()?;
-    let mut entries = fs::read_dir(&dir)
-        .with_context(|| format!("Failed to read tee directory: {}", dir.display()))?
+    list_tee_artifacts_in(&dir, limit)
+}
+
+fn list_tee_artifacts_in(dir: &Path, limit: usize) -> Result<Vec<Value>> {
+    let read_dir = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if debug_enabled() {
+                eprintln!(
+                    "[rtk-debug] mcp.tee.list decision=empty-directory path={}",
+                    redact_sensitive(&dir.to_string_lossy())
+                );
+            }
+            return Ok(Vec::new());
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Failed to read tee directory: {}", dir.display()));
+        }
+    };
+    let mut entries = read_dir
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "log"))
         .collect::<Vec<_>>();
@@ -330,12 +382,16 @@ fn read_tee_file(path: &Path, max_bytes: usize) -> Result<String> {
 }
 
 fn tee_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var("RTK_TEE_DIR") {
-        return Ok(PathBuf::from(dir));
+    let config = Config::load().context("Failed to load RTK configuration for tee access")?;
+    let dir =
+        crate::core::tee::get_tee_dir(&config).context("Unable to resolve RTK tee directory")?;
+    if debug_enabled() {
+        eprintln!(
+            "[rtk-debug] mcp.tee.resolve decision=env-config-default path={}",
+            redact_sensitive(&dir.to_string_lossy())
+        );
     }
-    dirs::data_local_dir()
-        .map(|dir| dir.join(crate::core::constants::RTK_DATA_DIR).join("tee"))
-        .context("Unable to resolve RTK tee directory")
+    Ok(dir)
 }
 
 fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
@@ -431,6 +487,14 @@ mod tests {
         .expect("tools/list response");
         let tools = response["result"]["tools"].as_array().expect("tools array");
         assert!(tools.iter().any(|tool| tool["name"] == "run_filtered"));
+        let gain = tools
+            .iter()
+            .find(|tool| tool["name"] == "gain_summary")
+            .expect("gain_summary tool");
+        assert_eq!(
+            gain["inputSchema"]["properties"]["limit"]["maximum"],
+            json!(500)
+        );
     }
 
     #[test]
@@ -456,5 +520,33 @@ mod tests {
         let value = call_tool("rewrite_command", &json!({ "command": "git status" }))
             .expect("rewrite tool");
         assert!(value.get("matched").is_some());
+    }
+
+    #[test]
+    fn missing_tee_directory_is_an_empty_artifact_list() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing = temp.path().join("not-created");
+        assert_eq!(
+            list_tee_artifacts_in(&missing, DEFAULT_LIST_LIMIT).expect("empty list"),
+            Vec::<Value>::new()
+        );
+    }
+
+    #[test]
+    fn discover_defaults_to_all_projects_and_honors_bounds() {
+        let command = discover_command(&json!({ "since_days": 3, "limit": 7 })).expect("command");
+        assert_eq!(
+            command,
+            ["discover", "--all", "--since", "3", "--limit", "7", "--format", "json"]
+        );
+    }
+
+    #[test]
+    fn discover_project_scope_does_not_add_all() {
+        let command = discover_command(&json!({ "project": "D:-work-project" })).expect("command");
+        assert!(command
+            .windows(2)
+            .any(|pair| pair == ["--project", "D:-work-project"]));
+        assert!(!command.iter().any(|arg| arg == "--all"));
     }
 }

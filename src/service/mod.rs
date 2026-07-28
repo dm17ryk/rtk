@@ -5,6 +5,7 @@ pub mod mcp;
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Serialize;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::LazyLock;
@@ -41,9 +42,14 @@ pub struct RunResult {
     pub rewritten_command: Option<String>,
     pub filtered: bool,
     pub tee_path: Option<String>,
-    pub input_tokens: usize,
-    pub output_tokens: usize,
-    pub saved_tokens: usize,
+    /// Per-run savings require the raw producer stream, which is intentionally
+    /// not exposed by the child command path.
+    pub metrics_available: bool,
+    /// Savings are unavailable because the child RTK process exposes only its
+    /// filtered streams; the raw-output baseline stays inside that process.
+    pub input_tokens: Option<usize>,
+    pub output_tokens: Option<usize>,
+    pub saved_tokens: Option<usize>,
 }
 
 /// Rewrite a shell command using the same configuration as the hooks.
@@ -129,15 +135,13 @@ pub fn run_filtered(
     }
 
     let child = command.spawn().context("Failed to spawn RTK command")?;
-    let output = wait_with_timeout(child, timeout)?;
+    let output = wait_with_timeout(child, timeout, max_output_bytes)?;
     let (stdout, stdout_truncated) = bounded_text(&output.stdout, max_output_bytes);
     let (stderr, stderr_truncated) = bounded_text(&output.stderr, max_output_bytes);
     let stdout = redact_sensitive(&stdout);
     let stderr = redact_sensitive(&stderr);
     let raw_command = rtk_args.join(" ");
     let rewritten = rewrite(&raw_command);
-    let input_tokens = crate::core::tracking::estimate_tokens(&raw_command);
-    let output_tokens = crate::core::tracking::estimate_tokens(&stdout);
     let tee_path = stdout
         .lines()
         .chain(stderr.lines())
@@ -158,9 +162,13 @@ pub fn run_filtered(
             .map(|command| redact_sensitive(&command)),
         filtered: rewritten.matched,
         tee_path,
-        input_tokens,
-        output_tokens,
-        saved_tokens: input_tokens.saturating_sub(output_tokens),
+        metrics_available: false,
+        // The raw producer output is intentionally not reconstructed from the
+        // argv string. RTK's tracking database remains the authoritative source
+        // for savings; returning None avoids misleading per-call metrics.
+        input_tokens: None,
+        output_tokens: None,
+        saved_tokens: None,
     })
 }
 
@@ -188,14 +196,10 @@ fn bounded_text(bytes: &[u8], max_bytes: usize) -> (String, bool) {
     if bytes.len() <= limit {
         return (String::from_utf8_lossy(bytes).into_owned(), false);
     }
-    let mut end = limit;
-    while end > 0 && std::str::from_utf8(&bytes[..end]).is_err() {
-        end -= 1;
-    }
     (
         format!(
             "{}\n[RTK:TRUNCATED] output exceeded {} bytes",
-            String::from_utf8_lossy(&bytes[..end]),
+            String::from_utf8_lossy(&bytes[..limit]),
             limit
         ),
         true,
@@ -205,30 +209,21 @@ fn bounded_text(bytes: &[u8], max_bytes: usize) -> (String, bool) {
 fn wait_with_timeout(
     mut child: std::process::Child,
     timeout: Duration,
+    max_output_bytes: usize,
 ) -> Result<std::process::Output> {
+    let stdout_reader = child
+        .stdout
+        .take()
+        .map(|reader| std::thread::spawn(move || drain_bounded(reader, max_output_bytes)));
+    let stderr_reader = child
+        .stderr
+        .take()
+        .map(|reader| std::thread::spawn(move || drain_bounded(reader, max_output_bytes)));
     let start = std::time::Instant::now();
     loop {
         if let Some(status) = child.try_wait().context("Failed waiting for RTK command")? {
-            let stdout = child
-                .stdout
-                .take()
-                .map(|mut reader| {
-                    let mut bytes = Vec::new();
-                    std::io::Read::read_to_end(&mut reader, &mut bytes).map(|_| bytes)
-                })
-                .transpose()
-                .context("Failed reading RTK stdout")?
-                .unwrap_or_default();
-            let stderr = child
-                .stderr
-                .take()
-                .map(|mut reader| {
-                    let mut bytes = Vec::new();
-                    std::io::Read::read_to_end(&mut reader, &mut bytes).map(|_| bytes)
-                })
-                .transpose()
-                .context("Failed reading RTK stderr")?
-                .unwrap_or_default();
+            let stdout = join_pipe_reader(stdout_reader, "stdout")?;
+            let stderr = join_pipe_reader(stderr_reader, "stderr")?;
             return Ok(std::process::Output {
                 status,
                 stdout,
@@ -236,12 +231,52 @@ fn wait_with_timeout(
             });
         }
         if start.elapsed() >= timeout {
+            if debug_enabled() {
+                eprintln!(
+                    "[rtk-debug] service.run_filtered decision=timeout elapsed_ms={}",
+                    start.elapsed().as_millis()
+                );
+            }
             let _ = child.kill();
             let _ = child.wait();
+            // Killing closes the child-side handles, so both drain threads can
+            // finish before the timeout error crosses the integration boundary.
+            let _ = join_pipe_reader(stdout_reader, "stdout");
+            let _ = join_pipe_reader(stderr_reader, "stderr");
             anyhow::bail!("RTK command timed out after {} ms", timeout.as_millis());
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn drain_bounded<R: Read>(mut reader: R, max_output_bytes: usize) -> std::io::Result<Vec<u8>> {
+    let retain_limit = max_output_bytes.max(1).saturating_add(1);
+    let mut retained = Vec::with_capacity(retain_limit.min(64 * 1024));
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        if retained.len() < retain_limit {
+            let keep = (retain_limit - retained.len()).min(read);
+            retained.extend_from_slice(&buffer[..keep]);
+        }
+    }
+    Ok(retained)
+}
+
+fn join_pipe_reader(
+    reader: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+    stream: &str,
+) -> Result<Vec<u8>> {
+    let Some(reader) = reader else {
+        return Ok(Vec::new());
+    };
+    reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("RTK {stream} reader thread panicked"))?
+        .with_context(|| format!("Failed reading RTK {stream}"))
 }
 
 pub fn debug_enabled() -> bool {
@@ -273,6 +308,53 @@ mod tests {
         let (text, truncated) = bounded_text(b"abcdef", 3);
         assert!(truncated);
         assert!(text.contains("[RTK:TRUNCATED]"));
+    }
+
+    #[test]
+    fn bounded_text_preserves_content_after_invalid_utf8() {
+        let (text, truncated) = bounded_text(b"ab\xffcd-tail", 5);
+        assert!(truncated);
+        assert!(text.starts_with("ab\u{fffd}cd"));
+    }
+
+    #[test]
+    fn bounded_pipe_drain_keeps_prefix_and_consumes_remainder() {
+        let input = vec![b'x'; 256 * 1024];
+        let retained = drain_bounded(input.as_slice(), 1024).expect("drain");
+        assert_eq!(retained.len(), 1025);
+        assert!(retained.iter().all(|byte| *byte == b'x'));
+    }
+
+    #[test]
+    fn wait_with_timeout_drains_large_child_output_while_running() {
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = std::process::Command::new("powershell.exe");
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Console]::Out.Write('x' * 262144)",
+            ]);
+            command
+        };
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "head -c 262144 /dev/zero | tr '\\0' x"]);
+            command
+        };
+
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let child = command.spawn().expect("spawn large-output child");
+        let output = wait_with_timeout(child, Duration::from_secs(10), 1024)
+            .expect("large-output child must not deadlock on a full pipe");
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 1025);
+        assert!(output.stdout.iter().all(|byte| *byte == b'x'));
     }
 
     #[test]

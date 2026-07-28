@@ -69,6 +69,7 @@ const CLAUDE_MD: &str = "CLAUDE.md";
 const AGENTS_MD: &str = "AGENTS.md";
 const RTK_MD_REF: &str = "@RTK.md";
 const GEMINI_MD: &str = "GEMINI.md";
+const CLAUDE_RTK_PERMISSION: &str = "Bash(rtk *)";
 
 const RTK_BLOCK_START: &str = "<!-- rtk-instructions";
 const RTK_BLOCK_END: &str = "<!-- /rtk-instructions -->";
@@ -539,6 +540,11 @@ fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
     println!("        \"command\": \"{}\"", hook_command);
     println!("      }}]");
     println!("    }}]}}");
+    println!("  }},");
+    println!(
+        "    \"permissions\": {{ \"allow\": [\"{}\"] }}",
+        CLAUDE_RTK_PERMISSION
+    );
     println!("  }}");
     if include_opencode {
         println!("\n  Then restart Claude Code and OpenCode. Test with: git status\n");
@@ -579,6 +585,89 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
     pre_tool_use_array.len() < original_len
 }
 
+fn rtk_permission_present(root: &serde_json::Value) -> bool {
+    root.get("permissions")
+        .and_then(|permissions| permissions.get("allow"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|allow| {
+            allow
+                .iter()
+                .any(|entry| entry.as_str() == Some(CLAUDE_RTK_PERMISSION))
+        })
+}
+
+fn ensure_rtk_permission(root: &mut serde_json::Value) -> Result<bool> {
+    let root_obj = match root.as_object_mut() {
+        Some(obj) => obj,
+        None => {
+            *root = serde_json::json!({});
+            root.as_object_mut().expect("just-created json object")
+        }
+    };
+    let permissions = root_obj
+        .entry("permissions")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("permissions value is not an object")?;
+    let allow = permissions
+        .entry("allow")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("permissions.allow value is not an array")?;
+
+    if allow
+        .iter()
+        .any(|entry| entry.as_str() == Some(CLAUDE_RTK_PERMISSION))
+    {
+        if crate::service::debug_enabled() {
+            eprintln!("[rtk-debug] claude_permission decision=already_present");
+        }
+        return Ok(false);
+    }
+
+    allow.push(serde_json::Value::String(CLAUDE_RTK_PERMISSION.to_string()));
+    if crate::service::debug_enabled() {
+        eprintln!("[rtk-debug] claude_permission decision=added");
+    }
+    Ok(true)
+}
+
+fn remove_rtk_permission(root: &mut serde_json::Value) -> bool {
+    let Some(root_obj) = root.as_object_mut() else {
+        return false;
+    };
+    let Some(permissions) = root_obj
+        .get_mut("permissions")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return false;
+    };
+    let Some(allow) = permissions
+        .get_mut("allow")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+
+    let original_len = allow.len();
+    allow.retain(|entry| entry.as_str() != Some(CLAUDE_RTK_PERMISSION));
+    let removed = allow.len() != original_len;
+    if !removed {
+        return false;
+    }
+
+    if allow.is_empty() {
+        permissions.remove("allow");
+    }
+    if permissions.is_empty() {
+        root_obj.remove("permissions");
+    }
+    if crate::service::debug_enabled() {
+        eprintln!("[rtk-debug] claude_permission decision=removed");
+    }
+    true
+}
+
 /// Remove RTK hook from settings.json file
 /// Backs up before modification, returns true if hook was found and removed
 fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
@@ -603,12 +692,20 @@ fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
     let mut root: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| format!("Failed to parse {} as JSON", settings_path.display()))?;
 
-    let removed = remove_hook_from_json(&mut root);
+    let hook_removed = remove_hook_from_json(&mut root);
+    let permission_removed = remove_rtk_permission(&mut root);
+    let removed = hook_removed || permission_removed;
+    if crate::service::debug_enabled() {
+        eprintln!(
+            "[rtk-debug] claude_uninstall hook_removed={} permission_removed={}",
+            hook_removed, permission_removed
+        );
+    }
 
     if removed {
         if dry_run {
             println!(
-                "[dry-run] would remove RTK hook entry from {}",
+                "[dry-run] would remove RTK hook and permission entries from {}",
                 settings_path.display()
             );
             if verbose > 0 {
@@ -630,7 +727,7 @@ fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
         atomic_write(&settings_path, &serialized)?;
 
         if verbose > 0 {
-            eprintln!("Removed RTK hook from settings.json");
+            eprintln!("Removed RTK hook and permission from settings.json");
         }
     }
 
@@ -985,10 +1082,18 @@ fn patch_settings_json_command(
         serde_json::json!({})
     };
 
-    // Check idempotency
-    if hook_already_present(&root, hook_command) {
+    // Check hook and permission independently so rerunning init repairs partial installs.
+    let hook_present = hook_already_present(&root, hook_command);
+    let permission_present = rtk_permission_present(&root);
+    if crate::service::debug_enabled() {
+        eprintln!(
+            "[rtk-debug] claude_init hook_present={} permission_present={}",
+            hook_present, permission_present
+        );
+    }
+    if hook_present && permission_present {
         if verbose > 0 {
-            eprintln!("settings.json: hook already present");
+            eprintln!("settings.json: hook and permission already present");
         }
         return Ok(PatchResult::AlreadyPresent);
     }
@@ -1016,7 +1121,15 @@ fn patch_settings_json_command(
         }
     }
 
-    insert_hook_entry(&mut root, hook_command)?;
+    if !hook_present {
+        insert_hook_entry(&mut root, hook_command)?;
+        if crate::service::debug_enabled() {
+            eprintln!("[rtk-debug] claude_init hook decision=added");
+        }
+    } else if crate::service::debug_enabled() {
+        eprintln!("[rtk-debug] claude_init hook decision=preserved");
+    }
+    ensure_rtk_permission(&mut root)?;
 
     let serialized =
         serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
@@ -1045,7 +1158,7 @@ fn patch_settings_json_command(
     // Atomic write
     atomic_write(&settings_path, &serialized)?;
 
-    println!("\n  settings.json: hook added");
+    println!("\n  settings.json: hook and RTK permission configured");
     if settings_path.with_extension("json.bak").exists() {
         println!(
             "  Backup: {}",
@@ -6506,6 +6619,59 @@ mod tests {
         assert!(json_content.get("hooks").is_some());
     }
 
+    #[test]
+    fn test_ensure_rtk_permission_preserves_existing_rules() {
+        let mut json_content = serde_json::json!({
+            "permissions": {
+                "allow": ["Bash(git status)", "Read(*)"],
+                "deny": ["Bash(rm *)"]
+            }
+        });
+
+        assert!(ensure_rtk_permission(&mut json_content).unwrap());
+        assert!(rtk_permission_present(&json_content));
+        assert_eq!(
+            json_content["permissions"]["allow"],
+            serde_json::json!(["Bash(git status)", "Read(*)", CLAUDE_RTK_PERMISSION])
+        );
+        assert_eq!(
+            json_content["permissions"]["deny"],
+            serde_json::json!(["Bash(rm *)"])
+        );
+
+        assert!(!ensure_rtk_permission(&mut json_content).unwrap());
+        assert_eq!(
+            json_content["permissions"]["allow"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry.as_str() == Some(CLAUDE_RTK_PERMISSION))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_remove_rtk_permission_preserves_unrelated_permissions() {
+        let mut json_content = serde_json::json!({
+            "permissions": {
+                "allow": ["Bash(git status)", CLAUDE_RTK_PERMISSION],
+                "deny": ["Bash(rm *)"]
+            }
+        });
+
+        assert!(remove_rtk_permission(&mut json_content));
+        assert_eq!(
+            json_content["permissions"]["allow"],
+            serde_json::json!(["Bash(git status)"])
+        );
+        assert_eq!(
+            json_content["permissions"]["deny"],
+            serde_json::json!(["Bash(rm *)"])
+        );
+        assert!(!remove_rtk_permission(&mut json_content));
+    }
+
     // Tests for atomic_write()
     #[test]
     fn test_atomic_write() {
@@ -7058,6 +7224,10 @@ mod tests {
                 content.contains(CLAUDE_HOOK_COMMAND),
                 "settings.json must contain hook command"
             );
+            assert!(
+                content.contains(CLAUDE_RTK_PERMISSION),
+                "settings.json must allow commands rewritten to RTK"
+            );
         });
     }
 
@@ -7075,6 +7245,10 @@ mod tests {
                 !settings_content.contains(CLAUDE_HOOK_COMMAND),
                 "hook entry must be removed from settings.json"
             );
+            assert!(
+                !settings_content.contains(CLAUDE_RTK_PERMISSION),
+                "RTK permission must be removed from settings.json"
+            );
         });
     }
 
@@ -7088,6 +7262,42 @@ mod tests {
             let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
             let count = settings.matches(CLAUDE_HOOK_COMMAND).count();
             assert_eq!(count, 1, "hook command must appear exactly once");
+            let permission_count = settings.matches(CLAUDE_RTK_PERMISSION).count();
+            assert_eq!(
+                permission_count, 1,
+                "RTK permission must appear exactly once"
+            );
+        });
+    }
+
+    #[test]
+    fn test_global_default_mode_repairs_missing_permission() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            fs::write(
+                claude_dir.join(SETTINGS_JSON),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "hooks": {
+                        "PreToolUse": [{
+                            "matcher": "Bash",
+                            "hooks": [{
+                                "type": "command",
+                                "command": CLAUDE_HOOK_COMMAND
+                            }]
+                        }]
+                    },
+                    "permissions": {"allow": ["Bash(git status)"]}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+
+            let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
+            assert_eq!(settings.matches(CLAUDE_HOOK_COMMAND).count(), 1);
+            assert_eq!(settings.matches(CLAUDE_RTK_PERMISSION).count(), 1);
+            assert!(settings.contains("Bash(git status)"));
         });
     }
 

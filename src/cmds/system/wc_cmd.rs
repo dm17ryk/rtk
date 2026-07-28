@@ -182,37 +182,49 @@ fn detect_mode(args: &[String]) -> WcMode {
         return WcMode::Full;
     }
 
-    // Collect all single-char flags (handles combined flags like -lw)
+    // Match long options as complete tokens. Scanning the letters in
+    // `--bytes`/`--chars` would classify those names as unrelated short flags.
     let mut has_l = false;
     let mut has_w = false;
     let mut has_c = false;
     let mut has_m = false;
-    let mut flag_count = 0;
 
     for flag in &flags {
+        match *flag {
+            "--lines" => {
+                has_l = true;
+                continue;
+            }
+            "--words" => {
+                has_w = true;
+                continue;
+            }
+            "--bytes" => {
+                has_c = true;
+                continue;
+            }
+            "--chars" => {
+                has_m = true;
+                continue;
+            }
+            _ if flag.starts_with("--") => continue,
+            _ => {}
+        }
         for ch in flag.chars().skip(1) {
             match ch {
-                'l' => {
-                    has_l = true;
-                    flag_count += 1;
-                }
-                'w' => {
-                    has_w = true;
-                    flag_count += 1;
-                }
-                'c' => {
-                    has_c = true;
-                    flag_count += 1;
-                }
-                'm' => {
-                    has_m = true;
-                    flag_count += 1;
-                }
+                'l' => has_l = true,
+                'w' => has_w = true,
+                'c' => has_c = true,
+                'm' => has_m = true,
                 _ => {}
             }
         }
     }
 
+    let flag_count = [has_l, has_w, has_c, has_m]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
     if flag_count == 0 {
         return WcMode::Full;
     }
@@ -473,6 +485,14 @@ mod tests {
     fn test_detect_mode_separate_flags() {
         let args: Vec<String> = vec!["-l".into(), "-w".into(), "file.py".into()];
         assert_eq!(detect_mode(&args), WcMode::Mixed);
+    }
+
+    #[test]
+    fn test_detect_mode_long_names() {
+        assert_eq!(detect_mode(&["--bytes".into()]), WcMode::Bytes);
+        assert_eq!(detect_mode(&["--chars".into()]), WcMode::Chars);
+        assert_eq!(detect_mode(&["--lines".into()]), WcMode::Lines);
+        assert_eq!(detect_mode(&["--words".into()]), WcMode::Words);
     }
 
     #[test]

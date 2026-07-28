@@ -155,13 +155,7 @@ fn windows_ls_args_supported(args: &[String]) -> bool {
 
 #[cfg(windows)]
 fn run_windows_native(args: &[String], verbose: u8) -> Result<i32> {
-    let show_all = args.iter().any(|arg| {
-        arg == "--all"
-            || arg == "-a"
-            || (!arg.starts_with("--")
-                && arg.starts_with('-')
-                && arg[1..].contains('a'))
-    });
+    let show_all = windows_ls_show_all(args);
     let show_long = args.iter().any(|arg| {
         arg == "-l"
             || (!arg.starts_with("--")
@@ -207,11 +201,9 @@ fn run_windows_native(args: &[String], verbose: u8) -> Result<i32> {
             })
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| left.0.to_lowercase().cmp(&right.0.to_lowercase()));
-        output.extend(
-            entries
-                .into_iter()
-                .map(|(name, size, is_dir)| format_windows_entry(Path::new(&name), size, is_dir, show_long)),
-        );
+        output.extend(entries.into_iter().map(|(name, size, is_dir)| {
+            format_windows_entry(Path::new(&name), size, is_dir, show_long)
+        }));
     }
 
     let rendered = output.join("\n");
@@ -231,6 +223,19 @@ fn run_windows_native(args: &[String], verbose: u8) -> Result<i32> {
         &rendered,
     );
     Ok(0)
+}
+
+#[cfg(windows)]
+fn windows_ls_show_all(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "--all"
+            || arg == "--almost-all"
+            || arg == "-a"
+            || arg == "-A"
+            || (!arg.starts_with("--")
+                && arg.starts_with('-')
+                && arg[1..].chars().any(|flag| matches!(flag, 'a' | 'A')))
+    })
 }
 
 #[cfg(windows)]
@@ -478,6 +483,15 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_almost_all_flags_show_dot_entries() {
+        for flag in ["-A", "--almost-all", "-lA", "-Al"] {
+            assert!(windows_ls_show_all(&[flag.to_string()]), "{flag}");
+        }
+        assert!(!windows_ls_show_all(&["-l".to_string()]));
+    }
 
     #[test]
     fn test_compact_basic() {

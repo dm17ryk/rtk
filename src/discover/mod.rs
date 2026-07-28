@@ -254,6 +254,8 @@ pub fn run(
     };
 
     let report = DiscoverReport {
+        command_source: "claude_pre_hook_transcript",
+        hook_rewrites_visible: false,
         sessions_scanned: sessions.len(),
         total_commands,
         already_rtk,
@@ -267,7 +269,7 @@ pub fn run(
     };
 
     match format {
-        "json" => println!("{}", report::format_json(&report)),
+        "json" => println!("{}", report::format_json(&report, limit)),
         _ => print!("{}", report::format_text(&report, limit, verbose > 0)),
     }
 
