@@ -1,9 +1,9 @@
 //! Matches shell commands against known RTK rewrite rules to decide how to handle them.
 
 use crate::core::utils::composer_bin_dirs;
-use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 use std::path::Path;
+use std::sync::LazyLock;
 
 use super::lexer::{shell_split, split_on_operators, tokenize, ParsedToken, PipeKind, TokenKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
@@ -48,36 +48,42 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
     }
 }
 
-lazy_static! {
-    static ref REGEX_SET: RegexSet =
-        RegexSet::new(RULES.iter().map(|r| r.pattern)).expect("invalid regex patterns");
-    static ref COMPILED: Vec<Regex> = RULES
+static REGEX_SET: LazyLock<RegexSet> = LazyLock::new(|| {
+    RegexSet::new(RULES.iter().map(|r| r.pattern)).expect("invalid regex patterns")
+});
+static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    RULES
         .iter()
         .map(|r| Regex::new(r.pattern).expect("invalid regex"))
-        .collect();
-    static ref ENV_PREFIX: Regex = {
-        let double_quoted = r#""(?:[^"\\]|\\.)*""#;
-        let single_quoted = r#"'(?:[^'\\]|\\.)*'"#;
-        let unquoted = r#"[^\s]*"#;
-        let env_value = format!("(?:{}|{}|{})", double_quoted, single_quoted, unquoted);
-        let env_assign = format!(r#"[A-Z_][A-Z0-9_]*={}"#, env_value);
-        Regex::new(&format!(r#"^(?:sudo\s+|env\s+|{}\s+)+"#, env_assign)).unwrap()
-    };
-    // Git global options that appear before the subcommand: -C <path>, -c <key=val>,
-    // --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
-    static ref GIT_GLOBAL_OPT: Regex =
-        Regex::new(r"^(?:(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+").unwrap();
-    // Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
-    // invocations like `head -3 a b c` fail to match so the segment is passed through
-    // to the native `head`/`tail` binary — which already handles multi-file with
-    // `==> name <==` banners that `rtk read --max-lines` cannot reproduce.
-    static ref HEAD_N: Regex = Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap();
-    static ref HEAD_LINES: Regex = Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap();
-    static ref TAIL_N: Regex = Regex::new(r"^tail\s+-(\d+)\s+(\S+)$").unwrap();
-    static ref TAIL_N_SPACE: Regex = Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap();
-    static ref TAIL_LINES_EQ: Regex = Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap();
-    static ref TAIL_LINES_SPACE: Regex = Regex::new(r"^tail\s+--lines\s+(\d+)\s+(\S+)$").unwrap();
-}
+        .collect()
+});
+static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+    let double_quoted = r#""(?:[^"\\]|\\.)*""#;
+    let single_quoted = r#"'(?:[^'\\]|\\.)*'"#;
+    let unquoted = r#"[^\s]*"#;
+    let env_value = format!("(?:{}|{}|{})", double_quoted, single_quoted, unquoted);
+    let env_assign = format!(r#"[A-Z_][A-Z0-9_]*={}"#, env_value);
+    Regex::new(&format!(r#"^(?:sudo\s+|env\s+|{}\s+)+"#, env_assign)).unwrap()
+});
+// Git global options that appear before the subcommand: -C <path>, -c <key=val>,
+// --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
+static GIT_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+").unwrap()
+});
+// Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
+// invocations like `head -3 a b c` fail to match so the segment is passed through
+// to the native `head`/`tail` binary — which already handles multi-file with
+// `==> name <==` banners that `rtk read --max-lines` cannot reproduce.
+static HEAD_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap());
+static HEAD_LINES: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap());
+static TAIL_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^tail\s+-(\d+)\s+(\S+)$").unwrap());
+static TAIL_N_SPACE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap());
+static TAIL_LINES_EQ: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap());
+static TAIL_LINES_SPACE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^tail\s+--lines\s+(\d+)\s+(\S+)$").unwrap());
 
 const GOLANGCI_GLOBAL_OPT_WITH_VALUE: &[&str] = &[
     "-c",
@@ -96,7 +102,7 @@ struct GolangciRunParts<'a> {
 
 /// Classify a single (already-split) command.
 pub fn classify_command(cmd: &str) -> Classification {
-    let trimmed = cmd.trim();
+    let trimmed = normalize_windows_alias(cmd.trim());
     if trimmed.is_empty() {
         return Classification::Ignored;
     }
@@ -114,7 +120,7 @@ pub fn classify_command(cmd: &str) -> Classification {
     }
 
     // Strip env prefixes (sudo, env VAR=val, VAR=val)
-    let stripped = ENV_PREFIX.replace(trimmed, "");
+    let stripped = ENV_PREFIX.replace(&trimmed, "");
     let cmd_clean = stripped.trim();
     if cmd_clean.is_empty() {
         return Classification::Ignored;
@@ -519,17 +525,15 @@ fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
     (cmd_part, redir_part)
 }
 
-lazy_static! {
-    /// Matches a bash line-continuation: a backslash immediately followed by
-    /// `\n` or `\r\n`, *plus* any horizontal whitespace on the line before AND
-    /// after the break. This is what bash already collapses to a single space
-    /// before executing the command — rtk's hook matcher needs to do the same
-    /// so commands authored across multiple lines still hit the rewrite rules.
-    /// Consuming the trailing whitespace prevents double spaces in cases like
-    /// `git diff \<NL>HEAD~1`.
-    static ref LINE_CONTINUATION_RE: Regex =
-        Regex::new(r"(?m)[ \t\x0B\x0C]*\\\r?\n[ \t\x0B\x0C]*").unwrap();
-}
+/// Matches a bash line-continuation: a backslash immediately followed by
+/// `\n` or `\r\n`, *plus* any horizontal whitespace on the line before AND
+/// after the break. This is what bash already collapses to a single space
+/// before executing the command — rtk's hook matcher needs to do the same
+/// so commands authored across multiple lines still hit the rewrite rules.
+/// Consuming the trailing whitespace prevents double spaces in cases like
+/// `git diff \<NL>HEAD~1`.
+static LINE_CONTINUATION_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)[ \t\x0B\x0C]*\\\r?\n[ \t\x0B\x0C]*").unwrap());
 
 /// Replace every bash line continuation with a single space, mirroring what
 /// bash does before dispatching the command. Returns a borrowed `&str` when the
@@ -822,7 +826,7 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
 
 /// Transparent wrappers that RULES can also match as a whole string, so an
 /// unfiltered inner command falls through instead of dropping the rewrite.
-const ROUTABLE_WRAPPER_PREFIXES: &[&str] = &["uv run"];
+const ROUTABLE_WRAPPER_PREFIXES: &[&str] = &["uv run", "poetry run"];
 
 /// Shell keywords that wrap a command without changing which one runs. They are
 /// not spawnable, so they must never fall through: `rtk exec foo` cannot run.
@@ -862,7 +866,47 @@ fn search_uses_pattern_file(cmd: &str) -> bool {
 }
 
 fn pipeline_final_command_is_safe(rtk_cmd: &str, cmd: &str) -> bool {
-    !matches!(rtk_cmd, "rtk grep" | "rtk rg") || !search_uses_pattern_file(cmd)
+    if matches!(rtk_cmd, "rtk grep" | "rtk rg") && search_uses_pattern_file(cmd) {
+        return false;
+    }
+
+    // A compact producer must never be introduced into a pipeline whose
+    // consumer depends on exact line/byte semantics. Intermediate stages are
+    // already kept raw by analyze_pipeline; this guard covers the final stage.
+    let consumer = cmd.split_whitespace().next();
+    let exact_output_consumer = match consumer {
+        Some("wc" | "sed" | "awk" | "sort" | "uniq" | "xargs") => true,
+        Some("grep" | "rg") => shell_split(cmd)
+            .into_iter()
+            .any(|arg| arg == "-c" || arg == "--count"),
+        _ => false,
+    };
+    if exact_output_consumer && debug_enabled() {
+        eprintln!(
+            "[rtk-debug] pipeline decision=raw-final consumer={} rtk_command={}",
+            consumer.unwrap_or("<missing>"),
+            rtk_cmd
+        );
+    }
+    !exact_output_consumer || !matches!(rtk_cmd, "rtk wc" | "rtk grep" | "rtk rg")
+}
+
+fn debug_enabled() -> bool {
+    crate::service::debug_enabled()
+}
+
+fn normalize_windows_alias(command: &str) -> String {
+    #[cfg(windows)]
+    {
+        let alias = "dir";
+        if command == alias {
+            return "ls".to_string();
+        }
+        if let Some(rest) = command.strip_prefix(&format!("{alias} ")) {
+            return format!("ls {rest}");
+        }
+    }
+    command.to_string()
 }
 
 enum ExcludePattern {
@@ -1007,6 +1051,8 @@ fn rewrite_segment_inner(
     // Strip trailing stderr/stdout redirects before matching (#530)
     // e.g. "git status 2>&1" → match "git status", re-append " 2>&1"
     let (cmd_part, redirect_suffix) = strip_trailing_redirects(trimmed);
+    let normalized_cmd_part = normalize_windows_alias(cmd_part);
+    let cmd_part = normalized_cmd_part.as_str();
 
     // Already RTK — pass through unchanged
     if cmd_part.starts_with("rtk ") || cmd_part == "rtk" {
@@ -4986,6 +5032,35 @@ mod tests {
         assert_eq!(
             normalize_php_tool_command_with_dirs("./tools/bin/pest", &dirs),
             "pest"
+        );
+    }
+
+    #[test]
+    fn test_poetry_run_rewrites_inner_supported_command() {
+        assert_eq!(
+            rewrite_command_no_prefixes("poetry run pytest tests/", &[]),
+            Some("poetry run rtk pytest tests/".to_string())
+        );
+    }
+
+    #[test]
+    fn test_exact_output_pipeline_stays_raw() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log -10 | wc -l", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git log -10 | sort | uniq", &[]),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_dir_alias_rewrites_to_ls() {
+        assert_eq!(
+            rewrite_command_no_prefixes("dir /a", &[]),
+            Some("rtk ls /a".to_string())
         );
     }
 }

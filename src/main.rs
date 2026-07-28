@@ -5,6 +5,7 @@ mod discover;
 mod hooks;
 mod learn;
 mod parser;
+mod service;
 
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
@@ -361,7 +362,7 @@ enum Commands {
         #[arg(long = "claude-md", group = "mode")]
         claude_md: bool,
 
-        /// Hook only, no RTK.md
+        /// Hook only, no RTK.md or MCP registration
         #[arg(long = "hook-only", group = "mode")]
         hook_only: bool,
 
@@ -392,6 +393,11 @@ enum Commands {
         /// Install GitHub Copilot integration (VS Code + CLI)
         #[arg(long)]
         copilot: bool,
+
+        /// Skip automatic MCP server registration for the selected AI tool
+        #[arg(long = "no-mcp")]
+        no_mcp: bool,
+
         /// Preview changes without writing any files (combine with -v to show content)
         #[arg(long = "dry-run", conflicts_with = "show")]
         dry_run: bool,
@@ -595,6 +601,14 @@ enum Commands {
 
     /// Show RTK adoption across Claude Code sessions
     Session {},
+
+    /// Interactive local dashboard for savings, commands, health, and tee artifacts
+    #[command(alias = "tui")]
+    Dashboard {
+        /// Filter the dashboard to the current project
+        #[arg(short, long)]
+        project: bool,
+    },
 
     /// Manage telemetry consent and data (RGPD/GDPR)
     Telemetry {
@@ -852,6 +866,9 @@ enum Commands {
         #[command(subcommand)]
         command: HookCommands,
     },
+
+    /// Run the local synchronous stdio MCP server.
+    Mcp,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1549,9 +1566,11 @@ fn main() {
     std::process::exit(code);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
     agent: Option<AgentTarget>,
     global: bool,
+    opencode: bool,
     gemini: bool,
     codex: bool,
     ctx: hooks::init::InitContext,
@@ -1562,14 +1581,63 @@ where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
     UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
-    if agent == Some(AgentTarget::Hermes) {
-        uninstall_hermes(ctx)
-    } else if agent == Some(AgentTarget::Droid) {
-        hooks::init::uninstall_droid(global, ctx)
-    } else {
-        let cursor = agent == Some(AgentTarget::Cursor);
-        let pi = agent == Some(AgentTarget::Pi);
-        uninstall_standard(global, gemini, codex, cursor, pi, ctx)
+    if gemini || codex {
+        return uninstall_standard(global, gemini, codex, false, false, ctx);
+    }
+    if opencode {
+        return hooks::init::uninstall_opencode_mode(ctx);
+    }
+
+    match agent {
+        Some(AgentTarget::Hermes) => uninstall_hermes(ctx),
+        Some(AgentTarget::Droid) => hooks::init::uninstall_droid(global, ctx),
+        Some(AgentTarget::Cursor) => uninstall_standard(global, false, false, true, false, ctx),
+        Some(AgentTarget::Pi) => uninstall_standard(global, false, false, false, true, ctx),
+        Some(AgentTarget::Windsurf) => hooks::init::uninstall_windsurf_mode(ctx),
+        Some(AgentTarget::Cline) => hooks::init::uninstall_cline_mode(ctx),
+        Some(AgentTarget::Kilocode) => hooks::init::uninstall_kilocode_mode(ctx),
+        Some(AgentTarget::Antigravity) => hooks::init::uninstall_antigravity_mode(ctx),
+        Some(AgentTarget::Kimi) => hooks::init::uninstall_kimi_mode(ctx),
+        Some(AgentTarget::Claude) | None if !global => hooks::init::uninstall_claude_local(ctx),
+        Some(AgentTarget::Claude) | None => {
+            uninstall_standard(true, false, false, false, false, ctx)
+        }
+    }
+}
+
+fn selected_mcp_client(
+    agent: Option<AgentTarget>,
+    opencode: bool,
+    gemini: bool,
+    codex: bool,
+    copilot: bool,
+) -> hooks::mcp_config::McpClient {
+    use hooks::mcp_config::McpClient;
+
+    if copilot {
+        return McpClient::Copilot;
+    }
+    if gemini {
+        return McpClient::Gemini;
+    }
+    if codex {
+        return McpClient::Codex;
+    }
+    if opencode {
+        return McpClient::OpenCode;
+    }
+
+    match agent.unwrap_or(AgentTarget::Claude) {
+        AgentTarget::Claude => McpClient::Claude,
+        AgentTarget::Cursor => McpClient::Cursor,
+        AgentTarget::Windsurf => McpClient::Windsurf,
+        AgentTarget::Cline => McpClient::Cline,
+        AgentTarget::Kilocode => McpClient::Kilocode,
+        AgentTarget::Antigravity => McpClient::Antigravity,
+        AgentTarget::Kimi => McpClient::Kimi,
+        AgentTarget::Pi => McpClient::Pi,
+        AgentTarget::Hermes => McpClient::Hermes,
+        AgentTarget::Droid => McpClient::Droid,
     }
 }
 
@@ -2006,12 +2074,15 @@ fn run_cli() -> Result<i32> {
             uninstall,
             codex,
             copilot,
+            no_mcp,
             dry_run,
         } => {
             let ctx = hooks::init::InitContext {
                 verbose: cli.verbose,
                 dry_run,
             };
+            let mcp_client = selected_mcp_client(agent, opencode, gemini, codex, copilot);
+            let manage_mcp = !no_mcp && !hook_only;
             if show {
                 hooks::init::show_config(codex)?;
             } else if uninstall && copilot {
@@ -2020,16 +2091,23 @@ fn run_cli() -> Result<i32> {
                 } else {
                     hooks::init::uninstall_copilot(ctx)?;
                 }
+                if manage_mcp {
+                    hooks::mcp_config::uninstall(mcp_client, global, ctx)?;
+                }
             } else if uninstall {
                 uninstall_init_dispatch(
                     agent,
                     global,
+                    opencode,
                     gemini,
                     codex,
                     ctx,
                     hooks::init::uninstall_hermes,
                     hooks::init::uninstall,
                 )?;
+                if manage_mcp {
+                    hooks::mcp_config::uninstall(mcp_client, global, ctx)?;
+                }
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -2103,6 +2181,9 @@ fn run_cli() -> Result<i32> {
                     hooks::init::FilterTrust::Ask
                 };
                 hooks::init::finalize_filter_trust(global, dry_run, filter_trust)?;
+            }
+            if !show && !uninstall && manage_mcp {
+                hooks::mcp_config::install(mcp_client, global, ctx)?;
             }
             0
         }
@@ -2266,6 +2347,11 @@ fn run_cli() -> Result<i32> {
 
         Commands::Session {} => {
             analytics::session_cmd::run(cli.verbose)?;
+            0
+        }
+
+        Commands::Dashboard { project } => {
+            analytics::dashboard::run(project)?;
             0
         }
 
@@ -2456,6 +2542,11 @@ fn run_cli() -> Result<i32> {
                 }
             }
         },
+
+        Commands::Mcp => {
+            service::mcp::run()?;
+            0
+        }
 
         Commands::Rewrite { args } => {
             let cmd = args.join(" ");
@@ -2921,6 +3012,54 @@ mod tests {
     }
 
     #[test]
+    fn test_init_no_mcp_opt_out_parses() {
+        let cli = Cli::try_parse_from(["rtk", "init", "-g", "--codex", "--no-mcp"]).unwrap();
+        match cli.command {
+            Commands::Init {
+                global,
+                codex,
+                no_mcp,
+                ..
+            } => {
+                assert!(global);
+                assert!(codex);
+                assert!(no_mcp);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_selected_mcp_client_matches_agent_mode() {
+        use hooks::mcp_config::McpClient;
+
+        assert_eq!(
+            selected_mcp_client(Some(AgentTarget::Cursor), false, false, false, false),
+            McpClient::Cursor
+        );
+        assert_eq!(
+            selected_mcp_client(None, true, false, false, false),
+            McpClient::OpenCode
+        );
+        assert_eq!(
+            selected_mcp_client(None, false, true, false, false),
+            McpClient::Gemini
+        );
+        assert_eq!(
+            selected_mcp_client(None, false, false, true, false),
+            McpClient::Codex
+        );
+        assert_eq!(
+            selected_mcp_client(None, false, false, false, true),
+            McpClient::Copilot
+        );
+        assert_eq!(
+            selected_mcp_client(None, false, false, false, false),
+            McpClient::Claude
+        );
+    }
+
+    #[test]
     fn test_try_parse_kubectl_get_alias() {
         let cli = Cli::try_parse_from(["rtk", "kubectl", "get", "pods", "-n", "default"]).unwrap();
 
@@ -2982,6 +3121,7 @@ mod tests {
         let result = uninstall_init_dispatch(
             Some(AgentTarget::Hermes),
             true,
+            false,
             false,
             false,
             ctx,

@@ -35,7 +35,7 @@ fn sanitize_slug(slug: &str) -> String {
 }
 
 /// Get the tee directory, respecting config and env overrides.
-fn get_tee_dir(config: &Config) -> Option<PathBuf> {
+pub(crate) fn get_tee_dir(config: &Config) -> Option<PathBuf> {
     // Env var override
     if let Ok(dir) = std::env::var("RTK_TEE_DIR") {
         return Some(PathBuf::from(dir));
@@ -497,6 +497,15 @@ directory = "/tmp/rtk-tee"
     fn test_force_tee_hint_skip_empty() {
         let hint = force_tee_hint("", "test_cmd");
         assert!(hint.is_none(), "Should skip empty content");
+    }
+
+    #[test]
+    fn configured_tee_directory_has_precedence_over_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let configured = temp.path().join("custom-tee");
+        let mut config = Config::default();
+        config.tee.directory = Some(configured.clone());
+        assert_eq!(get_tee_dir(&config), Some(configured));
     }
 
     #[test]

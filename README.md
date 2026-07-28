@@ -112,11 +112,13 @@ rtk gain        # Should show the savings dashboard
 
 ```bash
 # 1. Install for your AI tool
-rtk init -g                     # Claude Code / Copilot (default)
+rtk init -g                     # Claude Code
+rtk init -g --copilot           # GitHub Copilot (VS Code + CLI)
 rtk init -g --gemini            # Gemini CLI
 rtk init -g --codex             # Codex (OpenAI)
 rtk init -g --agent cursor      # Cursor
 rtk init -g --agent windsurf    # Windsurf
+rtk init -g --opencode          # OpenCode
 rtk init --agent cline          # Cline / Roo Code
 rtk init --agent kilocode       # Kilo Code
 rtk init --agent antigravity    # Google Antigravity
@@ -128,6 +130,14 @@ rtk init -g --agent droid       # Factory Droid
 # 2. Restart your AI tool, then test
 git status  # Automatically rewritten to rtk git status
 ```
+
+Each command installs every RTK integration supported by that client: its
+hook/plugin/rules and an `rtk mcp` stdio registration. Re-run the same command
+after moving or upgrading the RTK binary to refresh its absolute MCP command
+path. Use `--no-mcp` to install only the traditional integration.
+
+Pi is the exception: Pi deliberately has no native MCP client, so its RTK
+TypeScript extension is the complete integration.
 
 Hook-based agents rewrite Bash commands (e.g., `git status` -> `rtk git status`) before execution. Plugin-based agents, including Hermes, use their plugin API to rewrite commands before execution. The agent receives compact output without needing to call `rtk` explicitly.
 
@@ -337,7 +347,8 @@ The most effective way to use rtk. The hook transparently intercepts Bash comman
 rtk init -g                 # Install hook + RTK.md (recommended)
 rtk init -g --opencode      # OpenCode plugin (instead of Claude Code)
 rtk init -g --auto-patch    # Non-interactive (CI/CD)
-rtk init -g --hook-only     # Hook only, no RTK.md
+rtk init -g --hook-only     # Hook only, no RTK.md or MCP registration
+rtk init -g --no-mcp        # Hook + RTK.md, but skip MCP registration
 rtk init --show             # Verify installation
 ```
 
@@ -358,11 +369,23 @@ rtk init -g
 
 **Upgrading from an older install?** If you set RTK up before v0.37.2 you may still have the legacy `rtk-rewrite.sh` shell hook (which does need a Unix shell). Re-run `rtk init -g` to migrate to the native binary hook.
 
-**Prerequisites**: some filters shell out to [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`). Install it and keep it on your PATH (e.g. `winget install BurntSushi.ripgrep.MSVC`) to avoid `Binary 'rg' not found on PATH` warnings.
+**Prerequisites**: some filters shell out to [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`). Install it and keep it on your PATH (e.g. `winget install BurntSushi.ripgrep.MSVC`) to avoid `Binary 'rg' not found on PATH` warnings. RTK recognizes common PowerShell aliases such as `dir`, but aliases are not executable files; RTK uses its native Windows fallback where available.
 
 **Important**: Do not double-click `rtk.exe` — it is a CLI tool that prints usage and exits immediately. Always run it from a terminal (Command Prompt, PowerShell, or Windows Terminal).
 
-### WSL
+### Local MCP server
+
+RTK also provides a local synchronous stdio MCP server with typed command
+execution: `rtk mcp`. `rtk init` registers it automatically for the selected
+client (except Pi, which has no native MCP support). Its `run_filtered` tool
+accepts argv arrays, validates working directories, enforces timeout/output
+limits, and preserves exit codes. Because execution has local-machine
+capabilities, connect only trusted clients. See
+[the MCP guide](docs/guide/resources/mcp.md).
+
+### WSL (optional)
+
+Native Windows hooks are supported. Use WSL only when you specifically need Linux shell semantics, POSIX utilities, or a Linux-only toolchain; it is not required for automatic native hook rewriting.
 
 [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) also works and behaves exactly like Linux:
 
