@@ -243,7 +243,6 @@ cat > /tmp/rtk_bench.json << 'JSONEOF'
 JSONEOF
 bench "json" "cat /tmp/rtk_bench.json" "$RTK json /tmp/rtk_bench.json"
 bench "json -d 2" "cat /tmp/rtk_bench.json" "$RTK json /tmp/rtk_bench.json -d 2"
-rm -f /tmp/rtk_bench.json
 
 # ===================
 # deps
@@ -346,9 +345,13 @@ bench "wc" "wc Cargo.toml src/main.rs" "$RTK wc Cargo.toml src/main.rs"
 # ===================
 section "curl"
 if command -v curl &> /dev/null; then
-  bench "curl json" "curl -s https://mockhttp.org/json/1" "$RTK curl https://mockhttp.org/json/1"
+  # Use the same local payload for both commands. mockhttp.org/json/1 returns
+  # different sample documents between requests, which made token comparison
+  # nondeterministic even though RTK correctly preserves piped JSON verbatim.
+  bench "curl json" "curl -s file:///tmp/rtk_bench.json" "$RTK curl file:///tmp/rtk_bench.json"
   bench "curl text" "curl -s https://mockhttp.org/robots.txt" "$RTK curl https://mockhttp.org/robots.txt"
 fi
+rm -f /tmp/rtk_bench.json
 
 # ===================
 # wget
