@@ -338,6 +338,25 @@ pub enum HostCommand {
     Missing,
 }
 
+#[cfg(windows)]
+fn powershell_alias(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "ls" | "dir" => Some("Get-ChildItem"),
+        "echo" => Some("Write-Output"),
+        "pwd" => Some("Get-Location"),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
+fn powershell_builtin(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "cd" => Some("Set-Location"),
+        "set" => Some("Set-Variable"),
+        _ => None,
+    }
+}
+
 /// Resolve a command as a native executable or a known PowerShell command.
 ///
 /// PowerShell aliases are reported separately because they cannot be passed to
@@ -357,13 +376,7 @@ pub fn resolve_host_command(name: &str) -> HostCommand {
 
     #[cfg(windows)]
     {
-        let alias = match name.to_ascii_lowercase().as_str() {
-            "ls" | "dir" => Some("Get-ChildItem"),
-            "echo" => Some("Write-Output"),
-            "pwd" => Some("Get-Location"),
-            _ => None,
-        };
-        if let Some(alias) = alias {
+        if let Some(alias) = powershell_alias(name) {
             if crate::service::debug_enabled() {
                 eprintln!(
                     "[rtk-debug] resolver command={} decision=powershell_alias target={}",
@@ -373,12 +386,7 @@ pub fn resolve_host_command(name: &str) -> HostCommand {
             return HostCommand::PowerShellAlias(alias);
         }
 
-        let builtin = match name.to_ascii_lowercase().as_str() {
-            "cd" => Some("Set-Location"),
-            "set" => Some("Set-Variable"),
-            _ => None,
-        };
-        if let Some(builtin) = builtin {
+        if let Some(builtin) = powershell_builtin(name) {
             return HostCommand::PowerShellBuiltin(builtin);
         }
     }
@@ -580,11 +588,26 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn resolve_host_command_recognizes_powershell_aliases() {
-        assert_eq!(
-            resolve_host_command("dir"),
-            HostCommand::PowerShellAlias("Get-ChildItem")
-        );
+    fn powershell_alias_mapping_recognizes_dir() {
+        assert_eq!(powershell_alias("dir"), Some("Get-ChildItem"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_host_command_distinguishes_dir_executable_or_alias() {
+        match resolve_host_command("dir") {
+            HostCommand::Executable(path) => {
+                assert_eq!(
+                    path.file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .map(str::to_ascii_lowercase)
+                        .as_deref(),
+                    Some("dir")
+                );
+            }
+            HostCommand::PowerShellAlias(alias) => assert_eq!(alias, "Get-ChildItem"),
+            other => panic!("dir should resolve as an executable or PowerShell alias: {other:?}"),
+        }
     }
 
     #[test]

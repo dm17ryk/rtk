@@ -105,6 +105,8 @@ pub fn run_filtered(
     let cwd = validate_cwd(cwd)?;
     let executable = std::env::current_exe().context("Failed to locate the RTK executable")?;
 
+    // nosemgrep: dynamic-command-execution -- the executable comes only from
+    // current_exe(), while validate_rtk_args rejects meta commands and malformed argv.
     let mut command = Command::new(executable);
     command
         .args(rtk_args)
