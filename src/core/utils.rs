@@ -331,7 +331,9 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostCommand {
     Executable(PathBuf),
+    #[cfg(windows)]
     PowerShellAlias(&'static str),
+    #[cfg(windows)]
     PowerShellBuiltin(&'static str),
     Missing,
 }

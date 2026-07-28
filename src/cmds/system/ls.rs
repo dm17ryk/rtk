@@ -3,7 +3,9 @@
 use super::constants::NOISE_DIRS;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::{reduced, CAP_WARNINGS};
-use crate::core::utils::{resolve_host_command, resolved_command, HostCommand};
+use crate::core::utils::resolved_command;
+#[cfg(windows)]
+use crate::core::utils::{resolve_host_command, HostCommand};
 use anyhow::Result;
 use regex::Regex;
 use std::io::IsTerminal;

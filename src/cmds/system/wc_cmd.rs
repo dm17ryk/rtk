@@ -7,7 +7,9 @@
 /// - `wc -c file.py`  → `978`
 /// - `wc -l *.py`     → table with common path prefix stripped
 use crate::core::runner::{self, RunOptions};
-use crate::core::utils::{resolve_host_command, resolved_command, HostCommand};
+use crate::core::utils::resolved_command;
+#[cfg(windows)]
+use crate::core::utils::{resolve_host_command, HostCommand};
 use anyhow::Result;
 #[cfg(windows)]
 use std::io::Read;
