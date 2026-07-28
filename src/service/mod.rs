@@ -3,22 +3,22 @@
 pub mod mcp;
 
 use anyhow::{Context, Result};
-use lazy_static::lazy_static;
 use regex::Regex;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use crate::core::config::Config;
 use crate::discover::registry::rewrite_command;
 
-lazy_static! {
-    static ref SECRET_RE: Regex = Regex::new(
+static SECRET_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
         r"(?i)(?:(?:token|password|secret|api[_-]?key|authorization)\s*[:=]\s*\S+(?:\s+\S+)?|bearer\s+\S+)"
     )
-    .expect("secret redaction regex must compile");
-}
+    .expect("secret redaction regex must compile")
+});
 
 /// Maximum command output returned by an integration request by default.
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_048_576;
