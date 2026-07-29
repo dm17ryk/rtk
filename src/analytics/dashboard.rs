@@ -536,7 +536,8 @@ fn plain_dashboard_text(data: &DashboardData, project: bool) -> String {
         ),
         String::new(),
         format!("Commands:      {}", display.commands),
-        format!("Input/output:  {} / {}", display.input, display.output),
+        format!("Input tokens:  {}", display.input),
+        format!("Output tokens: {}", display.output),
         format!("Tokens saved:  {} ({})", display.saved, display.savings),
         format!(
             "Execution:     {} total / {} average",
@@ -544,6 +545,10 @@ fn plain_dashboard_text(data: &DashboardData, project: bool) -> String {
         ),
         String::new(),
         "Highest impact commands:".to_string(),
+        format!(
+            "  {:<36} {:>6} {:>9} {:>7} {:>8}",
+            "Command", "Count", "Saved", "Avg%", "Time"
+        ),
     ];
     lines.extend(data.summary.by_command.iter().take(10).map(
         |(command, count, saved, savings, time)| {
@@ -700,14 +705,18 @@ mod tests {
         let command = command_display("rtk git status", 1, 80, 80.0, 25);
         let rendered = plain_dashboard_text(&data, false);
 
-        assert!(rendered.contains(&format!(
-            "Input/output:  {} / {}",
-            summary.input, summary.output
-        )));
+        assert!(rendered.contains(&format!("Input tokens:  {}", summary.input)));
+        assert!(rendered.contains(&format!("Output tokens: {}", summary.output)));
         assert!(rendered.contains(&format!(
             "Tokens saved:  {} ({})",
             summary.saved, summary.savings
         )));
+        for heading in ["Command", "Count", "Saved", "Avg%", "Time"] {
+            assert!(
+                rendered.contains(heading),
+                "missing command heading: {heading}"
+            );
+        }
         for field in [
             command.command,
             command.count.as_str(),

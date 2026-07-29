@@ -1787,8 +1787,22 @@ fn cline_rules() -> &'static str {
     RENDERED.as_str()
 }
 
+const LEGACY_AGENT_RULE_HEADING: &str = "# RTK - Rust Token Killer (";
 const LEGACY_AGENT_RULE_TEXT: &str = "Always prefix shell commands with `rtk`";
 const LEGACY_AGENT_RULE_END: &str = "Always use `rtk <cmd>` instead of raw commands.";
+
+fn legacy_agent_rules_start(content: &str) -> Option<usize> {
+    let start = content.rfind(LEGACY_AGENT_RULE_HEADING)?;
+    let legacy_suffix = &content[start..];
+    let heading = legacy_suffix.lines().next()?.trim_end();
+    if !heading.ends_with(')')
+        || !legacy_suffix.contains(LEGACY_AGENT_RULE_TEXT)
+        || !legacy_suffix.trim_end().ends_with(LEGACY_AGENT_RULE_END)
+    {
+        return None;
+    }
+    Some(start)
+}
 
 /// Upgrade the unmarked rules suffix emitted by RTK versions before v3.
 ///
@@ -1821,7 +1835,7 @@ fn migrate_legacy_agent_rules(path: &Path, label: &str, ctx: InitContext) -> Res
         return Ok(false);
     }
 
-    let Some(start) = existing.find("# RTK - Rust Token Killer (") else {
+    let Some(candidate_start) = existing.rfind(LEGACY_AGENT_RULE_HEADING) else {
         if verbose > 0 {
             eprintln!(
                 "[rtk-debug] agent_rules path={} label={} decision=no_legacy_heading",
@@ -1831,19 +1845,17 @@ fn migrate_legacy_agent_rules(path: &Path, label: &str, ctx: InitContext) -> Res
         }
         return Ok(false);
     };
-    let legacy_suffix = &existing[start..];
-    if !legacy_suffix.contains(LEGACY_AGENT_RULE_TEXT)
-        || !legacy_suffix.trim_end().ends_with(LEGACY_AGENT_RULE_END)
-    {
+    let Some(start) = legacy_agent_rules_start(&existing) else {
         if verbose > 0 {
             eprintln!(
-                "[rtk-debug] agent_rules path={} label={} decision=unrecognized_rtk_content_preserved",
+                "[rtk-debug] agent_rules path={} label={} candidate_start={} decision=unrecognized_rtk_content_preserved",
                 path.display(),
-                label
+                label,
+                candidate_start
             );
         }
         return Ok(false);
-    }
+    };
 
     if dry_run {
         println!(
@@ -2158,25 +2170,68 @@ fn run_kimi_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
 
 fn uninstall_rtk_block_file(path: &Path, label: &str, ctx: InitContext) -> Result<()> {
     if !path.exists() {
+        if ctx.verbose > 0 {
+            eprintln!(
+                "[rtk-debug] agent_rules_uninstall path={} label={} decision=no_existing_file",
+                path.display(),
+                label
+            );
+        }
         println!("RTK {label} were not installed (nothing to remove)");
         return Ok(());
     }
 
     let existing =
         fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    let (cleaned, removed) = remove_rtk_block(&existing);
-    if !removed {
+    let (managed_cleaned, managed_removed) = remove_rtk_block(&existing);
+    let (cleaned, removal_kind) = if managed_removed {
+        (managed_cleaned, "managed_block")
+    } else if let Some(start) = legacy_agent_rules_start(&existing) {
+        (existing[..start].trim_end().to_string(), "legacy_suffix")
+    } else {
+        if ctx.verbose > 0 {
+            eprintln!(
+                "[rtk-debug] agent_rules_uninstall path={} label={} decision=no_managed_or_legacy_block",
+                path.display(),
+                label
+            );
+        }
         println!("RTK {label} were not installed (nothing to remove)");
         return Ok(());
-    }
+    };
     if ctx.dry_run {
+        if ctx.verbose > 0 {
+            eprintln!(
+                "[rtk-debug] agent_rules_uninstall path={} label={} source={} decision=dry_run_preserved",
+                path.display(),
+                label,
+                removal_kind
+            );
+        }
         println!("[dry-run] would remove RTK {label} from {}", path.display());
         return Ok(());
     }
     if cleaned.trim().is_empty() {
+        if ctx.verbose > 0 {
+            eprintln!(
+                "[rtk-debug] agent_rules_uninstall path={} label={} source={} decision=remove_empty_file",
+                path.display(),
+                label,
+                removal_kind
+            );
+        }
         // nosemgrep: filesystem-deletion -- removes the instructions file only when RTK's managed block was its only content.
         fs::remove_file(path).with_context(|| format!("Failed to remove {}", path.display()))?;
     } else {
+        if ctx.verbose > 0 {
+            eprintln!(
+                "[rtk-debug] agent_rules_uninstall path={} label={} source={} decision=preserve_user_content bytes={}",
+                path.display(),
+                label,
+                removal_kind,
+                cleaned.len()
+            );
+        }
         atomic_write(path, &cleaned)
             .with_context(|| format!("Failed to update {}", path.display()))?;
     }
@@ -5391,6 +5446,35 @@ mod tests {
     }
 
     #[test]
+    fn test_install_agent_rules_anchors_migration_at_final_legacy_heading() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(".windsurfrules");
+        let legacy = format!(
+            "# User rules\n\n\
+             # RTK - Rust Token Killer (user-authored note)\n\n\
+             Keep this heading and its content.\n\n\
+             # RTK - Rust Token Killer (Windsurf)\n\n\
+             ## Rule\n\n{LEGACY_AGENT_RULE_TEXT} to minimize token consumption.\n\n\
+             ## Why\n\nRTK filters output. {LEGACY_AGENT_RULE_END}\n"
+        );
+        fs::write(&path, legacy).unwrap();
+
+        install_agent_rules(
+            &path,
+            windsurf_rules(),
+            "Windsurf rules",
+            "rtk init -g --agent windsurf",
+            InitContext::default(),
+        )
+        .unwrap();
+
+        let installed = fs::read_to_string(path).unwrap();
+        assert!(installed.contains("# RTK - Rust Token Killer (user-authored note)"));
+        assert!(installed.contains("Keep this heading and its content."));
+        assert!(installed.contains("## Command Selection Priority"));
+    }
+
+    #[test]
     fn test_uninstall_agent_rules_preserves_user_content() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join(".clinerules");
@@ -5399,6 +5483,54 @@ mod tests {
         uninstall_rtk_block_file(&path, "Cline rules", InitContext::default()).unwrap();
 
         assert_eq!(fs::read_to_string(path).unwrap(), "user rule\n");
+    }
+
+    #[test]
+    fn test_uninstall_agent_rules_removes_legacy_suffix_for_all_rule_agents() {
+        let temp = TempDir::new().unwrap();
+        for (filename, label, agent) in [
+            (".clinerules", "Cline rules", "Cline"),
+            (".windsurfrules", "Windsurf rules", "Windsurf"),
+            ("kilocode-rtk-rules.md", "Kilo Code rules", "Kilo Code"),
+            (
+                "antigravity-rtk-rules.md",
+                "Antigravity rules",
+                "Antigravity",
+            ),
+        ] {
+            let path = temp.path().join(filename);
+            let legacy = format!(
+                "# User rules\n\nKeep this.\n\n\
+                 # RTK - Rust Token Killer ({agent})\n\n\
+                 ## Rule\n\n{LEGACY_AGENT_RULE_TEXT} to minimize token consumption.\n\n\
+                 ## Why\n\nRTK filters output. {LEGACY_AGENT_RULE_END}\n"
+            );
+            fs::write(&path, legacy).unwrap();
+
+            uninstall_rtk_block_file(&path, label, InitContext::default()).unwrap();
+
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                "# User rules\n\nKeep this.",
+                "legacy uninstall must preserve user content for {agent}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_uninstall_agent_rules_removes_legacy_only_file() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(".clinerules");
+        let legacy = format!(
+            "# RTK - Rust Token Killer (Cline)\n\n\
+             ## Rule\n\n{LEGACY_AGENT_RULE_TEXT} to minimize token consumption.\n\n\
+             ## Why\n\nRTK filters output. {LEGACY_AGENT_RULE_END}\n"
+        );
+        fs::write(&path, legacy).unwrap();
+
+        uninstall_rtk_block_file(&path, "Cline rules", InitContext::default()).unwrap();
+
+        assert!(!path.exists());
     }
 
     #[test]
