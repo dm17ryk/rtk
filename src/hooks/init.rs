@@ -120,9 +120,15 @@ fn print_dry_run_footer() {
 const RTK_INSTRUCTIONS: &str = r##"<!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands
 
-## Golden Rule
+## Command Selection Priority
 
-**Always prefix commands with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes through unchanged. This means RTK is always safe to use.
+Use the narrowest RTK route that can perform the task:
+
+1. **Direct RTK first**: use supported commands such as `rtk read`, `rtk rg`, `rtk grep`, `rtk find`, `rtk ls`, `rtk git ...`, `rtk cargo ...`, and `rtk gh ...`. Use `rtk --help` when unsure.
+2. **Executable fallback**: use `rtk proxy <program> <args>` only when RTK has no matching route or exact unfiltered output is required.
+3. **Shell fallback last**: use `rtk proxy pwsh -NoProfile -Command ...` or `rtk proxy cmd /d /c ...` only for shell built-ins, scripts, or control flow that cannot be expressed as a direct RTK command.
+
+On Windows, never hide an RTK-supported command inside PowerShell or Command Prompt. Use `rtk git status`, not `rtk proxy pwsh -Command "git status"`.
 
 **Important**: Even in command chains with `&&`, use `rtk`:
 ```bash
@@ -1299,7 +1305,11 @@ fn run_default_mode(
     if !dry_run {
         println!("\nRTK hook registered (global).\n");
         println!("  Command:   {}", CLAUDE_HOOK_COMMAND);
-        println!("  RTK.md:    {} (10 lines)", rtk_md_path.display());
+        println!(
+            "  RTK.md:    {} ({} lines)",
+            rtk_md_path.display(),
+            RTK_SLIM.lines().count()
+        );
         if let Some(path) = &opencode_plugin_path {
             println!("  OpenCode:  {}", path.display());
         }
@@ -1307,7 +1317,10 @@ fn run_default_mode(
 
         if migrated {
             println!("\n  [ok] Migrated: removed 137-line RTK block from CLAUDE.md");
-            println!("              replaced with @RTK.md (10 lines)");
+            println!(
+                "              replaced with @RTK.md ({} lines)",
+                RTK_SLIM.lines().count()
+            );
         }
     }
 
@@ -1751,45 +1764,120 @@ const WINDSURF_RULES: &str = include_str!("../../hooks/windsurf/rules.md");
 /// Embedded Cline RTK rules
 const CLINE_RULES: &str = include_str!("../../hooks/cline/rules.md");
 
+const LEGACY_AGENT_RULE_TEXT: &str = "Always prefix shell commands with `rtk`";
+const LEGACY_AGENT_RULE_END: &str = "Always use `rtk <cmd>` instead of raw commands.";
+
+/// Upgrade the unmarked rules suffix emitted by RTK versions before v3.
+///
+/// The legacy installer always appended its block at end-of-file. We only
+/// remove a suffix with the exact RTK heading, rule sentence, and final
+/// sentence; otherwise user-authored content is left untouched.
+fn migrate_legacy_agent_rules(path: &Path, label: &str, ctx: InitContext) -> Result<bool> {
+    let InitContext { verbose, dry_run } = ctx;
+    if !path.exists() {
+        if verbose > 0 {
+            eprintln!(
+                "[rtk-debug] agent_rules path={} label={} decision=no_existing_file",
+                path.display(),
+                label
+            );
+        }
+        return Ok(false);
+    }
+
+    let existing = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {label}: {}", path.display()))?;
+    if existing.contains(RTK_BLOCK_START) {
+        if verbose > 0 {
+            eprintln!(
+                "[rtk-debug] agent_rules path={} label={} decision=managed_block_present",
+                path.display(),
+                label
+            );
+        }
+        return Ok(false);
+    }
+
+    let Some(start) = existing.find("# RTK - Rust Token Killer (") else {
+        if verbose > 0 {
+            eprintln!(
+                "[rtk-debug] agent_rules path={} label={} decision=no_legacy_heading",
+                path.display(),
+                label
+            );
+        }
+        return Ok(false);
+    };
+    let legacy_suffix = &existing[start..];
+    if !legacy_suffix.contains(LEGACY_AGENT_RULE_TEXT)
+        || !legacy_suffix.trim_end().ends_with(LEGACY_AGENT_RULE_END)
+    {
+        if verbose > 0 {
+            eprintln!(
+                "[rtk-debug] agent_rules path={} label={} decision=unrecognized_rtk_content_preserved",
+                path.display(),
+                label
+            );
+        }
+        return Ok(false);
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] would migrate legacy {} in {}",
+            label,
+            path.display()
+        );
+        return Ok(true);
+    }
+
+    let cleaned = existing[..start].trim_end();
+    atomic_write(path, cleaned)
+        .with_context(|| format!("Failed to migrate {label}: {}", path.display()))?;
+    if verbose > 0 {
+        eprintln!(
+            "[rtk-debug] agent_rules path={} label={} decision=legacy_suffix_removed",
+            path.display(),
+            label
+        );
+    }
+    Ok(true)
+}
+
+fn install_agent_rules(
+    path: &Path,
+    rules: &str,
+    label: &str,
+    recovery_cmd: &str,
+    ctx: InitContext,
+) -> Result<RtkBlockUpsert> {
+    if !ctx.dry_run {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+            }
+        }
+    }
+    migrate_legacy_agent_rules(path, label, ctx)?;
+    write_rtk_block(path, rules, label, recovery_cmd, ctx)
+}
+
 // ─── Cline / Roo Code support ─────────────────────────────────
 
 fn run_cline_mode(ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
     // Cline reads .clinerules from the project root (workspace-scoped)
     let rules_path = PathBuf::from(".clinerules");
-
-    let existing = fs::read_to_string(&rules_path).unwrap_or_default();
-    if existing.contains("RTK") || existing.contains("rtk") {
-        if !dry_run {
-            println!("\nRTK already configured for Cline in this project.\n");
-            println!("  Rules: .clinerules (already present)");
-        }
-    } else {
-        let new_content = if existing.trim().is_empty() {
-            CLINE_RULES.to_string()
-        } else {
-            format!("{}\n\n{}", existing.trim(), CLINE_RULES)
-        };
-        if dry_run {
-            println!(
-                "[dry-run] would write .clinerules: {}",
-                rules_path.display()
-            );
-            if verbose > 0 {
-                println!("[dry-run] content:\n{}", new_content);
-            }
-        } else {
-            fs::write(&rules_path, &new_content).context("Failed to write .clinerules")?;
-
-            if verbose > 0 {
-                eprintln!("Wrote .clinerules");
-            }
-
-            println!("\nRTK configured for Cline.\n");
-            println!("  Rules: .clinerules (installed)");
-        }
-    }
-    if !dry_run {
+    install_agent_rules(
+        &rules_path,
+        CLINE_RULES,
+        "Cline rules",
+        "rtk init --agent cline",
+        ctx,
+    )?;
+    if !ctx.dry_run {
+        println!("\nRTK configured for Cline.\n");
+        println!("  Rules: .clinerules");
         println!("  Cline will now use rtk commands for token savings.");
         println!("  Test with: git status\n");
     }
@@ -1798,47 +1886,23 @@ fn run_cline_mode(ctx: InitContext) -> Result<()> {
 }
 
 pub fn uninstall_cline_mode(ctx: InitContext) -> Result<()> {
-    uninstall_rules_file(Path::new(".clinerules"), CLINE_RULES, "Cline rules", ctx)
+    uninstall_rtk_block_file(Path::new(".clinerules"), "Cline rules", ctx)
 }
 
 fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
     // Windsurf reads .windsurfrules from the project root (workspace-scoped).
     // Global rules (~/.codeium/windsurf/memories/global_rules.md) are unreliable.
     let rules_path = PathBuf::from(".windsurfrules");
-
-    let existing = fs::read_to_string(&rules_path).unwrap_or_default();
-    if existing.contains("RTK") || existing.contains("rtk") {
-        if !dry_run {
-            println!("\nRTK already configured for Windsurf in this project.\n");
-            println!("  Rules: .windsurfrules (already present)");
-        }
-    } else {
-        let new_content = if existing.trim().is_empty() {
-            WINDSURF_RULES.to_string()
-        } else {
-            format!("{}\n\n{}", existing.trim(), WINDSURF_RULES)
-        };
-        if dry_run {
-            println!(
-                "[dry-run] would write .windsurfrules: {}",
-                rules_path.display()
-            );
-            if verbose > 0 {
-                println!("[dry-run] content:\n{}", new_content);
-            }
-        } else {
-            fs::write(&rules_path, &new_content).context("Failed to write .windsurfrules")?;
-
-            if verbose > 0 {
-                eprintln!("Wrote .windsurfrules");
-            }
-
-            println!("\nRTK configured for Windsurf Cascade.\n");
-            println!("  Rules: .windsurfrules (installed)");
-        }
-    }
-    if !dry_run {
+    install_agent_rules(
+        &rules_path,
+        WINDSURF_RULES,
+        "Windsurf rules",
+        "rtk init -g --agent windsurf",
+        ctx,
+    )?;
+    if !ctx.dry_run {
+        println!("\nRTK configured for Windsurf Cascade.\n");
+        println!("  Rules: .windsurfrules");
         println!("  Cascade will now use rtk commands for token savings.");
         println!("  Restart Windsurf. Test with: git status\n");
     }
@@ -1847,60 +1911,7 @@ fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
 }
 
 pub fn uninstall_windsurf_mode(ctx: InitContext) -> Result<()> {
-    uninstall_rules_file(
-        Path::new(".windsurfrules"),
-        WINDSURF_RULES,
-        "Windsurf rules",
-        ctx,
-    )
-}
-
-fn uninstall_rules_file(
-    path: &Path,
-    installed_content: &str,
-    label: &str,
-    ctx: InitContext,
-) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
-    if !path.exists() {
-        println!("RTK {label} were not installed (nothing to remove)");
-        return Ok(());
-    }
-
-    let existing = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {label}: {}", path.display()))?;
-    let Some(offset) = existing.find(installed_content) else {
-        println!("RTK {label} were not installed (nothing to remove)");
-        return Ok(());
-    };
-    let end = offset + installed_content.len();
-    let before = existing[..offset].trim_end();
-    let after = existing[end..].trim_start();
-    let cleaned = match (before.is_empty(), after.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => format!("{before}\n"),
-        (true, false) => format!("{after}\n"),
-        (false, false) => format!("{before}\n\n{after}\n"),
-    };
-
-    if dry_run {
-        println!("[dry-run] would remove RTK {label}: {}", path.display());
-        return Ok(());
-    }
-
-    if cleaned.is_empty() {
-        // nosemgrep: filesystem-deletion -- removes an RTK-managed rules file only when no user content remains.
-        fs::remove_file(path)
-            .with_context(|| format!("Failed to remove {label}: {}", path.display()))?;
-    } else {
-        atomic_write(path, &cleaned)
-            .with_context(|| format!("Failed to update {label}: {}", path.display()))?;
-    }
-    if verbose > 0 {
-        eprintln!("Removed RTK {label}: {}", path.display());
-    }
-    println!("RTK {label} removed: {}", path.display());
-    Ok(())
+    uninstall_rtk_block_file(Path::new(".windsurfrules"), "Windsurf rules", ctx)
 }
 
 // ─── Kilo Code support ────────────────────────────────────────
@@ -1913,57 +1924,29 @@ pub fn run_kilocode_mode(ctx: InitContext) -> Result<()> {
 
 pub fn uninstall_kilocode_mode(ctx: InitContext) -> Result<()> {
     let base_dir = std::env::current_dir()?;
-    uninstall_rules_file(
+    uninstall_rtk_block_file(
         &base_dir.join(".kilocode/rules/rtk-rules.md"),
-        KILOCODE_RULES,
         "Kilo Code rules",
         ctx,
     )
 }
 
 fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
     // Kilo Code reads .kilocode/rules/ from the project root (workspace-scoped)
     let target_dir = base_dir.join(".kilocode/rules");
     let rules_path = target_dir.join("rtk-rules.md");
-
-    let existing = fs::read_to_string(&rules_path).unwrap_or_default();
-    if existing.contains("RTK") || existing.contains("rtk") {
-        if !dry_run {
-            println!("\nRTK already configured for Kilo Code in this project.\n");
-            println!("  Rules: .kilocode/rules/rtk-rules.md (already present)");
-        }
-    } else {
-        let new_content = if existing.trim().is_empty() {
-            KILOCODE_RULES.to_string()
-        } else {
-            format!("{}\n\n{}", existing.trim(), KILOCODE_RULES)
-        };
-        if dry_run {
-            println!(
-                "[dry-run] would write {}: (and create parent dir if missing)",
-                rules_path.display()
-            );
-            if verbose > 0 {
-                println!("[dry-run] content:\n{}", new_content);
-            }
-        } else {
-            fs::create_dir_all(&target_dir)
-                .context("Failed to create .kilocode/rules directory")?;
-            fs::write(&rules_path, &new_content)
-                .context("Failed to write .kilocode/rules/rtk-rules.md")?;
-
-            if verbose > 0 {
-                eprintln!("Wrote .kilocode/rules/rtk-rules.md");
-            }
-
-            println!("\nRTK configured for Kilo Code.\n");
-            println!("  Rules: .kilocode/rules/rtk-rules.md (installed)");
-        }
-    }
-    if dry_run {
+    install_agent_rules(
+        &rules_path,
+        KILOCODE_RULES,
+        "Kilo Code rules",
+        "rtk init --agent kilocode",
+        ctx,
+    )?;
+    if ctx.dry_run {
         print_dry_run_footer();
     } else {
+        println!("\nRTK configured for Kilo Code.\n");
+        println!("  Rules: .kilocode/rules/rtk-rules.md");
         println!("  Kilo Code will now use rtk commands for token savings.");
         println!("  Test with: git status\n");
     }
@@ -1981,56 +1964,29 @@ pub fn run_antigravity_mode(ctx: InitContext) -> Result<()> {
 
 pub fn uninstall_antigravity_mode(ctx: InitContext) -> Result<()> {
     let base_dir = std::env::current_dir()?;
-    uninstall_rules_file(
+    uninstall_rtk_block_file(
         &base_dir.join(".agents/rules/antigravity-rtk-rules.md"),
-        ANTIGRAVITY_RULES,
         "Antigravity rules",
         ctx,
     )
 }
 
 fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
     // Antigravity reads .agents/rules/ from the project root (workspace-scoped)
     let target_dir = base_dir.join(".agents/rules");
     let rules_path = target_dir.join("antigravity-rtk-rules.md");
-
-    let existing = fs::read_to_string(&rules_path).unwrap_or_default();
-    if existing.contains("RTK") || existing.contains("rtk") {
-        if !dry_run {
-            println!("\nRTK already configured for Antigravity in this project.\n");
-            println!("  Rules: .agents/rules/antigravity-rtk-rules.md (already present)");
-        }
-    } else {
-        let new_content = if existing.trim().is_empty() {
-            ANTIGRAVITY_RULES.to_string()
-        } else {
-            format!("{}\n\n{}", existing.trim(), ANTIGRAVITY_RULES)
-        };
-        if dry_run {
-            println!(
-                "[dry-run] would write {}: (and create parent dir if missing)",
-                rules_path.display()
-            );
-            if verbose > 0 {
-                println!("[dry-run] content:\n{}", new_content);
-            }
-        } else {
-            fs::create_dir_all(&target_dir).context("Failed to create .agents/rules directory")?;
-            fs::write(&rules_path, &new_content)
-                .context("Failed to write .agents/rules/antigravity-rtk-rules.md")?;
-
-            if verbose > 0 {
-                eprintln!("Wrote .agents/rules/antigravity-rtk-rules.md");
-            }
-
-            println!("\nRTK configured for Google Antigravity.\n");
-            println!("  Rules: .agents/rules/antigravity-rtk-rules.md (installed)");
-        }
-    }
-    if dry_run {
+    install_agent_rules(
+        &rules_path,
+        ANTIGRAVITY_RULES,
+        "Antigravity rules",
+        "rtk init --agent antigravity",
+        ctx,
+    )?;
+    if ctx.dry_run {
         print_dry_run_footer();
     } else {
+        println!("\nRTK configured for Google Antigravity.\n");
+        println!("  Rules: .agents/rules/antigravity-rtk-rules.md");
         println!("  Antigravity will now use rtk commands for token savings.");
         println!("  Test with: git status\n");
     }
@@ -4726,17 +4682,25 @@ const COPILOT_INSTRUCTIONS: &str = r#"<!-- rtk-instructions v2 -->
 
 **rtk** is a CLI proxy that filters and compresses command outputs, saving 60-90% tokens.
 
-## Rule
+## Command Selection Priority
 
-Always prefix shell commands with `rtk`:
+Use the narrowest RTK route that can perform the task:
+
+1. **Direct RTK first**: use supported commands such as `rtk read`, `rtk rg`, `rtk grep`, `rtk find`, `rtk ls`, `rtk git ...`, `rtk cargo ...`, and `rtk gh ...`. Use `rtk --help` when unsure.
+2. **Executable fallback**: use `rtk proxy <program> <args>` only when RTK has no matching route or exact unfiltered output is required.
+3. **Shell fallback last**: use `rtk proxy pwsh -NoProfile -Command ...` or `rtk proxy cmd /d /c ...` only for shell built-ins, scripts, or control flow that cannot be expressed as a direct RTK command.
+
+On Windows, never hide an RTK-supported command inside PowerShell or Command Prompt:
 
 ```bash
-# Instead of:              Use:
-git status                 rtk git status
-git log -10                rtk git log -10
-cargo test                 rtk cargo test
-docker ps                  rtk docker ps
-kubectl get pods           rtk kubectl get pods
+# Wrong
+rtk proxy pwsh -Command "git status"
+
+# Correct
+rtk git status
+rtk cargo test
+rtk read src/main.rs
+rtk rg "TODO" src
 ```
 
 ## Meta commands (use directly)
@@ -5038,6 +5002,41 @@ mod tests {
     }
 
     #[test]
+    fn agent_instructions_require_direct_rtk_before_windows_shells() {
+        let templates = [
+            ("Claude/Gemini", RTK_SLIM),
+            ("Codex", RTK_SLIM_CODEX),
+            ("legacy/Kimi", RTK_INSTRUCTIONS),
+            ("Windsurf", WINDSURF_RULES),
+            ("Cline/Roo", CLINE_RULES),
+            ("Kilo Code", KILOCODE_RULES),
+            ("Antigravity", ANTIGRAVITY_RULES),
+            ("Copilot", COPILOT_INSTRUCTIONS),
+            (
+                "Copilot awareness",
+                include_str!("../../hooks/copilot/rtk-awareness.md"),
+            ),
+        ];
+
+        for (agent, template) in templates {
+            for required in [
+                "## Command Selection Priority",
+                "**Direct RTK first**",
+                "**Executable fallback**",
+                "**Shell fallback last**",
+                "rtk --help",
+                "rtk proxy pwsh",
+                "rtk proxy cmd",
+            ] {
+                assert!(
+                    template.contains(required),
+                    "{agent} instructions are missing direct-first policy text: {required}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_init_has_version_marker() {
         assert!(
             RTK_INSTRUCTIONS.contains(RTK_BLOCK_START),
@@ -5296,25 +5295,64 @@ mod tests {
     }
 
     #[test]
-    fn test_uninstall_rules_file_preserves_user_content() {
+    fn test_install_agent_rules_migrates_legacy_suffix_and_preserves_user_content() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(".windsurfrules");
+        let legacy = format!(
+            "# User rules\n\nKeep this.\n\n\
+             # RTK - Rust Token Killer (Windsurf)\n\n\
+             ## Rule\n\n{LEGACY_AGENT_RULE_TEXT} to minimize token consumption.\n\n\
+             ## Why\n\nRTK filters output. {LEGACY_AGENT_RULE_END}\n"
+        );
+        fs::write(&path, legacy).unwrap();
+
+        install_agent_rules(
+            &path,
+            WINDSURF_RULES,
+            "Windsurf rules",
+            "rtk init -g --agent windsurf",
+            InitContext::default(),
+        )
+        .unwrap();
+
+        let first = fs::read_to_string(&path).unwrap();
+        assert!(first.contains("# User rules"));
+        assert!(first.contains("Keep this."));
+        assert!(!first.contains("## Rule"));
+        assert!(first.contains("## Command Selection Priority"));
+        assert_eq!(first.matches(RTK_BLOCK_START).count(), 1);
+        assert_eq!(first.matches(RTK_BLOCK_END).count(), 1);
+
+        install_agent_rules(
+            &path,
+            WINDSURF_RULES,
+            "Windsurf rules",
+            "rtk init -g --agent windsurf",
+            InitContext::default(),
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), first);
+    }
+
+    #[test]
+    fn test_uninstall_agent_rules_preserves_user_content() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join(".clinerules");
         fs::write(&path, format!("user rule\n\n{CLINE_RULES}")).unwrap();
 
-        uninstall_rules_file(&path, CLINE_RULES, "Cline rules", InitContext::default()).unwrap();
+        uninstall_rtk_block_file(&path, "Cline rules", InitContext::default()).unwrap();
 
         assert_eq!(fs::read_to_string(path).unwrap(), "user rule\n");
     }
 
     #[test]
-    fn test_uninstall_rules_file_dry_run_preserves_file() {
+    fn test_uninstall_agent_rules_dry_run_preserves_file() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("rtk-rules.md");
         fs::write(&path, KILOCODE_RULES).unwrap();
 
-        uninstall_rules_file(
+        uninstall_rtk_block_file(
             &path,
-            KILOCODE_RULES,
             "Kilo Code rules",
             InitContext {
                 verbose: 1,

@@ -1,6 +1,16 @@
 # RTK - Rust Token Killer
 
-**Usage**: Token-optimized CLI proxy (cuts up to 90% of bash output)
+**Usage**: Token-optimized CLI proxy (cuts up to 90% of command output)
+
+## Command Selection Priority
+
+Use the narrowest RTK route that can perform the task:
+
+1. **Direct RTK first**: use supported commands such as `rtk read`, `rtk rg`, `rtk grep`, `rtk find`, `rtk ls`, `rtk git ...`, `rtk cargo ...`, and `rtk gh ...`. Use `rtk --help` when unsure.
+2. **Executable fallback**: use `rtk proxy <program> <args>` only when RTK has no matching route or exact unfiltered output is required.
+3. **Shell fallback last**: use `rtk proxy pwsh -NoProfile -Command ...` or `rtk proxy cmd /d /c ...` only for shell built-ins, scripts, or control flow that cannot be expressed as a direct RTK command.
+
+On Windows, never hide an RTK-supported command inside PowerShell or Command Prompt. Use `rtk git status`, not `rtk proxy pwsh -Command "git status"`.
 
 ## Meta Commands (always use rtk directly)
 
@@ -21,9 +31,10 @@ which rtk             # Verify correct binary
 
 ⚠️ **Name collision**: If `rtk gain` fails, you may have reachingforthejack/rtk (Rust Type Kit) installed instead.
 
-## Hook-Based Usage
+## Hook Safety Net
 
-All other commands are automatically rewritten by the Claude Code hook.
+Call supported RTK commands directly. The Claude Code hook rewrites accidental
+unprefixed commands as a fallback.
 Example: `git status` → `rtk git status` (transparent, 0 tokens overhead)
 
 Refer to CLAUDE.md for full command reference.
