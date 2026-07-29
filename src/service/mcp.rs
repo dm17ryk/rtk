@@ -6,6 +6,7 @@ use super::{
 };
 use crate::core::config::Config;
 use crate::core::tracking::Tracker;
+use crate::hooks::agent_policy;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::fs;
@@ -15,12 +16,6 @@ use std::time::Duration;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const DEFAULT_LIST_LIMIT: usize = 50;
-const AGENT_INSTRUCTIONS: &str = "Prefer the typed run_filtered tool for commands supported by \
-RTK. Pass RTK arguments without a leading `rtk`, for example \
-{\"rtk_args\":[\"git\",\"status\"]} or {\"rtk_args\":[\"read\",\"src/main.rs\"]}. \
-Use a host shell only when the task requires shell built-ins, a script, or control flow that \
-cannot be expressed as RTK argv. On Windows, PowerShell/pwsh and cmd are last-resort fallbacks; \
-never wrap an RTK-supported command inside them.";
 
 pub fn run() -> Result<()> {
     let stdin = io::stdin();
@@ -74,7 +69,7 @@ fn handle_request(request: &Value) -> Option<Value> {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "rtk", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": AGENT_INSTRUCTIONS
+                "instructions": agent_policy::MCP_INSTRUCTIONS
             }),
         )),
         "tools/list" => Some(rpc_result(id, json!({ "tools": tool_definitions() }))),
@@ -95,7 +90,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "run_filtered",
-            "description": "Preferred execution tool for RTK-supported commands. Pass arguments without a leading `rtk` (for example [\"git\",\"status\"], [\"read\",\"file\"], or [\"rg\",\"TODO\",\"src\"]). Returns bounded filtered output. Do not wrap supported commands in PowerShell/pwsh or cmd; use a host shell only for shell-only behavior.",
+            "description": agent_policy::RUN_FILTERED_DESCRIPTION,
             "inputSchema": { "type": "object", "required": ["rtk_args"], "properties": {
                 "rtk_args": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
                 "cwd": { "type": "string" },
@@ -473,7 +468,10 @@ mod tests {
         .expect("initialize response");
         assert_eq!(response["result"]["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(response["result"]["serverInfo"]["name"], "rtk");
-        assert_eq!(response["result"]["instructions"], AGENT_INSTRUCTIONS);
+        assert_eq!(
+            response["result"]["instructions"],
+            agent_policy::MCP_INSTRUCTIONS
+        );
         assert!(response["result"]["instructions"]
             .as_str()
             .is_some_and(|instructions| instructions.contains("last-resort fallbacks")));

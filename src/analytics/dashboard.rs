@@ -188,7 +188,10 @@ fn draw_status(frame: &mut Frame, status: Option<&str>, area: Rect) {
     let (text, color) = match status {
         Some(message) => (format!(" {message}"), Color::Red),
         None => (
-            " q/Esc: quit | Tab/1-5 or n/p: tabs | r: refresh | auto-refresh: 30s".to_string(),
+            format!(
+                " q/Esc: quit | Tab/1-5 or n/p: tabs | r: refresh | auto-refresh: {}s",
+                AUTO_REFRESH_INTERVAL.as_secs()
+            ),
             Color::DarkGray,
         ),
     };
@@ -198,29 +201,76 @@ fn draw_status(frame: &mut Frame, status: Option<&str>, area: Rect) {
     );
 }
 
+struct SummaryDisplay {
+    commands: String,
+    input: String,
+    output: String,
+    saved: String,
+    savings: String,
+    total_time: String,
+    average_time: String,
+}
+
+fn summary_display(summary: &GainSummary) -> SummaryDisplay {
+    SummaryDisplay {
+        commands: summary.total_commands.to_string(),
+        input: format_tokens(summary.total_input),
+        output: format_tokens(summary.total_output),
+        saved: format_tokens(summary.total_saved),
+        savings: format!("{:.1}%", summary.avg_savings_pct),
+        total_time: format_duration(summary.total_time_ms),
+        average_time: format_duration(summary.avg_time_ms),
+    }
+}
+
+struct CommandDisplay<'a> {
+    command: &'a str,
+    count: String,
+    saved: String,
+    savings: String,
+    time: String,
+}
+
+fn command_display(
+    command: &str,
+    count: usize,
+    saved: usize,
+    savings: f64,
+    time: u64,
+) -> CommandDisplay<'_> {
+    CommandDisplay {
+        command,
+        count: count.to_string(),
+        saved: format_tokens(saved),
+        savings: format!("{savings:.1}%"),
+        time: format_duration(time),
+    }
+}
+
 fn draw_overview(frame: &mut Frame, data: &DashboardData, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(10), Constraint::Min(0)])
         .split(area);
     let summary = &data.summary;
+    let display = summary_display(summary);
     let bar_width = chunks[0].width.saturating_sub(26).min(60) as usize;
     let stats = vec![
         Line::from(vec![
-            metric_span("Commands: ", summary.total_commands.to_string()),
+            metric_span("Commands: ", display.commands),
             Span::raw("    "),
-            metric_span("Input: ", format_tokens(summary.total_input)),
+            metric_span("Input: ", display.input),
             Span::raw("    "),
-            metric_span("Output: ", format_tokens(summary.total_output)),
+            metric_span("Output: ", display.output),
         ]),
         Line::from(vec![
-            metric_span("Tokens saved: ", format_tokens(summary.total_saved)),
-            Span::raw(format!(" ({:.1}%)", summary.avg_savings_pct)),
+            metric_span("Tokens saved: ", display.saved),
+            Span::raw(format!(" ({})", display.savings)),
         ]),
         Line::from(vec![
-            metric_span("Execution time: ", format_duration(summary.total_time_ms)),
+            metric_span("Execution time: ", display.total_time),
             Span::raw(" total    "),
-            metric_span("Average: ", format_duration(summary.avg_time_ms)),
+            metric_span("Average: ", display.average_time),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -278,19 +328,18 @@ fn draw_command_table(frame: &mut Frame, summary: &GainSummary, area: Rect, titl
             let impact = ((*saved as f64 / max_saved as f64) * impact_width as f64)
                 .round()
                 .max(1.0) as usize;
+            let display = command_display(command, *count, *saved, *savings, *time);
             Row::new(vec![
                 Cell::from(format!("{}.", index + 1)),
-                Cell::from(command.as_str()).style(Style::default().fg(Color::Cyan)),
-                Cell::from(format!("{count}")),
-                Cell::from(format_tokens(*saved)),
-                Cell::from(format!("{savings:.1}%")).style(Style::default().fg(
-                    if *savings >= 50.0 {
-                        Color::Green
-                    } else {
-                        Color::Red
-                    },
-                )),
-                Cell::from(format_duration(*time)),
+                Cell::from(display.command).style(Style::default().fg(Color::Cyan)),
+                Cell::from(display.count),
+                Cell::from(display.saved),
+                Cell::from(display.savings).style(Style::default().fg(if *savings >= 50.0 {
+                    Color::Green
+                } else {
+                    Color::Red
+                })),
+                Cell::from(display.time),
                 Cell::from("█".repeat(impact)).style(Style::default().fg(Color::Blue)),
             ])
         },
@@ -473,38 +522,39 @@ fn health_line(label: &'static str, value: &str, color: Color) -> Line<'static> 
 fn render_plain(project: bool) -> Result<()> {
     let data = DashboardData::load(project)?;
     let mut stdout = io::stdout();
-    writeln!(
-        stdout,
-        "RTK Dashboard v{} [{}]",
-        env!("CARGO_PKG_VERSION"),
-        if project { "project" } else { "global" }
-    )?;
-    writeln!(stdout)?;
-    writeln!(stdout, "Commands:      {}", data.summary.total_commands)?;
-    writeln!(
-        stdout,
-        "Tokens saved:  {} ({:.1}%)",
-        format_tokens(data.summary.total_saved),
-        data.summary.avg_savings_pct
-    )?;
-    writeln!(
-        stdout,
-        "Execution:     {} total / {} average",
-        format_duration(data.summary.total_time_ms),
-        format_duration(data.summary.avg_time_ms)
-    )?;
-    writeln!(stdout)?;
-    writeln!(stdout, "Highest impact commands:")?;
-    for (command, count, saved, savings, time) in data.summary.by_command.iter().take(10) {
-        writeln!(
-            stdout,
-            "  {command:<36} {count:>6} {:>9} {:>6.1}% {:>8}",
-            format_tokens(*saved),
-            savings,
-            format_duration(*time)
-        )?;
-    }
+    write!(stdout, "{}", plain_dashboard_text(&data, project))?;
     Ok(())
+}
+
+fn plain_dashboard_text(data: &DashboardData, project: bool) -> String {
+    let display = summary_display(&data.summary);
+    let mut lines = vec![
+        format!(
+            "RTK Dashboard v{} [{}]",
+            env!("CARGO_PKG_VERSION"),
+            if project { "project" } else { "global" }
+        ),
+        String::new(),
+        format!("Commands:      {}", display.commands),
+        format!("Input/output:  {} / {}", display.input, display.output),
+        format!("Tokens saved:  {} ({})", display.saved, display.savings),
+        format!(
+            "Execution:     {} total / {} average",
+            display.total_time, display.average_time
+        ),
+        String::new(),
+        "Highest impact commands:".to_string(),
+    ];
+    lines.extend(data.summary.by_command.iter().take(10).map(
+        |(command, count, saved, savings, time)| {
+            let display = command_display(command, *count, *saved, *savings, *time);
+            format!(
+                "  {:<36} {:>6} {:>9} {:>7} {:>8}",
+                display.command, display.count, display.saved, display.savings, display.time
+            )
+        },
+    ));
+    format!("{}\n", lines.join("\n"))
 }
 
 struct DashboardData {
@@ -627,6 +677,46 @@ mod tests {
         assert!(!refresh_due(Duration::from_secs(29)));
         assert!(refresh_due(Duration::from_secs(30)));
         assert!(refresh_due(Duration::from_secs(31)));
+    }
+
+    #[test]
+    fn status_footer_uses_the_configured_refresh_interval() {
+        let backend = TestBackend::new(110, 1);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| draw_status(frame, None, frame.area()))
+            .expect("status frame");
+        let rendered = backend_text(&terminal);
+        assert!(rendered.contains(&format!(
+            "auto-refresh: {}s",
+            AUTO_REFRESH_INTERVAL.as_secs()
+        )));
+    }
+
+    #[test]
+    fn plain_output_uses_shared_summary_and_command_fields() {
+        let data = fixture();
+        let summary = summary_display(&data.summary);
+        let command = command_display("rtk git status", 1, 80, 80.0, 25);
+        let rendered = plain_dashboard_text(&data, false);
+
+        assert!(rendered.contains(&format!(
+            "Input/output:  {} / {}",
+            summary.input, summary.output
+        )));
+        assert!(rendered.contains(&format!(
+            "Tokens saved:  {} ({})",
+            summary.saved, summary.savings
+        )));
+        for field in [
+            command.command,
+            command.count.as_str(),
+            command.saved.as_str(),
+            command.savings.as_str(),
+            command.time.as_str(),
+        ] {
+            assert!(rendered.contains(field), "missing shared field: {field}");
+        }
     }
 
     #[test]
