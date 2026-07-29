@@ -46,6 +46,11 @@ The server implements `initialize`, `notifications/initialized`, `tools/list`,
 and `tools/call`. It exposes command rewriting, filtered RTK execution,
 tracking summaries, discovery results, and bounded tee-artifact access.
 
+The `initialize` response includes a direct-first instruction for the model,
+and the `run_filtered` tool description repeats it. MCP-aware agents are told
+to prefer typed RTK argv over launching a host shell. On Windows, PowerShell,
+`pwsh`, and `cmd` are reserved for shell-only behavior.
+
 `run_filtered` accepts only a typed argument array such as
 `["git", "status"]`; it never accepts a shell command string. Working
 directories must already exist and output is bounded by an explicit byte limit.
@@ -62,5 +67,5 @@ directory and `.log` files.
 Run rtk dashboard (or its rtk tui alias) for a local interactive view of the
 same tracking data. It provides Overview, Commands, Activity, Health, and
 Artifacts tabs, supports global or current-project scope, and refreshes every
-two seconds. Press 1-5 to select a tab, Tab or n/p to navigate, and q or Esc
+30 seconds. Press 1-5 to select a tab, Tab or n/p to navigate, and q or Esc
 to exit.

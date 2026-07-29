@@ -6,6 +6,7 @@ use super::{
 };
 use crate::core::config::Config;
 use crate::core::tracking::Tracker;
+use crate::hooks::agent_policy;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::fs;
@@ -67,7 +68,8 @@ fn handle_request(request: &Value) -> Option<Value> {
             json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "rtk", "version": env!("CARGO_PKG_VERSION") }
+                "serverInfo": { "name": "rtk", "version": env!("CARGO_PKG_VERSION") },
+                "instructions": agent_policy::MCP_INSTRUCTIONS
             }),
         )),
         "tools/list" => Some(rpc_result(id, json!({ "tools": tool_definitions() }))),
@@ -81,14 +83,14 @@ fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "rewrite_command",
-            "description": "Rewrite a shell command using RTK's hook rules.",
+            "description": "Inspect how RTK would rewrite shell command text. For execution, prefer run_filtered with typed RTK argv.",
             "inputSchema": { "type": "object", "required": ["command"], "properties": {
                 "command": { "type": "string" }
             }}
         }),
         json!({
             "name": "run_filtered",
-            "description": "Run an RTK command using typed argv and return bounded output.",
+            "description": agent_policy::RUN_FILTERED_DESCRIPTION,
             "inputSchema": { "type": "object", "required": ["rtk_args"], "properties": {
                 "rtk_args": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
                 "cwd": { "type": "string" },
@@ -466,6 +468,13 @@ mod tests {
         .expect("initialize response");
         assert_eq!(response["result"]["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(response["result"]["serverInfo"]["name"], "rtk");
+        assert_eq!(
+            response["result"]["instructions"],
+            agent_policy::MCP_INSTRUCTIONS
+        );
+        assert!(response["result"]["instructions"]
+            .as_str()
+            .is_some_and(|instructions| instructions.contains("last-resort fallbacks")));
     }
 
     #[test]
@@ -486,7 +495,13 @@ mod tests {
         }))
         .expect("tools/list response");
         let tools = response["result"]["tools"].as_array().expect("tools array");
-        assert!(tools.iter().any(|tool| tool["name"] == "run_filtered"));
+        let run_filtered = tools
+            .iter()
+            .find(|tool| tool["name"] == "run_filtered")
+            .expect("run_filtered tool");
+        assert!(run_filtered["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("Do not wrap supported commands")));
         let gain = tools
             .iter()
             .find(|tool| tool["name"] == "gain_summary")

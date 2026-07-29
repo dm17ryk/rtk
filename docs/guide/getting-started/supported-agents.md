@@ -223,7 +223,7 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) rewrite supported top-level commands before execution. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API. Generated instructions and MCP server guidance additionally tell agents not to hide supported commands inside a PowerShell or Command Prompt wrapper.
 
 ## Windows support
 
@@ -232,6 +232,8 @@ shell. On native Windows:
 
 - `rtk init -g` installs the native hook or plugin integration supported by the
   selected agent
+- Generated rules prefer direct commands such as `rtk read`, `rtk rg`, and
+  `rtk git`; `rtk proxy pwsh` and `rtk proxy cmd` are shell-only fallbacks
 - Filters work normally (`rtk cargo test`, `rtk git status`)
 - PowerShell aliases such as `dir` are recognized as aliases and are rewritten
   to the corresponding RTK command where safe

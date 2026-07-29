@@ -136,6 +136,14 @@ hook/plugin/rules and an `rtk mcp` stdio registration. Re-run the same command
 after moving or upgrading the RTK binary to refresh its absolute MCP command
 path. Use `--no-mcp` to install only the traditional integration.
 
+Instruction-backed integrations also install a direct-first command policy.
+Agents are told to call supported routes such as `rtk read`, `rtk rg`,
+`rtk git`, and `rtk cargo` directly. On Windows, `rtk proxy pwsh` and
+`rtk proxy cmd` are explicitly last-resort fallbacks for shell-only behavior,
+not wrappers for commands RTK already supports. MCP-aware clients receive the
+same policy in the server's initialization response and `run_filtered` tool
+description.
+
 Pi is the exception: Pi deliberately has no native MCP client, so its RTK
 TypeScript extension is the complete integration.
 
