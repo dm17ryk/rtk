@@ -15,6 +15,7 @@ categories = ["command-line-utilities", "development-tools"]
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
+ratatui = "0.29"
 anyhow = "1.0"
 ignore = "0.4"
 walkdir = "2"
