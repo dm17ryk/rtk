@@ -1333,7 +1333,14 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let toml_match = if core::toml_filter::toml_disabled() {
+    let sqlite3_filterable = lookup_cmd
+        .split_whitespace()
+        .next()
+        .map(|command| {
+            command != "sqlite3" || core::args_utils::sqlite3_output_is_filterable(&args)
+        })
+        .unwrap_or(true);
+    let toml_match = if core::toml_filter::toml_disabled() || !sqlite3_filterable {
         None
     } else {
         core::toml_filter::find_matching_filter(&lookup_cmd)
