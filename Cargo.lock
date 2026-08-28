@@ -1228,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "rtk"
-version = "0.44.2-dev.2"
+version = "0.46.1-dev.1"
 dependencies = [
  "anyhow",
  "automod",
