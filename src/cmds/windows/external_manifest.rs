@@ -15,6 +15,7 @@ pub enum Presence {
     Inbox,
     OptionalFeature,
     SeparateInstall,
+    Unavailable,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Win11Support {
@@ -27,10 +28,22 @@ pub struct Win10Support {
     pub from_21h1: VersionStatus,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Win10Presence {
+    pub before_21h1: Presence,
+    pub from_21h1: Presence,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Win11Presence {
+    pub before_24h2: Presence,
+    pub from_24h2: Presence,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DesktopSupport {
     pub win10: Win10Support,
     pub win11: Win11Support,
     pub presence: Presence,
+    pub win10_presence: Win10Presence,
+    pub win11_presence: Win11Presence,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExternalRoute {
@@ -85,6 +98,7 @@ pub enum CatalogDisposition {
     UnsupportedOnDesktop,
     OptionalDesktopFeature,
     SeparateInstall,
+    VersionConditional,
     ServerOnly,
     SubcommandOnly,
 }
@@ -103,7 +117,7 @@ pub const OFFICIAL_SOURCE_RAW_SHA256: &str =
 pub const OFFICIAL_SOURCE_ENTRY_COUNT: usize = 339;
 #[cfg(test)]
 pub const OFFICIAL_SOURCE_FIXTURE_SHA256: &str =
-    "12311903092fb16f3c9596394b7d5e1fafa0badfa354c9e704a68898b961d45c";
+    "d46109ef38c01e9e022fa21393782df2c75a2e2f986b298b48d9471fed80347a";
 const SOURCE: Provenance = Provenance::MicrosoftWindowsCommandsAz20250729;
 const W11: Win11Support = Win11Support {
     before_24h2: VersionStatus::Supported,
@@ -113,20 +127,50 @@ const W10: Win10Support = Win10Support {
     before_21h1: VersionStatus::Supported,
     from_21h1: VersionStatus::Supported,
 };
+const INBOX10: Win10Presence = Win10Presence {
+    before_21h1: Presence::Inbox,
+    from_21h1: Presence::Inbox,
+};
+const INBOX11: Win11Presence = Win11Presence {
+    before_24h2: Presence::Inbox,
+    from_24h2: Presence::Inbox,
+};
+const OPTIONAL10: Win10Presence = Win10Presence {
+    before_21h1: Presence::OptionalFeature,
+    from_21h1: Presence::OptionalFeature,
+};
+const OPTIONAL11: Win11Presence = Win11Presence {
+    before_24h2: Presence::OptionalFeature,
+    from_24h2: Presence::OptionalFeature,
+};
+const SEPARATE10: Win10Presence = Win10Presence {
+    before_21h1: Presence::SeparateInstall,
+    from_21h1: Presence::SeparateInstall,
+};
+const SEPARATE11: Win11Presence = Win11Presence {
+    before_24h2: Presence::SeparateInstall,
+    from_24h2: Presence::SeparateInstall,
+};
 const D: DesktopSupport = DesktopSupport {
     win10: W10,
     win11: W11,
     presence: Presence::Inbox,
+    win10_presence: INBOX10,
+    win11_presence: INBOX11,
 };
 const O: DesktopSupport = DesktopSupport {
     win10: W10,
     win11: W11,
     presence: Presence::OptionalFeature,
+    win10_presence: OPTIONAL10,
+    win11_presence: OPTIONAL11,
 };
 const S: DesktopSupport = DesktopSupport {
     win10: W10,
     win11: W11,
     presence: Presence::SeparateInstall,
+    win10_presence: SEPARATE10,
+    win11_presence: SEPARATE11,
 };
 const W: DesktopSupport = DesktopSupport {
     win10: Win10Support {
@@ -138,6 +182,11 @@ const W: DesktopSupport = DesktopSupport {
         from_24h2: VersionStatus::Unsupported,
     },
     presence: Presence::OptionalFeature,
+    win10_presence: INBOX10,
+    win11_presence: Win11Presence {
+        before_24h2: Presence::OptionalFeature,
+        from_24h2: Presence::Unavailable,
+    },
 };
 macro_rules! x {($n:literal,$d:expr,$_m:expr)=>{ExternalCommand{name:$n,aliases:&[],route:ExternalRoute::NativeExecutable,desktop:$d,modes:ANY,strategy:ExternalStrategy::IdentityRaw,identity_reason:"no external adapter is released in the stable CMD increment",status:ExternalStatus::RecognizedRaw,provenance:SOURCE}};($n:literal,[$($a:literal),+],$d:expr,$_m:expr)=>{ExternalCommand{name:$n,aliases:&[$($a),+],route:ExternalRoute::NativeExecutable,desktop:$d,modes:ANY,strategy:ExternalStrategy::IdentityRaw,identity_reason:"no external adapter is released in the stable CMD increment",status:ExternalStatus::RecognizedRaw,provenance:SOURCE}}}
 #[allow(dead_code)]
@@ -186,6 +235,7 @@ pub fn official_top_level_coverage() -> &'static [CatalogCoverage] {
                     "unsupported-desktop" => CatalogDisposition::UnsupportedOnDesktop,
                     "optional-feature" => CatalogDisposition::OptionalDesktopFeature,
                     "separate-install" => CatalogDisposition::SeparateInstall,
+                    "version-conditional" => CatalogDisposition::VersionConditional,
                     "server-only" => CatalogDisposition::ServerOnly,
                     "subcommand-only" => CatalogDisposition::SubcommandOnly,
                     _ => panic!("bad disposition"),
@@ -220,6 +270,7 @@ pub fn validate_external_manifest() -> Result<(), String> {
                         CatalogDisposition::DesktopExternal
                             | CatalogDisposition::OptionalDesktopFeature
                             | CatalogDisposition::SeparateInstall
+                            | CatalogDisposition::VersionConditional
                     )
             })
         {
@@ -236,6 +287,7 @@ pub fn validate_external_manifest() -> Result<(), String> {
             CatalogDisposition::DesktopExternal
                 | CatalogDisposition::OptionalDesktopFeature
                 | CatalogDisposition::SeparateInstall
+                | CatalogDisposition::VersionConditional
         ) && classify_external(r.normalized_name).is_none()
         {
             return Err(format!("{} lacks external", r.source_name));

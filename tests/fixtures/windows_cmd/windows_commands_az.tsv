@@ -211,7 +211,7 @@ pubprn	pubprn	unsupported-desktop
 pushd	pushd	cmd-builtin
 pushprinterconnections	pushprinterconnections	unsupported-desktop
 pwlauncher	pwlauncher	server-only
-pwsh	pwsh	optional-feature
+pwsh	pwsh	separate-install
 qappsrv	query	desktop-external
 qprocess	query	desktop-external
 query	query	desktop-external
@@ -337,7 +337,7 @@ winnt32	winnt32	unsupported-desktop
 winrs	winrs	desktop-external
 winsat mem	winsat	desktop-external
 winsat mfmedia	winsat	desktop-external
-wmic	wmic	desktop-external
+wmic	wmic	version-conditional
 writer	writer	unsupported-desktop
 wscript	wscript	desktop-external
 xcopy	xcopy	desktop-external
