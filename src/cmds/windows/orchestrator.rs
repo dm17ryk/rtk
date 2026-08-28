@@ -1,7 +1,7 @@
 //! Public and hidden execution paths for CMD expressions.
 
 use super::catalog::{builtins, CommandMode};
-use super::parser::parse_expression;
+use super::parser::{parse_expression, OperatorKind};
 use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
 use std::path::Path;
@@ -17,6 +17,12 @@ pub enum Invocation {
     Passthrough(Vec<OsString>),
     /// Invoke a one-shot expression using the hardened default switches.
     Execute(String),
+    /// Invoke independently supplied arguments through delayed-expansion
+    /// environment transport, so their CMD metacharacters remain data.
+    Transport {
+        expression: String,
+        environment: Vec<(OsString, OsString)>,
+    },
 }
 
 /// Classify public `rtk cmd` arguments without losing a single raw expression.
@@ -48,16 +54,30 @@ pub fn prepare_invocation(args: &[OsString]) -> Result<Invocation> {
         return Ok(Invocation::Execute(String::new()));
     }
 
-    let expression = if expression_args.len() == 1 {
-        expression_args[0].clone()
+    let invocation = if expression_args.len() == 1 {
+        Invocation::Execute(expression_args[0].clone())
     } else {
-        expression_args
+        let environment = expression_args
             .iter()
-            .map(|argument| quote_cmd_argument(argument))
+            .enumerate()
+            .map(|(index, argument)| {
+                validate_transport_argument(argument)?;
+                Ok((
+                    OsString::from(format!("RTK_CMD_ARG_{index}")),
+                    OsString::from(argument),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let expression = (0..expression_args.len())
+            .map(|index| format!("!RTK_CMD_ARG_{index}!"))
             .collect::<Vec<_>>()
-            .join(" ")
+            .join(" ");
+        Invocation::Transport {
+            expression,
+            environment,
+        }
     };
-    Ok(Invocation::Execute(expression))
+    Ok(invocation)
 }
 
 /// Rewrite only cataloged, stateless query segments. Any opaque parser result
@@ -67,7 +87,13 @@ pub fn rewrite_expression(source: &str, rtk_executable: &Path) -> String {
     // Percent expansion happens once for a complete parent CMD line, before
     // stateful segments execute. Sending a later segment through a child CMD
     // would expand it at a different time, so variables fail open as a unit.
-    if parsed.opaque_reason.is_some() || source.contains('%') {
+    if parsed.opaque_reason.is_some()
+        || source.contains('%')
+        || parsed
+            .operators
+            .iter()
+            .any(|operator| operator.kind == OperatorKind::RedirectInput)
+    {
         return source.to_owned();
     }
 
@@ -96,7 +122,7 @@ pub fn rewrite_expression(source: &str, rtk_executable: &Path) -> String {
         let at_prefix = original.starts_with('@').then_some("@").unwrap_or("");
         let replacement = format!(
             "{at_prefix}{} {SEGMENT_RUNNER} --hex {}",
-            quote_cmd_argument(&rtk_executable.to_string_lossy()),
+            quote_runner_executable(&rtk_executable.to_string_lossy()),
             hex_encode(original.as_bytes())
         );
         rewritten.replace_range(segment.span.start..segment.span.end, &replacement);
@@ -112,18 +138,34 @@ pub fn run(args: &[OsString]) -> Result<i32> {
     }
 
     match prepare_invocation(args)? {
-        Invocation::Passthrough(arguments) => execute_cmd(&arguments),
+        Invocation::Passthrough(arguments) => execute_cmd(&arguments, &[]),
         Invocation::Execute(source) => {
             let executable =
                 std::env::current_exe().context("Failed to resolve the current RTK executable")?;
             let expression = rewrite_expression(&source, &executable);
-            execute_cmd(&[
+            execute_cmd(
+                &[
+                    OsString::from("/D"),
+                    OsString::from("/S"),
+                    OsString::from("/C"),
+                    OsString::from(expression),
+                ],
+                &[],
+            )
+        }
+        Invocation::Transport {
+            expression,
+            environment,
+        } => execute_cmd(
+            &[
                 OsString::from("/D"),
                 OsString::from("/S"),
+                OsString::from("/V:ON"),
                 OsString::from("/C"),
                 OsString::from(expression),
-            ])
-        }
+            ],
+            &environment,
+        ),
     }
 }
 
@@ -134,33 +176,45 @@ pub fn run_segment(encoded: &str) -> Result<i32> {
     }
     let bytes = hex_decode(encoded)?;
     let source = String::from_utf8(bytes).context("Invalid UTF-8 CMD segment")?;
-    execute_cmd(&[
-        OsString::from("/D"),
-        OsString::from("/S"),
-        OsString::from("/C"),
-        OsString::from(source),
-    ])
+    execute_cmd(
+        &[
+            OsString::from("/D"),
+            OsString::from("/S"),
+            OsString::from("/C"),
+            OsString::from(source),
+        ],
+        &[],
+    )
 }
 
-fn execute_cmd(arguments: &[OsString]) -> Result<i32> {
+fn execute_cmd(arguments: &[OsString], environment: &[(OsString, OsString)]) -> Result<i32> {
     let cmd_executable = crate::core::utils::resolve_binary("cmd.exe")
         .context("Failed to resolve cmd.exe from PATH")?;
     let status = Command::new(cmd_executable)
         .args(arguments)
+        .envs(environment.iter().map(|(key, value)| (key, value)))
         .status()
         .context("Failed to execute cmd.exe")?;
     Ok(crate::core::utils::exit_code_from_status(&status, "cmd"))
 }
 
-fn quote_cmd_argument(argument: &str) -> String {
-    if !argument.is_empty()
-        && argument
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "_-.\\/:=%+@".contains(character))
-    {
-        return argument.to_owned();
+fn validate_transport_argument(argument: &str) -> Result<()> {
+    if argument.contains(['\r', '\n', '!']) {
+        bail!(
+            "multi-argument rtk cmd cannot safely represent CR, LF, or !; pass one raw CMD expression"
+        );
     }
-    format!("\"{}\"", argument.replace('"', "\\\""))
+    Ok(())
+}
+
+fn quote_runner_executable(path: &str) -> String {
+    if path
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "_-.\\/:=+@".contains(character))
+    {
+        return path.to_owned();
+    }
+    format!("\"{}\"", path.replace('"', "^\""))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

@@ -73,6 +73,63 @@ segments without recursive orchestration.
 
 - Structured filters and per-segment savings accounting are intentionally not
   implemented until Task 3. Hidden runners are identity execution only.
-- Multi-argument public invocations are reconstructed with CMD-safe quoting;
-  callers requiring exact raw CMD metacharacter or quote behavior should pass a
-  single raw expression, which is preserved exactly.
+- The multi-argument transport rejects CR, LF, and `!`; callers needing those
+  forms should pass one raw expression, which remains parser-governed and
+  fail-open where required.
+
+## Fix Round 1
+
+### Changed Behavior
+
+- `RedirectInput` (`<`) now has the same full-expression native fallback as
+  output redirection. It is enforced from Task 1's parsed operator list even
+  though the parser correctly leaves `opaque_reason` unset for input redirects.
+- Multi-argument input no longer interpolates arguments into a CMD source
+  string. It now passes each argument in a per-child environment variable and
+  invokes CMD with `/V:ON` and `!RTK_CMD_ARG_n!` tokens. Delayed expansion is
+  late enough that embedded quotes and `&|<>` remain argument data rather than
+  changing command syntax. CR, LF, and `!` are rejected for this transport with
+  a clear request to use one raw expression.
+
+### Direct Coverage
+
+- `rewrite_fails_open_for_input_redirection_even_when_the_parser_is_not_opaque`
+  checks that Task 1 returns `RedirectInput` without an opaque reason and that
+  orchestration nevertheless leaves `type < input.txt` unchanged.
+- `redirection_and_batch_input_fail_open_to_native_cmd` now compares native CMD
+  and `rtk cmd` stdout, stderr, and exit status for `type < input.txt`.
+- `public_cmd_transports_embedded_quotes_and_cmd_metacharacters_as_data`
+  asserts the environment transport shape for an argument containing an
+  embedded quote, `&`, and `>`.
+- `multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_command`
+  supplies that adversarial argument to the public CLI and verifies that its
+  redirected marker file is never created.
+
+### TDD Red/Green Evidence
+
+1. RED: `rtk test cargo test
+   rewrite_fails_open_for_input_redirection_even_when_the_parser_is_not_opaque
+   --bin rtk` reported `0 passed; 1 failed` before `RedirectInput` was added to
+   the orchestration fallback gate.
+2. GREEN: the same focused command reported `1 passed; 0 failed` after the
+   fallback gate was added.
+3. RED: `rtk test cargo test
+   public_cmd_uses_caret_escapes_for_embedded_quotes_and_cmd_metacharacters
+   --bin rtk` reported `0 passed; 1 failed`, and `rtk test cargo test --test
+   windows_cmd_e2e
+   multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_command`
+   reported `0 passed; 1 failed` while the backslash-based reconstruction was
+   still reachable.
+4. GREEN: the final direct checks were `1 passed; 0 failed` for
+   `public_cmd_transports_embedded_quotes_and_cmd_metacharacters_as_data`,
+   `rewrite_fails_open_for_input_redirection_even_when_the_parser_is_not_opaque`,
+   and the adversarial Windows E2E test.
+
+### Fix Round 1 Verification
+
+- `rtk cargo fmt --check` — passed (exit 0).
+- `rtk test cargo test "cmds::windows::tests::" --bin rtk` — `18 passed; 0 failed`.
+- `rtk test cargo test --test windows_cmd_e2e` — `4 passed; 0 failed`.
+- `rtk test cargo test --all` — main unit suite `2729 passed; 0 failed; 8
+  ignored`; all remaining targets passed, including `4 passed; 0 failed` for
+  the Windows CMD E2E suite.

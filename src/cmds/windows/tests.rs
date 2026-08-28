@@ -1,6 +1,6 @@
 use super::catalog::{builtins, validate_catalog, AdapterStrategy, CommandMode};
 use super::orchestrator::{prepare_invocation, rewrite_expression, Invocation, SEGMENT_RUNNER};
-use super::parser::{parse_expression, OpaqueReason, Span};
+use super::parser::{parse_expression, OpaqueReason, OperatorKind, Span};
 use std::ffi::OsString;
 use std::path::Path;
 
@@ -224,7 +224,7 @@ fn catalog_validation_rejects_duplicate_aliases_and_missing_strategies() {
 }
 
 #[test]
-fn public_cmd_keeps_one_expression_raw_and_quotes_multiple_arguments() {
+fn public_cmd_keeps_one_expression_raw_and_transports_multiple_arguments() {
     assert_eq!(
         prepare_invocation(&[OsString::from("echo %CD% & dir /b")]).unwrap(),
         Invocation::Execute("echo %CD% & dir /b".to_owned())
@@ -232,7 +232,16 @@ fn public_cmd_keeps_one_expression_raw_and_quotes_multiple_arguments() {
     assert_eq!(
         prepare_invocation(&[OsString::from("dir"), OsString::from("folder with spaces"),])
             .unwrap(),
-        Invocation::Execute("dir \"folder with spaces\"".to_owned())
+        Invocation::Transport {
+            expression: "!RTK_CMD_ARG_0! !RTK_CMD_ARG_1!".to_owned(),
+            environment: vec![
+                (OsString::from("RTK_CMD_ARG_0"), OsString::from("dir")),
+                (
+                    OsString::from("RTK_CMD_ARG_1"),
+                    OsString::from("folder with spaces"),
+                ),
+            ],
+        }
     );
 }
 
@@ -245,7 +254,13 @@ fn public_cmd_normalizes_c_but_keeps_interactive_k_and_no_argument_sessions_nati
             OsString::from("/b"),
         ])
         .unwrap(),
-        Invocation::Execute("dir /b".to_owned())
+        Invocation::Transport {
+            expression: "!RTK_CMD_ARG_0! !RTK_CMD_ARG_1!".to_owned(),
+            environment: vec![
+                (OsString::from("RTK_CMD_ARG_0"), OsString::from("dir")),
+                (OsString::from("RTK_CMD_ARG_1"), OsString::from("/b")),
+            ],
+        }
     );
     assert_eq!(
         prepare_invocation(&[OsString::from("/K"), OsString::from("echo ready")]).unwrap(),
@@ -254,6 +269,27 @@ fn public_cmd_normalizes_c_but_keeps_interactive_k_and_no_argument_sessions_nati
     assert_eq!(
         prepare_invocation(&[]).unwrap(),
         Invocation::Passthrough(Vec::new())
+    );
+}
+
+#[test]
+fn public_cmd_transports_embedded_quotes_and_cmd_metacharacters_as_data() {
+    assert_eq!(
+        prepare_invocation(&[
+            OsString::from("echo"),
+            OsString::from(r#"safe" & echo injected > marker.txt"#),
+        ])
+        .unwrap(),
+        Invocation::Transport {
+            expression: "!RTK_CMD_ARG_0! !RTK_CMD_ARG_1!".to_owned(),
+            environment: vec![
+                (OsString::from("RTK_CMD_ARG_0"), OsString::from("echo")),
+                (
+                    OsString::from("RTK_CMD_ARG_1"),
+                    OsString::from(r#"safe" & echo injected > marker.txt"#),
+                ),
+            ],
+        }
     );
 }
 
@@ -289,4 +325,17 @@ fn rewrite_preserves_at_prefix_and_fails_open_for_opaque_input() {
         rewrite_expression("set RTK_VALUE=kept & echo %RTK_VALUE%", executable),
         "set RTK_VALUE=kept & echo %RTK_VALUE%"
     );
+}
+
+#[test]
+fn rewrite_fails_open_for_input_redirection_even_when_the_parser_is_not_opaque() {
+    let source = "type < input.txt";
+    let parsed = parse_expression(source);
+
+    assert_eq!(parsed.opaque_reason, None);
+    assert!(parsed
+        .operators
+        .iter()
+        .any(|operator| operator.kind == OperatorKind::RedirectInput));
+    assert_eq!(rewrite_expression(source, Path::new(r"C:\rtk.exe")), source);
 }

@@ -81,4 +81,26 @@ fn redirection_and_batch_input_fail_open_to_native_cmd() {
     );
 
     assert_cmd_parity(&format!("{} hello", batch.display()));
+
+    let input = directory.path().join("input.txt");
+    fs::write(&input, "input through redirect\r\n").unwrap();
+    assert_cmd_parity(&format!("type < {}", input.display()));
+}
+
+#[test]
+fn multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_command() {
+    let directory = tempdir().unwrap();
+    let injected = directory.path().join("must-not-exist.txt");
+    let payload = format!(r#"safe" & echo injected > {}"#, injected.display());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["cmd", "echo", &payload])
+        .output()
+        .expect("rtk cmd should start");
+
+    assert!(output.status.success());
+    assert!(
+        !injected.exists(),
+        "embedded metacharacters must stay data, not execute a redirected command"
+    );
 }
