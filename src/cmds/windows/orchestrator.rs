@@ -1,9 +1,11 @@
 //! Public and hidden execution paths for CMD expressions.
 
-use super::catalog::{builtins, CommandMode};
+use super::adapters;
+use super::catalog::{builtins, AdapterStrategy, CommandMode};
 use super::parser::{parse_expression, OperatorKind};
 use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 
@@ -118,13 +120,6 @@ pub fn rewrite_expression(source: &str, rtk_executable: &Path) -> String {
             .strip_prefix('"')
             .and_then(|name| name.strip_suffix('"'))
             .unwrap_or(command);
-        let eligible = catalog.iter().any(|entry| {
-            entry.matches(command) && entry.mode == CommandMode::Query && entry.strategy.is_some()
-        });
-        if !eligible {
-            continue;
-        }
-
         let segment_end = parsed
             .operators
             .iter()
@@ -132,6 +127,20 @@ pub fn rewrite_expression(source: &str, rtk_executable: &Path) -> String {
             .map(|operator| operator.span.start)
             .unwrap_or(source.len());
         let original = &source[segment.span.start..segment_end];
+        let eligible = catalog
+            .iter()
+            .find(|entry| entry.matches(command))
+            .is_some_and(|entry| match entry.strategy {
+                Some(AdapterStrategy::Identity { .. }) => entry.mode == CommandMode::Query,
+                Some(AdapterStrategy::Structured { .. }) => {
+                    entry.mode == CommandMode::Query || adapters::is_display_form(command, original)
+                }
+                None => false,
+            });
+        if !eligible {
+            continue;
+        }
+
         let at_prefix = original.starts_with('@').then_some("@").unwrap_or("");
         let replacement = format!(
             "{at_prefix}{} {SEGMENT_RUNNER} --hex {}",
@@ -192,16 +201,75 @@ pub fn run_segment(encoded: &str) -> Result<i32> {
     let bytes = hex_decode(encoded)?;
     let source = String::from_utf8(bytes).context("Invalid UTF-8 CMD segment")?;
     let cmd_executable = resolve_cmd_executable()?;
-    execute_cmd(
-        &cmd_executable,
-        &[
-            OsString::from("/D"),
-            OsString::from("/S"),
-            OsString::from("/C"),
-            OsString::from(source),
-        ],
-        &[],
-    )
+    let output = Command::new(&cmd_executable)
+        .args(["/D", "/S", "/C", &source])
+        .output()
+        .context("Failed to execute CMD segment")?;
+    let exit_code = crate::core::utils::exit_code_from_status(&output.status, "cmd");
+
+    let stdout = if output.status.success() {
+        render_segment_stdout(&source, &output.stdout)
+    } else {
+        output.stdout
+    };
+    io::stdout()
+        .write_all(&stdout)
+        .context("Failed to write CMD stdout")?;
+    io::stderr()
+        .write_all(&output.stderr)
+        .context("Failed to write CMD stderr")?;
+    Ok(exit_code)
+}
+
+/// Filter only a successful, UTF-8, cataloged structured display. Every
+/// rejected layout, non-text output, identity adapter, and failed command is
+/// emitted byte-for-byte by `run_segment`.
+fn render_segment_stdout(source: &str, stdout: &[u8]) -> Vec<u8> {
+    let Some((command, entry)) = source_command_and_catalog_entry(source) else {
+        return stdout.to_vec();
+    };
+    let Some(AdapterStrategy::Structured { .. }) = entry.strategy else {
+        return stdout.to_vec();
+    };
+    let Ok(raw) = std::str::from_utf8(stdout) else {
+        return stdout.to_vec();
+    };
+    let Some(filtered) = adapters::filter_display(command, source, raw) else {
+        return stdout.to_vec();
+    };
+    if filtered == raw {
+        return stdout.to_vec();
+    }
+
+    // A lossy display is never emitted unless the full native stdout has a
+    // recoverable tee artifact. The guard also includes the hint itself.
+    let label = format!("cmd-{command}");
+    let Some(hint) = crate::core::tee::force_tee_hint(raw, &label) else {
+        return stdout.to_vec();
+    };
+    let shown = format!("{filtered}\n{hint}");
+    crate::core::guard::never_worse(raw, &shown)
+        .as_bytes()
+        .to_vec()
+}
+
+fn source_command_and_catalog_entry(
+    source: &str,
+) -> Option<(&str, super::catalog::BuiltinCommand)> {
+    let parsed = parse_expression(source);
+    if parsed.opaque_reason.is_some() || parsed.segments.len() != 1 {
+        return None;
+    }
+    let segment = parsed.segments.first()?;
+    let command = &source[segment.command_span.start..segment.command_span.end];
+    let command = command
+        .strip_prefix('"')
+        .and_then(|name| name.strip_suffix('"'))
+        .unwrap_or(command);
+    builtins()
+        .into_iter()
+        .find(|entry| entry.matches(command))
+        .map(|entry| (command, entry))
 }
 
 fn resolve_cmd_executable() -> Result<std::path::PathBuf> {

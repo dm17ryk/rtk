@@ -1,3 +1,4 @@
+use super::adapters::{filter_display, is_display_form};
 use super::catalog::{builtins, validate_catalog, AdapterStrategy, CommandMode};
 use super::orchestrator::{
     prepare_invocation as prepare_with_cmd, rewrite_expression, Invocation, SEGMENT_RUNNER,
@@ -230,6 +231,75 @@ fn catalog_validation_rejects_duplicate_aliases_and_missing_strategies() {
 }
 
 #[test]
+fn structured_display_filters_only_recognized_cmd_layouts() {
+    let dir = include_str!("../../../tests/fixtures/windows_cmd/dir_default.txt");
+    let set = include_str!("../../../tests/fixtures/windows_cmd/set_display.txt");
+    let help = include_str!("../../../tests/fixtures/windows_cmd/help_assoc.txt");
+    let assoc = include_str!("../../../tests/fixtures/windows_cmd/assoc_display.txt");
+    let ftype = include_str!("../../../tests/fixtures/windows_cmd/ftype_display.txt");
+
+    assert_eq!(
+        filter_display("dir", "dir /a:-d /o:n C:\\work", dir),
+        Some("[dir] C:\\work\nD .git\nF 42 README.md\n2 entries".to_owned())
+    );
+    assert_eq!(
+        filter_display("set", "set RTK_", set),
+        Some("[set] RTK_HOME=C:\\rtk; RTK_MODE=test".to_owned())
+    );
+    assert_eq!(
+        filter_display("help", "help assoc", help),
+        Some("[help] ASSOC [extension[=[fileType]]]\nDisplays or modifies file extension associations."
+            .to_owned())
+    );
+    assert_eq!(
+        filter_display("assoc", "assoc", assoc),
+        Some("[assoc] .rs=RustFile; .txt=txtfile".to_owned())
+    );
+    assert_eq!(
+        filter_display("ftype", "ftype", ftype),
+        Some("[ftype] RustFile=\"C:\\Tools\\rust.exe\" \"%1\"; txtfile=%SystemRoot%\\system32\\NOTEPAD.EXE %1"
+            .to_owned())
+    );
+
+    assert!(!is_display_form("set", "set RTK_VALUE=mutates"));
+    assert!(!is_display_form("set", "set /a 1+1"));
+    assert!(!is_display_form("dir", "dir /b"));
+    assert_eq!(
+        filter_display("assoc", "assoc", "Association missing"),
+        None
+    );
+    assert_eq!(filter_display("help", "help assoc", "Aide inconnue"), None);
+}
+
+#[test]
+fn catalog_identity_strategies_document_all_non_filtered_builtins_and_aliases() {
+    for command in builtins() {
+        match command.strategy.expect("validated catalog strategy") {
+            AdapterStrategy::Identity { reason } => {
+                assert!(
+                    !reason.trim().is_empty(),
+                    "{} needs an identity reason",
+                    command.name
+                );
+                for alias in &command.aliases {
+                    assert!(
+                        command.matches(alias),
+                        "{} alias {alias} must resolve",
+                        command.name
+                    );
+                }
+            }
+            AdapterStrategy::Structured { adapter } => {
+                assert!(matches!(
+                    adapter,
+                    "dir" | "set" | "help" | "assoc" | "ftype"
+                ));
+            }
+        }
+    }
+}
+
+#[test]
 fn public_cmd_keeps_one_expression_raw_and_transports_multiple_arguments() {
     assert_eq!(
         prepare_invocation(&[OsString::from("echo %CD% & dir /b")]).unwrap(),
@@ -415,4 +485,19 @@ fn rewrite_fails_open_for_input_redirection_even_when_the_parser_is_not_opaque()
         .iter()
         .any(|operator| operator.kind == OperatorKind::RedirectInput));
     assert_eq!(rewrite_expression(source, Path::new(r"C:\rtk.exe")), source);
+}
+
+#[test]
+fn rewrite_runs_only_safe_structured_set_display_forms() {
+    let executable = Path::new(r"C:\rtk.exe");
+
+    assert_eq!(
+        rewrite_expression("set RTK_PREFIX", executable),
+        format!("C:\\rtk.exe {SEGMENT_RUNNER} --hex 7365742052544b5f505245464958")
+    );
+    assert_eq!(
+        rewrite_expression("set RTK_PREFIX=value", executable),
+        "set RTK_PREFIX=value"
+    );
+    assert_eq!(rewrite_expression("set /a 1+1", executable), "set /a 1+1");
 }
