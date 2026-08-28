@@ -1,5 +1,8 @@
 use super::catalog::{builtins, validate_catalog, AdapterStrategy, CommandMode};
+use super::orchestrator::{prepare_invocation, rewrite_expression, Invocation, SEGMENT_RUNNER};
 use super::parser::{parse_expression, OpaqueReason, Span};
+use std::ffi::OsString;
+use std::path::Path;
 
 fn segment_text<'a>(source: &'a str, span: Span) -> &'a str {
     &source[span.start..span.end]
@@ -218,4 +221,72 @@ fn catalog_validation_rejects_duplicate_aliases_and_missing_strategies() {
 
     let missing_strategy = [builtins()[0].clone().without_strategy()];
     assert!(validate_catalog(&missing_strategy).is_err());
+}
+
+#[test]
+fn public_cmd_keeps_one_expression_raw_and_quotes_multiple_arguments() {
+    assert_eq!(
+        prepare_invocation(&[OsString::from("echo %CD% & dir /b")]).unwrap(),
+        Invocation::Execute("echo %CD% & dir /b".to_owned())
+    );
+    assert_eq!(
+        prepare_invocation(&[OsString::from("dir"), OsString::from("folder with spaces"),])
+            .unwrap(),
+        Invocation::Execute("dir \"folder with spaces\"".to_owned())
+    );
+}
+
+#[test]
+fn public_cmd_normalizes_c_but_keeps_interactive_k_and_no_argument_sessions_native() {
+    assert_eq!(
+        prepare_invocation(&[
+            OsString::from("/c"),
+            OsString::from("dir"),
+            OsString::from("/b"),
+        ])
+        .unwrap(),
+        Invocation::Execute("dir /b".to_owned())
+    );
+    assert_eq!(
+        prepare_invocation(&[OsString::from("/K"), OsString::from("echo ready")]).unwrap(),
+        Invocation::Passthrough(vec![OsString::from("/K"), OsString::from("echo ready")])
+    );
+    assert_eq!(
+        prepare_invocation(&[]).unwrap(),
+        Invocation::Passthrough(Vec::new())
+    );
+}
+
+#[test]
+fn rewrite_uses_hidden_runner_for_query_segments_only_and_preserves_source_between_them() {
+    let source = "  echo hello  && dir /b & cd .. & set RTK_TEST=value || type notes.txt";
+    let rewritten = rewrite_expression(source, Path::new(r"C:\Program Files\rtk.exe"));
+
+    assert_eq!(
+        rewritten,
+        format!(
+            "  \"C:\\Program Files\\rtk.exe\" {SEGMENT_RUNNER} --hex 6563686f2068656c6c6f2020  \
+&& \"C:\\Program Files\\rtk.exe\" {SEGMENT_RUNNER} --hex 646972202f6220 & cd .. & set RTK_TEST=value || \
+\"C:\\Program Files\\rtk.exe\" {SEGMENT_RUNNER} --hex 74797065206e6f7465732e747874"
+        )
+    );
+}
+
+#[test]
+fn rewrite_preserves_at_prefix_and_fails_open_for_opaque_input() {
+    let executable = Path::new(r"C:\rtk.exe");
+
+    assert_eq!(
+        rewrite_expression("@dir /b", executable),
+        format!("@C:\\rtk.exe {SEGMENT_RUNNER} --hex 40646972202f62")
+    );
+    assert_eq!(
+        rewrite_expression("dir > listing.txt", executable),
+        "dir > listing.txt"
+    );
+    assert_eq!(rewrite_expression("build.cmd", executable), "build.cmd");
+    assert_eq!(
+        rewrite_expression("set RTK_VALUE=kept & echo %RTK_VALUE%", executable),
+        "set RTK_VALUE=kept & echo %RTK_VALUE%"
+    );
 }
