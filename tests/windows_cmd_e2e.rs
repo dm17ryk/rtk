@@ -303,6 +303,27 @@ fn combined_dir_b_switches_keep_exact_native_output_when_captured() {
 }
 
 #[test]
+fn hidden_cmd_runner_keeps_caret_escaped_dir_b_native() {
+    let directory = tempdir().unwrap();
+    fs::write(directory.path().join("visible.txt"), "payload").unwrap();
+    fs::create_dir(directory.path().join("nested")).unwrap();
+    fs::write(directory.path().join("nested").join("deep.txt"), "payload").unwrap();
+
+    for switches in ["/^b", "/s/^b", "/^B/s", "/s^/b", "/S^/B"] {
+        let source = format!("dir {switches} {}", directory.path().display());
+        let native = native_cmd(&source);
+        let hidden = Command::new(env!("CARGO_BIN_EXE_rtk"))
+            .args(["__cmd-run", "--hex", &hex_encode(source.as_bytes())])
+            .output()
+            .expect("hidden cmd runner should start");
+
+        assert_eq!(hidden.status.code(), native.status.code(), "{source}");
+        assert_eq!(hidden.stdout, native.stdout, "{source}");
+        assert_eq!(hidden.stderr, native.stderr, "{source}");
+    }
+}
+
+#[test]
 fn hidden_cmd_runner_filters_with_complete_lossless_tee_and_native_result_metadata() {
     let directory = tempdir().unwrap();
     let appdata = directory.path().join("appdata");
@@ -365,6 +386,24 @@ fn hidden_cmd_runner_filters_with_complete_lossless_tee_and_native_result_metada
     let artifact = &artifacts[0];
     assert!(shown.contains(artifact.file_name().to_string_lossy().as_ref()));
     assert_eq!(fs::read(artifact.path()).unwrap(), native.stdout);
+}
+
+#[test]
+fn hidden_cmd_runner_keeps_failed_structured_query_native() {
+    let source = "assoc .rtk_cmd_runner_missing_extension";
+    let native = native_cmd(source);
+    let hidden = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["__cmd-run", "--hex", &hex_encode(source.as_bytes())])
+        .output()
+        .expect("hidden cmd runner should start");
+
+    assert!(
+        !native.status.success(),
+        "missing association must fail on CMD"
+    );
+    assert_eq!(hidden.status.code(), native.status.code());
+    assert_eq!(hidden.stdout, native.stdout);
+    assert_eq!(hidden.stderr, native.stderr);
 }
 
 #[test]

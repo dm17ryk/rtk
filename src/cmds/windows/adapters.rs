@@ -78,11 +78,31 @@ fn dir_has_bare_format_switch(arguments: &str) -> bool {
 }
 
 fn dir_switch_token_has_bare_format(token: &str) -> bool {
+    let token = normalize_cmd_caret_escapes(token);
     token.strip_prefix('/').is_some_and(|switches| {
         switches
             .split('/')
             .any(|switch| switch.eq_ignore_ascii_case("b"))
     })
+}
+
+/// CMD removes a caret when it quotes the following metacharacter before DIR
+/// receives its switches. Mirror that narrow normalization for eligibility.
+fn normalize_cmd_caret_escapes(token: &str) -> String {
+    let mut normalized = String::with_capacity(token.len());
+    let mut characters = token.chars();
+    while let Some(character) = characters.next() {
+        if character == '^' {
+            if let Some(escaped) = characters.next() {
+                normalized.push(escaped);
+            } else {
+                normalized.push(character);
+            }
+        } else {
+            normalized.push(character);
+        }
+    }
+    normalized
 }
 
 /// Return a compact display only when the native layout is confidently known.

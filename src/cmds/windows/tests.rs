@@ -276,7 +276,17 @@ fn structured_display_filters_only_recognized_cmd_layouts() {
     assert!(!is_display_form("set", "set RTK_VALUE=mutates"));
     assert!(!is_display_form("set", "set /a 1+1"));
     assert!(!is_display_form("dir", "dir /b"));
-    for source in ["dir /s/b", "dir /b/s", "dir /a-d/b", "dir /A-D/B"] {
+    for source in [
+        "dir /s/b",
+        "dir /b/s",
+        "dir /a-d/b",
+        "dir /A-D/B",
+        "dir /^b",
+        "dir /s/^b",
+        "dir /^B/s",
+        "dir /s^/b",
+        "dir /S^/B",
+    ] {
         assert!(
             !is_display_form("dir", source),
             "combined bare-format switch must remain native: {source}"
@@ -515,7 +525,17 @@ fn rewrite_only_uses_cataloged_structured_adapters_for_terminal_displays() {
     for source in ["assoc .rtk=RtkFile", "ftype RtkFile=cmd /c echo"] {
         assert_eq!(rewrite_expression(source, executable), source, "{source}");
     }
-    for source in ["dir /s/b", "dir /b/s", "dir /a-d/b", "dir /A-D/B"] {
+    for source in [
+        "dir /s/b",
+        "dir /b/s",
+        "dir /a-d/b",
+        "dir /A-D/B",
+        "dir /^b",
+        "dir /s/^b",
+        "dir /^B/s",
+        "dir /s^/b",
+        "dir /S^/B",
+    ] {
         assert_eq!(rewrite_expression(source, executable), source, "{source}");
     }
     assert!(
