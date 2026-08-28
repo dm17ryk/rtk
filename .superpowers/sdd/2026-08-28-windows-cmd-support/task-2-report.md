@@ -231,3 +231,46 @@ segments without recursive orchestration.
 - `rtk test cargo test --all` — main unit suite `2731 passed; 0 failed; 8
   ignored`; all remaining targets passed, including `6 passed; 0 failed` for
   the Windows CMD E2E suite.
+
+## Fix Round 4
+
+### Changed Behavior
+
+- Public `rtk cmd` resolves `cmd.exe` once, then uses that absolute path both
+  to launch the required outer `/D /S /C` process and to construct the nested
+  delayed-expansion command. Nested execution no longer depends on a separate
+  PATH lookup for bare `cmd.exe`.
+- The path is rendered as a CMD token using the existing path-quoting helper;
+  a path with spaces remains one executable token across the outer parser.
+- Input-redirection fail-open behavior remains unchanged.
+
+### Direct Coverage
+
+- `public_cmd_transport_does_not_emit_a_bare_nested_cmd_executable` supplies a
+  fake resolved path containing spaces and asserts the exact quoted nested CMD
+  expression.
+- `multi_argument_pipe_input_redirection_and_caret_payloads_remain_data` runs
+  real Windows E2E probes for `|`, `<`, and `^` payloads. Each asserts exact
+  stdout and verifies pipe, input-redirection, and caret marker files are not
+  created.
+
+### TDD Red/Green Evidence
+
+1. RED: `rtk test cargo test
+   public_cmd_transport_does_not_emit_a_bare_nested_cmd_executable --bin rtk`
+   reported `0 passed; 1 failed` while the transport emitted bare `cmd.exe`.
+2. GREEN: the same focused test reported `1 passed; 0 failed` after resolution
+   was performed once in `run` and the absolute path was passed to the
+   testable invocation preparation function.
+3. GREEN: `rtk test cargo test --test windows_cmd_e2e
+   multi_argument_pipe_input_redirection_and_caret_payloads_remain_data`
+   reported `1 passed; 0 failed`.
+
+### Fix Round 4 Verification
+
+- `rtk cargo fmt` — passed (exit 0).
+- `rtk test cargo test "cmds::windows::tests::" --bin rtk` — `21 passed; 0 failed`.
+- `rtk test cargo test --test windows_cmd_e2e` — `7 passed; 0 failed`.
+- `rtk test cargo test --all` — main unit suite `2732 passed; 0 failed; 8
+  ignored`; all remaining targets passed, including `7 passed; 0 failed` for
+  the Windows CMD E2E suite.

@@ -165,3 +165,54 @@ fn multi_argument_percent_and_crlf_payloads_remain_data() {
         "CR/LF payload must not create a redirected marker"
     );
 }
+
+#[test]
+fn multi_argument_pipe_input_redirection_and_caret_payloads_remain_data() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("input.txt");
+    fs::write(&input, "input data\r\n").unwrap();
+
+    for (label, payload) in [
+        (
+            "pipe",
+            format!(
+                "safe | echo injected > {}",
+                directory.path().join("pipe-marker.txt").display()
+            ),
+        ),
+        (
+            "input-redirection",
+            format!(
+                "safe < {} > {}",
+                input.display(),
+                directory.path().join("input-marker.txt").display()
+            ),
+        ),
+        (
+            "caret",
+            format!(
+                "safe ^ & echo injected > {}",
+                directory.path().join("caret-marker.txt").display()
+            ),
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+            .args(["cmd", "echo", &payload])
+            .output()
+            .expect("rtk cmd should start");
+
+        assert!(output.status.success(), "{label}");
+        assert_eq!(
+            output.stdout,
+            format!("{payload}\r\n").as_bytes(),
+            "{label}"
+        );
+    }
+
+    for marker in ["pipe-marker.txt", "input-marker.txt", "caret-marker.txt"] {
+        assert!(
+            !directory.path().join(marker).exists(),
+            "{marker} must not be created by transported data"
+        );
+    }
+}

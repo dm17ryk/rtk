@@ -26,7 +26,7 @@ pub enum Invocation {
 }
 
 /// Classify public `rtk cmd` arguments without losing a single raw expression.
-pub fn prepare_invocation(args: &[OsString]) -> Result<Invocation> {
+pub fn prepare_invocation(args: &[OsString], cmd_executable: &Path) -> Result<Invocation> {
     if args.is_empty() {
         return Ok(Invocation::Passthrough(Vec::new()));
     }
@@ -83,7 +83,10 @@ pub fn prepare_invocation(args: &[OsString]) -> Result<Invocation> {
             // The outer CMD parses this line with its default delayed expansion
             // disabled. The nested CMD enables it only after the literal
             // `!RTK_CMD_ARG_n!` tokens have crossed that parser boundary.
-            expression: format!("cmd.exe /D /S /V:ON /C {expression}"),
+            expression: format!(
+                "{} /D /S /V:ON /C {expression}",
+                quote_cmd_path(&cmd_executable.to_string_lossy())
+            ),
             environment,
         }
     };
@@ -132,7 +135,7 @@ pub fn rewrite_expression(source: &str, rtk_executable: &Path) -> String {
         let at_prefix = original.starts_with('@').then_some("@").unwrap_or("");
         let replacement = format!(
             "{at_prefix}{} {SEGMENT_RUNNER} --hex {}",
-            quote_runner_executable(&rtk_executable.to_string_lossy()),
+            quote_cmd_path(&rtk_executable.to_string_lossy()),
             hex_encode(original.as_bytes())
         );
         rewritten.replace_range(segment.span.start..segment.span.end, &replacement);
@@ -147,13 +150,15 @@ pub fn run(args: &[OsString]) -> Result<i32> {
         bail!("rtk cmd is only supported on Windows 10 and 11");
     }
 
-    match prepare_invocation(args)? {
-        Invocation::Passthrough(arguments) => execute_cmd(&arguments, &[]),
+    let cmd_executable = resolve_cmd_executable()?;
+    match prepare_invocation(args, &cmd_executable)? {
+        Invocation::Passthrough(arguments) => execute_cmd(&cmd_executable, &arguments, &[]),
         Invocation::Execute(source) => {
             let executable =
                 std::env::current_exe().context("Failed to resolve the current RTK executable")?;
             let expression = rewrite_expression(&source, &executable);
             execute_cmd(
+                &cmd_executable,
                 &[
                     OsString::from("/D"),
                     OsString::from("/S"),
@@ -167,6 +172,7 @@ pub fn run(args: &[OsString]) -> Result<i32> {
             expression,
             environment,
         } => execute_cmd(
+            &cmd_executable,
             &[
                 OsString::from("/D"),
                 OsString::from("/S"),
@@ -185,7 +191,9 @@ pub fn run_segment(encoded: &str) -> Result<i32> {
     }
     let bytes = hex_decode(encoded)?;
     let source = String::from_utf8(bytes).context("Invalid UTF-8 CMD segment")?;
+    let cmd_executable = resolve_cmd_executable()?;
     execute_cmd(
+        &cmd_executable,
         &[
             OsString::from("/D"),
             OsString::from("/S"),
@@ -196,9 +204,15 @@ pub fn run_segment(encoded: &str) -> Result<i32> {
     )
 }
 
-fn execute_cmd(arguments: &[OsString], environment: &[(OsString, OsString)]) -> Result<i32> {
-    let cmd_executable = crate::core::utils::resolve_binary("cmd.exe")
-        .context("Failed to resolve cmd.exe from PATH")?;
+fn resolve_cmd_executable() -> Result<std::path::PathBuf> {
+    crate::core::utils::resolve_binary("cmd.exe").context("Failed to resolve cmd.exe from PATH")
+}
+
+fn execute_cmd(
+    cmd_executable: &Path,
+    arguments: &[OsString],
+    environment: &[(OsString, OsString)],
+) -> Result<i32> {
     let status = Command::new(cmd_executable)
         .args(arguments)
         .envs(environment.iter().map(|(key, value)| (key, value)))
@@ -207,7 +221,7 @@ fn execute_cmd(arguments: &[OsString], environment: &[(OsString, OsString)]) -> 
     Ok(crate::core::utils::exit_code_from_status(&status, "cmd"))
 }
 
-fn quote_runner_executable(path: &str) -> String {
+fn quote_cmd_path(path: &str) -> String {
     if path
         .chars()
         .all(|character| character.is_ascii_alphanumeric() || "_-.\\/:=+@".contains(character))

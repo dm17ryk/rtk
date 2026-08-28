@@ -1,11 +1,17 @@
 use super::catalog::{builtins, validate_catalog, AdapterStrategy, CommandMode};
-use super::orchestrator::{prepare_invocation, rewrite_expression, Invocation, SEGMENT_RUNNER};
+use super::orchestrator::{
+    prepare_invocation as prepare_with_cmd, rewrite_expression, Invocation, SEGMENT_RUNNER,
+};
 use super::parser::{parse_expression, OpaqueReason, OperatorKind, Span};
 use std::ffi::OsString;
 use std::path::Path;
 
 fn segment_text<'a>(source: &'a str, span: Span) -> &'a str {
     &source[span.start..span.end]
+}
+
+fn prepare_invocation(args: &[OsString]) -> anyhow::Result<Invocation> {
+    prepare_with_cmd(args, Path::new(r"C:\Windows\System32\cmd.exe"))
 }
 
 #[test]
@@ -233,7 +239,9 @@ fn public_cmd_keeps_one_expression_raw_and_transports_multiple_arguments() {
         prepare_invocation(&[OsString::from("dir"), OsString::from("folder with spaces"),])
             .unwrap(),
         Invocation::Transport {
-            expression: "cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!".to_owned(),
+            expression:
+                "C:\\Windows\\System32\\cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!"
+                    .to_owned(),
             environment: vec![
                 (OsString::from("RTK_CMD_ARG_0"), OsString::from("dir")),
                 (
@@ -255,7 +263,9 @@ fn public_cmd_normalizes_c_but_keeps_interactive_k_and_no_argument_sessions_nati
         ])
         .unwrap(),
         Invocation::Transport {
-            expression: "cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!".to_owned(),
+            expression:
+                "C:\\Windows\\System32\\cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!"
+                    .to_owned(),
             environment: vec![
                 (OsString::from("RTK_CMD_ARG_0"), OsString::from("dir")),
                 (OsString::from("RTK_CMD_ARG_1"), OsString::from("/b")),
@@ -281,7 +291,9 @@ fn public_cmd_transports_embedded_quotes_and_cmd_metacharacters_as_data() {
         ])
         .unwrap(),
         Invocation::Transport {
-            expression: "cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!".to_owned(),
+            expression:
+                "C:\\Windows\\System32\\cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!"
+                    .to_owned(),
             environment: vec![
                 (OsString::from("RTK_CMD_ARG_0"), OsString::from("echo")),
                 (
@@ -303,7 +315,9 @@ fn public_cmd_transport_enables_delayed_expansion_inside_the_default_cmd_express
         ])
         .unwrap(),
         Invocation::Transport {
-            expression: "cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! \"\" !RTK_CMD_ARG_2!".to_owned(),
+            expression:
+                "C:\\Windows\\System32\\cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! \"\" !RTK_CMD_ARG_2!"
+                    .to_owned(),
             environment: vec![
                 (OsString::from("RTK_CMD_ARG_0"), OsString::from("echo")),
                 (OsString::from("RTK_CMD_ARG_1"), OsString::from("")),
@@ -325,7 +339,9 @@ fn public_cmd_transport_preserves_percent_and_crlf_values() {
         ])
         .unwrap(),
         Invocation::Transport {
-            expression: "cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!".to_owned(),
+            expression:
+                "C:\\Windows\\System32\\cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!"
+                    .to_owned(),
             environment: vec![
                 (OsString::from("RTK_CMD_ARG_0"), OsString::from("echo")),
                 (
@@ -334,6 +350,23 @@ fn public_cmd_transport_preserves_percent_and_crlf_values() {
                 ),
             ],
         }
+    );
+}
+
+#[test]
+fn public_cmd_transport_does_not_emit_a_bare_nested_cmd_executable() {
+    let invocation = prepare_with_cmd(
+        &[OsString::from("echo"), OsString::from("safe")],
+        Path::new(r"C:\Program Files\Windows\cmd.exe"),
+    )
+    .unwrap();
+    let Invocation::Transport { expression, .. } = invocation else {
+        panic!("multiple arguments must use transport");
+    };
+
+    assert_eq!(
+        expression,
+        "\"C:\\Program Files\\Windows\\cmd.exe\" /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!"
     );
 }
 
