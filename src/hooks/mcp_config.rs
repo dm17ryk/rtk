@@ -29,6 +29,7 @@ pub enum McpClient {
     Pi,
     Hermes,
     Droid,
+    Vibe,
     OpenCode,
 }
 
@@ -48,6 +49,7 @@ impl McpClient {
             Self::Pi => "Pi",
             Self::Hermes => "Hermes",
             Self::Droid => "Factory Droid",
+            Self::Vibe => "Mistral Vibe",
             Self::OpenCode => "OpenCode",
         }
     }
@@ -222,7 +224,7 @@ fn install_with_env(
     ));
     if destinations.is_empty() {
         println!(
-            "  MCP: {} has no native MCP client; the RTK Pi extension is the complete integration.",
+            "  MCP: {} has no native MCP client; the RTK hook integration is complete.",
             client.display_name()
         );
         return Ok(());
@@ -428,6 +430,7 @@ fn destinations(client: McpClient, global: bool, env: &McpEnvironment) -> Vec<De
             env.droid_dir(global).join("mcp.json"),
             "mcpServers",
         )],
+        McpClient::Vibe => Vec::new(),
         McpClient::OpenCode => vec![Destination::Json {
             label: "MCP config",
             path: env.config_dir.join("opencode").join("opencode.json"),
@@ -1556,5 +1559,13 @@ mod tests {
         let env = test_env(&temp);
         assert!(destinations(McpClient::Pi, true, &env).is_empty());
         install_with_env(McpClient::Pi, true, InitContext::default(), &env).unwrap();
+    }
+
+    #[test]
+    fn vibe_reports_no_native_mcp_destination() {
+        let temp = TempDir::new().unwrap();
+        let env = test_env(&temp);
+        assert!(destinations(McpClient::Vibe, true, &env).is_empty());
+        install_with_env(McpClient::Vibe, true, InitContext::default(), &env).unwrap();
     }
 }
