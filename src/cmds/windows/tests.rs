@@ -63,7 +63,7 @@ fn single_quotes_do_not_quote_cmd_operators() {
 
 #[test]
 fn preserves_crlf_and_variable_expansions_without_reformatting() {
-    let source = "@echo %USERNAME%\r\n& dir %CD%";
+    let source = "@echo %USERNAME%\r\ndir %CD%";
     let parsed = parse_expression(source);
 
     assert_eq!(
@@ -79,6 +79,52 @@ fn preserves_crlf_and_variable_expansions_without_reformatting() {
         "echo"
     );
     assert_eq!(parsed.opaque_reason, None);
+}
+
+#[test]
+fn crlf_is_a_cmd_command_boundary() {
+    let source = "echo one\r\necho two";
+    let parsed = parse_expression(source);
+
+    assert_eq!(
+        parsed
+            .segments
+            .iter()
+            .map(|segment| segment_text(source, segment.span))
+            .collect::<Vec<_>>(),
+        ["echo one", "echo two"]
+    );
+    assert_eq!(parsed.opaque_reason, None);
+}
+
+#[test]
+fn quoted_batch_path_is_opaque() {
+    let source = r#""C:\Program Files\build.cmd" --release"#;
+    let parsed = parse_expression(source);
+
+    assert_eq!(parsed.opaque_reason, Some(OpaqueReason::BatchInvocation));
+    assert_eq!(
+        segment_text(source, parsed.segments[0].command_span),
+        r#""C:\Program Files\build.cmd""#
+    );
+}
+
+#[test]
+fn empty_operands_around_chain_operators_are_malformed() {
+    for source in [
+        "& echo hi",
+        "echo hi &",
+        "&& echo hi",
+        "echo hi &&",
+        "|| echo hi",
+        "echo hi ||",
+    ] {
+        assert_eq!(
+            parse_expression(source).opaque_reason,
+            Some(OpaqueReason::MalformedInput),
+            "{source}"
+        );
+    }
 }
 
 #[test]

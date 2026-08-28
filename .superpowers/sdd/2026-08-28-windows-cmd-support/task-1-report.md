@@ -74,3 +74,39 @@ The final diff check completed with no output and exit code 0.
 
 - The parser deliberately rejects ambiguous constructs rather than reproducing CMD's undocumented edge cases; Task 2 must treat any `opaque_reason` as a full native-CMD fallback.
 - The catalog is staged for Task 3's adapters: only `dir`, display-form `set`, `help`, `assoc`, and `ftype` are marked structured; all other entries intentionally preserve native behavior through identity strategies.
+
+## Fix Round 1
+
+### Changes
+
+- Treats unquoted CRLF as a CMD command boundary and records it as a `LineBreak` operator, so each line has an independent replacement span.
+- Preserves quoted executable command words through the closing quote before classification; quoted `.cmd` and `.bat` paths now fail open as batch invocations.
+- Rejects empty operands before or after top-level `&`, `&&`, and `||` as malformed input.
+- Updates the prior CRLF fixture to express two actual commands rather than a leading `&` after a line boundary, which is now correctly malformed.
+
+### Covering tests
+
+- `src/cmds/windows/tests.rs`: `crlf_is_a_cmd_command_boundary`, `quoted_batch_path_is_opaque`, and `empty_operands_around_chain_operators_are_malformed`.
+
+### TDD and verification
+
+Added the three behavioral regressions before changing parser production code, then ran:
+
+```text
+rtk cargo test cmds::windows::tests
+test result: FAILED. 8 passed; 3 failed; 0 ignored; 0 measured; 2717 filtered out; finished in 0.00s
+```
+
+The failures were the expected missing CRLF split, quoted-batch detection, and malformed-empty-operand behavior. After the minimal parser changes:
+
+```text
+rtk cargo test cmds::windows::tests
+cargo test: 11 passed, 2742 filtered out (9 suites, 0.00s)
+
+rtk cargo test --all
+cargo test: 2745 passed, 8 ignored (9 suites, 4.67s)
+
+rtk git diff --check
+```
+
+The final diff check completed with no output and exit code 0.
