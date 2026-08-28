@@ -261,7 +261,7 @@ fn external_manifest_is_static_complete_and_explicit() {
         assert!(!entry.identity_reason.trim().is_empty(), "{}", entry.name);
         assert!(!entry.modes.is_empty(), "{}", entry.name);
         assert_ne!(
-            entry.desktop.win10,
+            entry.desktop.win10.before_21h1,
             VersionStatus::Unsupported,
             "{}",
             entry.name
@@ -293,7 +293,9 @@ fn external_manifest_is_static_complete_and_explicit() {
     let wmic = classify_external("wmic").expect("WMIC remains an explicit entry");
     assert_eq!(wmic.desktop.win11.before_24h2, VersionStatus::Deprecated);
     assert_eq!(wmic.desktop.win11.from_24h2, VersionStatus::Unsupported);
-    assert_eq!(wmic.desktop.presence, Presence::Inbox);
+    assert_eq!(wmic.desktop.win10.before_21h1, VersionStatus::Supported);
+    assert_eq!(wmic.desktop.win10.from_21h1, VersionStatus::Deprecated);
+    assert_eq!(wmic.desktop.presence, Presence::OptionalFeature);
 
     assert!(official_top_level_coverage().iter().any(|entry| {
         entry.source_name == "append"
@@ -451,6 +453,24 @@ fn external_modes_are_conservative_and_interpreter_targets_are_explicit() {
             target
         );
     }
+}
+
+#[test]
+fn raw_official_snapshot_header_and_names_match_the_checked_in_tsv() {
+    let raw = include_str!("../../../tests/fixtures/windows_cmd/windows_commands_raw.md");
+    let names: Vec<_> = raw
+        .lines()
+        .filter_map(|line| line.strip_prefix("- ["))
+        .filter_map(|value| value.split("](").next())
+        .map(|value| value.trim_matches('`'))
+        .collect();
+    let fixture: Vec<_> =
+        include_str!("../../../tests/fixtures/windows_cmd/windows_commands_az.tsv")
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+            .map(|line| line.split('\t').next().unwrap())
+            .collect();
+    assert_eq!(names, fixture);
 }
 
 #[test]

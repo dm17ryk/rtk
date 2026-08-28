@@ -22,8 +22,13 @@ pub struct Win11Support {
     pub from_24h2: VersionStatus,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Win10Support {
+    pub before_21h1: VersionStatus,
+    pub from_21h1: VersionStatus,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DesktopSupport {
-    pub win10: VersionStatus,
+    pub win10: Win10Support,
     pub win11: Win11Support,
     pub presence: Presence,
 }
@@ -104,28 +109,35 @@ const W11: Win11Support = Win11Support {
     before_24h2: VersionStatus::Supported,
     from_24h2: VersionStatus::Supported,
 };
+const W10: Win10Support = Win10Support {
+    before_21h1: VersionStatus::Supported,
+    from_21h1: VersionStatus::Supported,
+};
 const D: DesktopSupport = DesktopSupport {
-    win10: VersionStatus::Supported,
+    win10: W10,
     win11: W11,
     presence: Presence::Inbox,
 };
 const O: DesktopSupport = DesktopSupport {
-    win10: VersionStatus::Supported,
+    win10: W10,
     win11: W11,
     presence: Presence::OptionalFeature,
 };
 const S: DesktopSupport = DesktopSupport {
-    win10: VersionStatus::Supported,
+    win10: W10,
     win11: W11,
     presence: Presence::SeparateInstall,
 };
 const W: DesktopSupport = DesktopSupport {
-    win10: VersionStatus::Supported,
+    win10: Win10Support {
+        before_21h1: VersionStatus::Supported,
+        from_21h1: VersionStatus::Deprecated,
+    },
     win11: Win11Support {
         before_24h2: VersionStatus::Deprecated,
         from_24h2: VersionStatus::Unsupported,
     },
-    presence: Presence::Inbox,
+    presence: Presence::OptionalFeature,
 };
 macro_rules! x {($n:literal,$d:expr,$m:expr)=>{ExternalCommand{name:$n,aliases:&[],route:ExternalRoute::NativeExecutable,desktop:$d,modes:$m,strategy:ExternalStrategy::IdentityRaw,identity_reason:"no external adapter is released in the stable CMD increment",status:ExternalStatus::RecognizedRaw,provenance:SOURCE}};($n:literal,[$($a:literal),+],$d:expr,$m:expr)=>{ExternalCommand{name:$n,aliases:&[$($a),+],route:ExternalRoute::NativeExecutable,desktop:$d,modes:$m,strategy:ExternalStrategy::IdentityRaw,identity_reason:"no external adapter is released in the stable CMD increment",status:ExternalStatus::RecognizedRaw,provenance:SOURCE}}}
 const Q: CommandModes = CommandModes::QUERY;
