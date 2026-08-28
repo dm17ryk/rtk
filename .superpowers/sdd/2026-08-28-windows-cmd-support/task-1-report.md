@@ -110,3 +110,42 @@ rtk git diff --check
 ```
 
 The final diff check completed with no output and exit code 0.
+
+## Fix Round 2
+
+### Changes
+
+- Guards the command-word lookup after a leading `@`, preventing an out-of-bounds byte index for `@` and `@ `.
+- Keeps the empty post-prefix command span representable, then classifies it as `MalformedInput` so the caller fails open instead of panicking.
+
+### Covering test
+
+- `src/cmds/windows/tests.rs`: `bare_at_prefix_is_malformed_without_panicking` covers `@` and `@ `.
+
+### TDD and verification
+
+Added the behavioral regression before production changes, then ran:
+
+```text
+rtk cargo test bare_at_prefix_is_malformed_without_panicking
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2728 filtered out; finished in 0.00s
+thread 'cmds::windows::tests::bare_at_prefix_is_malformed_without_panicking' panicked at src\cmds\windows\parser.rs:238:26:
+index out of bounds: the len is 1 but the index is 1
+```
+
+After the guard and malformed classification:
+
+```text
+rtk cargo test bare_at_prefix_is_malformed_without_panicking
+cargo test: 1 passed, 2753 filtered out (9 suites, 0.00s)
+
+rtk cargo test cmds::windows::tests
+cargo test: 12 passed, 2742 filtered out (9 suites, 0.00s)
+
+rtk cargo test --all
+cargo test: 2746 passed, 8 ignored (9 suites, 4.60s)
+
+rtk git diff --check
+```
+
+The final diff check completed with no output and exit code 0.

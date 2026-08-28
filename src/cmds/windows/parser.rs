@@ -235,7 +235,9 @@ fn push_segment(source: &str, start: usize, end: usize, segments: &mut Vec<Simpl
     } else {
         span.start
     };
-    let command_end = if source.as_bytes()[command_start] == b'"' {
+    let command_end = if command_start == span.end {
+        command_start
+    } else if source.as_bytes()[command_start] == b'"' {
         quoted_command_end(source, command_start, span.end)
     } else {
         source[command_start..span.end]
@@ -285,6 +287,9 @@ fn trimmed_span(source: &str, start: usize, end: usize) -> Option<Span> {
 
 fn opaque_segment_reason(source: &str, segment: SimpleSegment) -> Option<OpaqueReason> {
     let command = &source[segment.command_span.start..segment.command_span.end];
+    if command.is_empty() {
+        return Some(OpaqueReason::MalformedInput);
+    }
     let command = command
         .strip_prefix('"')
         .and_then(|command| command.strip_suffix('"'))

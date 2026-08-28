@@ -128,6 +128,20 @@ fn empty_operands_around_chain_operators_are_malformed() {
 }
 
 #[test]
+fn bare_at_prefix_is_malformed_without_panicking() {
+    for source in ["@", "@ "] {
+        let parsed = parse_expression(source);
+
+        assert_eq!(
+            parsed.opaque_reason,
+            Some(OpaqueReason::MalformedInput),
+            "{source:?}"
+        );
+        assert_eq!(parsed.segments.len(), 1, "{source:?}");
+    }
+}
+
+#[test]
 fn fails_open_for_opaque_or_malformed_cmd_constructs() {
     let cases = [
         ("dir | findstr rs", OpaqueReason::OutputPipeline),
