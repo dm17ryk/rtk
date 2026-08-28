@@ -218,50 +218,47 @@ fn multi_argument_pipe_input_redirection_and_caret_payloads_remain_data() {
 }
 
 #[test]
-fn structured_builtins_keep_native_exit_stderr_and_raw_fallbacks() {
+fn machine_consumed_builtin_output_is_native_even_for_structured_display_commands() {
     let directory = tempdir().unwrap();
     fs::write(directory.path().join("visible.txt"), "payload").unwrap();
     fs::create_dir(directory.path().join("nested")).unwrap();
     fs::write(directory.path().join("nested").join("deep.txt"), "payload").unwrap();
+    let spaced = directory.path().join("folder with spaces");
+    fs::create_dir(&spaced).unwrap();
+    fs::write(spaced.join("spaced.txt"), "payload").unwrap();
 
-    let filtered_dir = rtk_cmd(&format!("dir /a:-d /o:n {}", directory.path().display()));
-    assert!(filtered_dir.status.success());
-    assert!(
-        String::from_utf8_lossy(&filtered_dir.stdout).starts_with("[dir] "),
-        "recognized native dir output must use the structured display adapter"
-    );
+    assert_cmd_parity(&format!("dir /a:-d /o:n {}", directory.path().display()));
 
     let mut set_display = (0..32)
         .map(|index| format!("set RTK_CMD_E2E_FILTER_{index:02}=alpha"))
         .collect::<Vec<_>>();
     set_display.push("set RTK_CMD_E2E_FILTER".to_owned());
-    let filtered_set = rtk_cmd(&set_display.join(" & "));
-    assert!(filtered_set.status.success());
-    assert!(
-        String::from_utf8_lossy(&filtered_set.stdout).starts_with("[set] 32 vars:"),
-        "display-form set must use the structured display adapter: {:?}",
-        String::from_utf8_lossy(&filtered_set.stdout)
-    );
+    assert_cmd_parity(&set_display.join(" & "));
 
     assert_cmd_parity_in("dir /b", directory.path());
-    for expression in [format!(
+    assert_cmd_parity(&format!(
         "dir /a:-d /o:n /t:w {}",
         directory.path().display()
-    )] {
-        let output = rtk_cmd(&expression);
-        assert!(output.status.success(), "{expression}");
-        assert!(
-            String::from_utf8_lossy(&output.stdout).starts_with("[dir] "),
-            "{expression} must execute native dir before filtering"
-        );
-    }
-    let recursive_wildcard = rtk_cmd(&format!(
+    ));
+    assert_cmd_parity(&format!(
         "dir /s /a:-d {}\\*.txt",
         directory.path().display()
     ));
-    assert!(recursive_wildcard.status.success());
-    assert!(String::from_utf8_lossy(&recursive_wildcard.stdout).contains("deep.txt"));
+    assert_cmd_parity(&format!("dir /a:-d /o:n \"{}\"", spaced.display()));
+    assert_cmd_parity("help assoc");
     assert_cmd_parity("set RTK_CMD_MISSING_FILTER_PREFIX");
     assert_cmd_parity("assoc .rtk_missing_extension");
     assert_cmd_parity("ftype RTK_MISSING_FILETYPE");
+}
+
+#[test]
+fn identity_builtin_output_and_binary_type_remain_native_when_captured() {
+    let directory = tempdir().unwrap();
+    let binary = directory.path().join("bytes.bin");
+    fs::write(&binary, [0_u8, 0xff, b'\r', b'\n', b'x']).unwrap();
+
+    assert_cmd_parity("echo exact identity output");
+    assert_cmd_parity(&format!("type {}", binary.display()));
+    assert_cmd_parity("cls");
+    assert_cmd_parity("chdir .");
 }

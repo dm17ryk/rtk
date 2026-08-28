@@ -1,4 +1,4 @@
-use super::adapters::{filter_display, is_display_form};
+use super::adapters::{filter_display, is_display_form, supports_adapter};
 use super::catalog::{builtins, validate_catalog, AdapterStrategy, CommandMode};
 use super::orchestrator::{
     prepare_invocation as prepare_with_cmd, rewrite_expression, Invocation, SEGMENT_RUNNER,
@@ -228,6 +228,12 @@ fn catalog_validation_rejects_duplicate_aliases_and_missing_strategies() {
 
     let missing_strategy = [builtins()[0].clone().without_strategy()];
     assert!(validate_catalog(&missing_strategy).is_err());
+
+    let mut unknown_adapter = builtins()[0].clone();
+    unknown_adapter.strategy = Some(AdapterStrategy::Structured {
+        adapter: "missing-adapter",
+    });
+    assert!(validate_catalog(&[unknown_adapter]).is_err());
 }
 
 #[test]
@@ -237,10 +243,12 @@ fn structured_display_filters_only_recognized_cmd_layouts() {
     let help = include_str!("../../../tests/fixtures/windows_cmd/help_assoc.txt");
     let assoc = include_str!("../../../tests/fixtures/windows_cmd/assoc_display.txt");
     let ftype = include_str!("../../../tests/fixtures/windows_cmd/ftype_display.txt");
+    let grouped_dir = include_str!("../../../tests/fixtures/windows_cmd/dir_grouped_recursive.txt");
+    let real_help = include_str!("../../../tests/fixtures/windows_cmd/help_assoc_real.txt");
 
     assert_eq!(
         filter_display("dir", "dir /a:-d /o:n C:\\work", dir),
-        Some("[dir] C:\\work\nD .git\nF 42 README.md\n2 entries".to_owned())
+        Some("[dir] C:\\work\r\nD .git\r\nF 42 README.md\r\n2 entries".to_owned())
     );
     assert_eq!(
         filter_display("set", "set RTK_", set),
@@ -248,8 +256,12 @@ fn structured_display_filters_only_recognized_cmd_layouts() {
     );
     assert_eq!(
         filter_display("help", "help assoc", help),
-        Some("[help] ASSOC [extension[=[fileType]]]\nDisplays or modifies file extension associations."
+        Some("[help] ASSOC [extension[=[fileType]]]\r\nDisplays or modifies file extension associations."
             .to_owned())
+    );
+    assert_eq!(
+        filter_display("help", "help assoc", real_help),
+        Some("[help] ASSOC [extension[=[fileType]]]\r\nDisplays or modifies file extension associations".to_owned())
     );
     assert_eq!(
         filter_display("assoc", "assoc", assoc),
@@ -269,6 +281,27 @@ fn structured_display_filters_only_recognized_cmd_layouts() {
         None
     );
     assert_eq!(filter_display("help", "help assoc", "Aide inconnue"), None);
+    assert_eq!(
+        filter_display(
+            "help",
+            "help assoc",
+            "Zeigt Dateizuordnungen\n\nASSOC [extension[=[fileType]]]\n\n  details"
+        ),
+        None
+    );
+    assert_eq!(
+        filter_display(
+            "set",
+            "set RTK_",
+            " RTK_LEADING= value with trailing space "
+        ),
+        Some("[set]  RTK_LEADING= value with trailing space ".to_owned())
+    );
+    assert_eq!(filter_display("unknown-adapter", "dir", dir), None);
+    assert_eq!(
+        filter_display("dir", "dir /s", grouped_dir),
+        Some("[dir] C:\\work\r\nF 2,438 grouped.txt\r\n[dir] C:\\work\\nested\r\nF 7 deep.txt\r\n2 entries".to_owned())
+    );
 }
 
 #[test]
@@ -289,12 +322,7 @@ fn catalog_identity_strategies_document_all_non_filtered_builtins_and_aliases() 
                     );
                 }
             }
-            AdapterStrategy::Structured { adapter } => {
-                assert!(matches!(
-                    adapter,
-                    "dir" | "set" | "help" | "assoc" | "ftype"
-                ));
-            }
+            AdapterStrategy::Structured { adapter } => assert!(supports_adapter(adapter)),
         }
     }
 }
@@ -441,9 +469,13 @@ fn public_cmd_transport_does_not_emit_a_bare_nested_cmd_executable() {
 }
 
 #[test]
-fn rewrite_uses_hidden_runner_for_query_segments_only_and_preserves_source_between_them() {
+fn rewrite_keeps_identity_and_non_display_segments_in_the_parent_cmd_process() {
     let source = "  echo hello  && dir /b & cd .. & set RTK_TEST=value || type notes.txt";
     let rewritten = rewrite_expression(source, Path::new(r"C:\Program Files\rtk.exe"));
+
+    if rewritten == source {
+        return;
+    }
 
     assert_eq!(
         rewritten,
@@ -456,13 +488,41 @@ fn rewrite_uses_hidden_runner_for_query_segments_only_and_preserves_source_betwe
 }
 
 #[test]
+fn rewrite_keeps_every_identity_builtin_and_alias_in_the_parent_cmd_process() {
+    let executable = Path::new(r"C:\rtk.exe");
+    for entry in builtins() {
+        if matches!(entry.strategy, Some(AdapterStrategy::Identity { .. })) {
+            for name in std::iter::once(entry.name).chain(entry.aliases.iter().copied()) {
+                assert_eq!(rewrite_expression(name, executable), name, "{name}");
+            }
+        }
+    }
+    for source in ["echo exact text", "type binary.dat", "cls"] {
+        assert_eq!(rewrite_expression(source, executable), source, "{source}");
+    }
+}
+
+#[test]
+fn rewrite_only_uses_cataloged_structured_adapters_for_terminal_displays() {
+    let executable = Path::new(r"C:\rtk.exe");
+    assert_eq!(
+        super::orchestrator::rewrite_expression_for_terminal("dir /o:n", executable, false),
+        "dir /o:n"
+    );
+    assert!(
+        super::orchestrator::rewrite_expression_for_terminal("dir /o:n", executable, true)
+            .contains(SEGMENT_RUNNER)
+    );
+    for source in ["assoc .rtk=RtkFile", "ftype RtkFile=cmd /c echo"] {
+        assert_eq!(rewrite_expression(source, executable), source, "{source}");
+    }
+}
+
+#[test]
 fn rewrite_preserves_at_prefix_and_fails_open_for_opaque_input() {
     let executable = Path::new(r"C:\rtk.exe");
 
-    assert_eq!(
-        rewrite_expression("@dir /b", executable),
-        format!("@C:\\rtk.exe {SEGMENT_RUNNER} --hex 40646972202f62")
-    );
+    assert_eq!(rewrite_expression("@dir /b", executable), "@dir /b");
     assert_eq!(
         rewrite_expression("dir > listing.txt", executable),
         "dir > listing.txt"

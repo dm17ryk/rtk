@@ -436,6 +436,14 @@ pub fn validate_catalog(catalog: &[BuiltinCommand]) -> Result<(), String> {
         if command.strategy.is_none() {
             return Err(format!("{} has no adapter strategy", command.name));
         }
+        if let Some(AdapterStrategy::Structured { adapter }) = command.strategy {
+            if !super::adapters::supports_adapter(adapter) {
+                return Err(format!(
+                    "{} has unknown structured adapter: {adapter}",
+                    command.name
+                ));
+            }
+        }
         for name in std::iter::once(command.name).chain(command.aliases.iter().copied()) {
             let normalized = name.to_ascii_lowercase();
             if !names.insert(normalized) {

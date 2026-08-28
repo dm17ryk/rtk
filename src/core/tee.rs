@@ -3,6 +3,7 @@
 use super::constants::RTK_DATA_DIR;
 use crate::core::config::Config;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Minimum output size to tee (smaller outputs don't need recovery)
 const MIN_TEE_SIZE: usize = 500;
@@ -12,6 +13,8 @@ const DEFAULT_MAX_FILES: usize = 20;
 
 /// Default max file size (1MB)
 const DEFAULT_MAX_FILE_SIZE: usize = 1_048_576;
+
+static LOSSLESS_TEE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Sanitize a command slug for use in filenames.
 /// Replaces non-alphanumeric chars (except underscore/hyphen) with underscore.
@@ -177,6 +180,41 @@ fn write_tee_file(
     Some(filepath)
 }
 
+/// Write a complete recovery artifact. Unlike the normal tee path, this
+/// refuses oversized output rather than truncating a file advertised as full.
+fn write_lossless_tee_file(
+    raw: &str,
+    command_slug: &str,
+    tee_dir: &std::path::Path,
+    max_file_size: usize,
+) -> Option<PathBuf> {
+    if raw.len() > max_file_size || raw.is_empty() {
+        return None;
+    }
+    create_tee_dir(tee_dir)?;
+    let slug = sanitize_slug(command_slug);
+    use std::io::Write;
+    for _ in 0..32 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        let sequence = LOSSLESS_TEE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = tee_dir.join(format!("{nanos}_{sequence}_{slug}.log"));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        match crate::core::utils::open_private(&mut options, &path) {
+            Ok(mut file) => {
+                file.write_all(raw.as_bytes()).ok()?;
+                return Some(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
 /// Write raw output to tee file if conditions are met.
 /// Returns file path on success, None if skipped/failed.
 pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf> {
@@ -302,6 +340,21 @@ fn force_tee_path(content: &str, command_slug: &str) -> Option<PathBuf> {
 /// Returns `[full output: ~/path]`, or None if tee is disabled/skipped.
 pub fn force_tee_hint(raw: &str, command_slug: &str) -> Option<String> {
     let path = force_tee_path(raw, command_slug)?;
+    Some(format_hint(&path))
+}
+
+/// Return a recovery hint only when the artifact contains the complete raw
+/// output and has a collision-resistant, non-overwriting filename.
+pub fn force_tee_lossless_hint(raw: &str, command_slug: &str) -> Option<String> {
+    if std::env::var("RTK_TEE").ok().as_deref() == Some("0") || raw.is_empty() {
+        return None;
+    }
+    let config = Config::load().ok()?;
+    if !config.tee.enabled {
+        return None;
+    }
+    let tee_dir = get_tee_dir(&config)?;
+    let path = write_lossless_tee_file(raw, command_slug, &tee_dir, config.tee.max_file_size)?;
     Some(format_hint(&path))
 }
 
@@ -548,6 +601,43 @@ mod tests {
         // rounded down from 201 to the nearest char boundary
         let target = "\u{1F600}".repeat(50);
         assert!(content.starts_with(&target));
+    }
+
+    #[test]
+    fn lossless_tee_artifacts_are_unique_and_complete() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let first =
+            write_lossless_tee_file("first", "cmd-dir", tmpdir.path(), 1024).expect("first tee");
+        let second =
+            write_lossless_tee_file("second", "cmd-dir", tmpdir.path(), 1024).expect("second tee");
+        assert_ne!(first, second);
+        assert_eq!(fs::read_to_string(first).unwrap(), "first");
+        assert_eq!(fs::read_to_string(second).unwrap(), "second");
+    }
+
+    #[test]
+    fn lossless_tee_rejects_oversize_output_without_a_misleading_hint() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        assert!(
+            write_lossless_tee_file(&"x".repeat(1025), "cmd-dir", tmpdir.path(), 1024).is_none()
+        );
+        assert!(fs::read_dir(tmpdir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn lossless_tee_artifacts_do_not_collide_under_concurrency() {
+        let tmpdir = std::sync::Arc::new(tempfile::tempdir().expect("tempdir"));
+        let paths = (0..8)
+            .map(|index| {
+                let tmpdir = std::sync::Arc::clone(&tmpdir);
+                std::thread::spawn(move || {
+                    write_lossless_tee_file(&format!("{index}"), "cmd-dir", tmpdir.path(), 1024)
+                        .expect("lossless tee")
+                })
+            })
+            .map(|thread| thread.join().expect("thread"))
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(paths.len(), 8);
     }
 
     #[test]

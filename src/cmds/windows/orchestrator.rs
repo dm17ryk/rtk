@@ -1,11 +1,11 @@
 //! Public and hidden execution paths for CMD expressions.
 
 use super::adapters;
-use super::catalog::{builtins, AdapterStrategy, CommandMode};
+use super::catalog::{builtins, AdapterStrategy};
 use super::parser::{parse_expression, OperatorKind};
 use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::Command;
 
@@ -97,7 +97,21 @@ pub fn prepare_invocation(args: &[OsString], cmd_executable: &Path) -> Result<In
 
 /// Rewrite only cataloged, stateless query segments. Any opaque parser result
 /// is binding and therefore executes byte-for-byte through the parent CMD.
+#[cfg(test)]
 pub fn rewrite_expression(source: &str, rtk_executable: &Path) -> String {
+    rewrite_expression_for_terminal(source, rtk_executable, true)
+}
+
+/// Rewrite only when stdout is attached to a terminal. Redirected or piped
+/// output is machine-consumed data and therefore retains the exact CMD path.
+pub fn rewrite_expression_for_terminal(
+    source: &str,
+    rtk_executable: &Path,
+    stdout_is_terminal: bool,
+) -> String {
+    if !stdout_is_terminal {
+        return source.to_owned();
+    }
     let parsed = parse_expression(source);
     // Percent expansion happens once for a complete parent CMD line, before
     // stateful segments execute. Sending a later segment through a child CMD
@@ -131,11 +145,10 @@ pub fn rewrite_expression(source: &str, rtk_executable: &Path) -> String {
             .iter()
             .find(|entry| entry.matches(command))
             .is_some_and(|entry| match entry.strategy {
-                Some(AdapterStrategy::Identity { .. }) => entry.mode == CommandMode::Query,
-                Some(AdapterStrategy::Structured { .. }) => {
-                    entry.mode == CommandMode::Query || adapters::is_display_form(command, original)
+                Some(AdapterStrategy::Structured { adapter }) => {
+                    adapters::is_display_form(adapter, original)
                 }
-                None => false,
+                Some(AdapterStrategy::Identity { .. }) | None => false,
             });
         if !eligible {
             continue;
@@ -165,7 +178,8 @@ pub fn run(args: &[OsString]) -> Result<i32> {
         Invocation::Execute(source) => {
             let executable =
                 std::env::current_exe().context("Failed to resolve the current RTK executable")?;
-            let expression = rewrite_expression(&source, &executable);
+            let expression =
+                rewrite_expression_for_terminal(&source, &executable, io::stdout().is_terminal());
             execute_cmd(
                 &cmd_executable,
                 &[
@@ -228,29 +242,33 @@ fn render_segment_stdout(source: &str, stdout: &[u8]) -> Vec<u8> {
     let Some((command, entry)) = source_command_and_catalog_entry(source) else {
         return stdout.to_vec();
     };
-    let Some(AdapterStrategy::Structured { .. }) = entry.strategy else {
+    let Some(AdapterStrategy::Structured { adapter }) = entry.strategy else {
         return stdout.to_vec();
     };
     let Ok(raw) = std::str::from_utf8(stdout) else {
         return stdout.to_vec();
     };
-    let Some(filtered) = adapters::filter_display(command, source, raw) else {
+    let Some(filtered) = adapters::filter_display(adapter, source, raw) else {
         return stdout.to_vec();
     };
-    if filtered == raw {
+    if filtered == raw || !should_attempt_lossy_output(raw, &filtered) {
         return stdout.to_vec();
     }
 
     // A lossy display is never emitted unless the full native stdout has a
     // recoverable tee artifact. The guard also includes the hint itself.
     let label = format!("cmd-{command}");
-    let Some(hint) = crate::core::tee::force_tee_hint(raw, &label) else {
+    let Some(hint) = crate::core::tee::force_tee_lossless_hint(raw, &label) else {
         return stdout.to_vec();
     };
-    let shown = format!("{filtered}\n{hint}");
+    let shown = format!("{filtered}\r\n{hint}");
     crate::core::guard::never_worse(raw, &shown)
         .as_bytes()
         .to_vec()
+}
+
+fn should_attempt_lossy_output(raw: &str, filtered: &str) -> bool {
+    crate::core::guard::never_worse(raw, filtered) != raw
 }
 
 fn source_command_and_catalog_entry(
@@ -330,5 +348,22 @@ fn hex_value(value: u8) -> Result<u8> {
         b'a'..=b'f' => Ok(value - b'a' + 10),
         b'A'..=b'F' => Ok(value - b'A' + 10),
         _ => bail!("CMD segment encoding contains a non-hex digit"),
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::should_attempt_lossy_output;
+
+    #[test]
+    fn never_worse_is_checked_before_creating_a_lossy_recovery_artifact() {
+        assert!(!should_attempt_lossy_output(
+            "raw",
+            "a much longer filtered display"
+        ));
+        assert!(should_attempt_lossy_output(
+            &"raw output ".repeat(40),
+            "summary"
+        ));
     }
 }
