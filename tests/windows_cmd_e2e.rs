@@ -2,7 +2,9 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 fn native_cmd(expression: &str) -> Output {
@@ -377,6 +379,12 @@ fn hidden_cmd_runner_filters_with_complete_lossless_tee_and_native_result_metada
     let artifacts = fs::read_dir(&tee_dir)
         .unwrap()
         .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "log")
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         artifacts.len(),
@@ -386,6 +394,155 @@ fn hidden_cmd_runner_filters_with_complete_lossless_tee_and_native_result_metada
     let artifact = &artifacts[0];
     assert!(shown.contains(artifact.file_name().to_string_lossy().as_ref()));
     assert_eq!(fs::read(artifact.path()).unwrap(), native.stdout);
+}
+
+fn wait_for_test_file(directory: &Path, prefix: &str) -> std::path::PathBuf {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(path) = fs::read_dir(directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(prefix))
+            })
+        {
+            return path;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {prefix} in {}",
+            directory.display()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn hidden_cmd_runner_serializes_lossless_tee_commits_between_processes() {
+    let directory = tempdir().unwrap();
+    let appdata = directory.path().join("appdata");
+    let config_dir = appdata.join("rtk");
+    let tee_dir = directory.path().join("tee");
+    let hook_dir = directory.path().join("hook");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&hook_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        "[tee]\nenabled = true\nmode = \"always\"\nmax_files = 1\nmax_file_size = 1048576\n",
+    )
+    .unwrap();
+
+    let loaded_config = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .arg("config")
+        .env("APPDATA", &appdata)
+        .output()
+        .expect("rtk config should start");
+    assert!(loaded_config.status.success());
+    assert!(
+        String::from_utf8_lossy(&loaded_config.stdout).contains("max_files = 1"),
+        "children must use the isolated max_files = 1 config"
+    );
+
+    let source = "set RTK_TEE_LOCK_CHILD_";
+    let child = |name: &str| {
+        Command::new(env!("CARGO_BIN_EXE_rtk"))
+            .args(["__cmd-run", "--hex", &hex_encode(source.as_bytes())])
+            .env("APPDATA", &appdata)
+            .env("RTK_TEE_DIR", &tee_dir)
+            .env("RTK_TEST_TEE_COMMIT_HOLD_DIR", &hook_dir)
+            .env("RTK_TEST_TEE_COMMIT_OBSERVATION_DIR", &hook_dir)
+            .env("RTK_TEST_TEE_MAX_FILES", "1")
+            .envs((0..16).map(|index| {
+                (
+                    format!("RTK_TEE_LOCK_CHILD_{name}_{index:02}"),
+                    "x".repeat(256),
+                )
+            }))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("hidden cmd runner should start")
+    };
+
+    let first = child("first");
+    wait_for_test_file(&hook_dir, "entered-");
+    let mut second = child("second");
+    thread::sleep(Duration::from_millis(100));
+    let entered = fs::read_dir(&hook_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("entered-"))
+        .count();
+    assert_eq!(
+        entered, 1,
+        "only the lock holder may enter the commit critical section"
+    );
+    assert!(
+        second.try_wait().unwrap().is_none(),
+        "second process must wait for the first process's tee commit lock"
+    );
+    fs::write(hook_dir.join("release"), "release").unwrap();
+
+    let first_output = first.wait_with_output().unwrap();
+    let second_output = second.wait_with_output().unwrap();
+    for output in [&first_output, &second_output] {
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).starts_with("[set] 16 vars:"));
+        assert!(output.stderr.is_empty());
+    }
+
+    let observations = fs::read_dir(&hook_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("committed-"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observations.len(),
+        2,
+        "each child records its selected artifact"
+    );
+    let observed_paths = observations
+        .into_iter()
+        .map(|observation| {
+            let selected = fs::read_to_string(observation).unwrap();
+            let (max_files, path) = selected
+                .split_once('\n')
+                .expect("observation includes the active retention setting");
+            assert_eq!(max_files, "1", "child must commit with max_files = 1");
+            assert!(
+                !path.trim().is_empty(),
+                "the child-side observation is written only while the selected artifact exists"
+            );
+            path.to_owned()
+        })
+        .collect::<Vec<_>>();
+    for output in [&first_output, &second_output] {
+        assert!(
+            observed_paths
+                .iter()
+                .any(|path| String::from_utf8_lossy(&output.stdout)
+                    .contains(&path.trim().replace('\\', "\\\\"))),
+            "each child returns a hint to the artifact it observed while holding the lock"
+        );
+    }
+
+    let retained = fs::read_dir(&tee_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "log"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained.len(),
+        1,
+        "the later serialized commit retains one artifact: {retained:?}"
+    );
 }
 
 #[test]

@@ -144,6 +144,59 @@ fn create_tee_dir(tee_dir: &std::path::Path) -> Option<()> {
     crate::core::utils::create_private_dir(tee_dir).ok()
 }
 
+/// Acquire an advisory lock shared by every process using this tee directory.
+/// The lock file is intentionally retained: unlike a create-new sentinel, an
+/// operating-system file lock is released automatically if its owner exits.
+fn acquire_lossless_tee_commit_lock(tee_dir: &std::path::Path) -> Option<std::fs::File> {
+    let lock_path = tee_dir.join(".lossless-tee.lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    let file = crate::core::utils::open_private(&mut options, &lock_path).ok()?;
+    file.lock().ok()?;
+    Some(file)
+}
+
+#[cfg(debug_assertions)]
+fn wait_for_test_lossless_tee_commit_lock() {
+    let Ok(directory) = std::env::var("RTK_TEST_TEE_COMMIT_HOLD_DIR") else {
+        return;
+    };
+    let directory = std::path::Path::new(&directory);
+    let entered = directory.join(format!("entered-{}", std::process::id()));
+    if std::fs::write(entered, "locked").is_err() {
+        return;
+    }
+    let release = directory.join("release");
+    while !release.exists() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(debug_assertions)]
+fn observe_test_lossless_tee_commit(path: &std::path::Path, max_files: usize) {
+    let Ok(directory) = std::env::var("RTK_TEST_TEE_COMMIT_OBSERVATION_DIR") else {
+        return;
+    };
+    if path.is_file() {
+        let observation =
+            std::path::Path::new(&directory).join(format!("committed-{}.txt", std::process::id()));
+        let _ = std::fs::write(observation, format!("{max_files}\n{}", path.display()));
+    }
+}
+
+#[cfg(debug_assertions)]
+fn lossless_tee_max_files_for_test(configured: usize) -> usize {
+    std::env::var("RTK_TEST_TEE_MAX_FILES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(configured)
+}
+
+#[cfg(not(debug_assertions))]
+fn lossless_tee_max_files_for_test(configured: usize) -> usize {
+    configured
+}
+
 /// Write raw output to a tee file in the given directory.
 /// Returns file path on success.
 fn write_tee_file(
@@ -229,19 +282,28 @@ impl LosslessTeeReservation {
         Some(self.committed_path.clone())
     }
 
-    #[cfg(test)]
-    fn commit_path(mut self) -> Option<PathBuf> {
+    fn commit_with_lock<T>(&mut self, complete: impl FnOnce(&std::path::Path) -> T) -> Option<T> {
         let _commit_lock = LOSSLESS_TEE_COMMIT_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.commit_path_locked()
+        let _interprocess_lock = acquire_lossless_tee_commit_lock(
+            self.committed_path.parent().expect("tee path has parent"),
+        )?;
+        #[cfg(debug_assertions)]
+        wait_for_test_lossless_tee_commit_lock();
+        let committed_path = self.commit_path_locked()?;
+        #[cfg(debug_assertions)]
+        observe_test_lossless_tee_commit(&committed_path, self.max_files);
+        Some(complete(&committed_path))
+    }
+
+    #[cfg(test)]
+    fn commit_path(mut self) -> Option<PathBuf> {
+        self.commit_with_lock(|path| path.to_path_buf())
     }
 
     pub fn commit_hint(mut self) -> Option<String> {
-        let _commit_lock = LOSSLESS_TEE_COMMIT_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Some(format_hint(&self.commit_path_locked()?))
+        self.commit_with_lock(format_hint)
     }
 }
 
@@ -325,12 +387,13 @@ pub fn reserve_lossless_tee(raw: &str, command_slug: &str) -> Option<LosslessTee
         return None;
     }
     let tee_dir = get_tee_dir(&config)?;
+    let max_files = lossless_tee_max_files_for_test(config.tee.max_files);
     reserve_lossless_tee_file(
         raw,
         command_slug,
         &tee_dir,
         config.tee.max_file_size,
-        config.tee.max_files,
+        max_files,
     )
 }
 
@@ -841,6 +904,12 @@ mod tests {
         let artifacts = fs::read_dir(tmpdir.path())
             .unwrap()
             .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "log")
+            })
             .collect::<Vec<_>>();
         assert_eq!(artifacts.len(), 2);
         assert!(artifacts
@@ -866,7 +935,17 @@ mod tests {
         reservation.commit_hint().expect("selected commit");
 
         assert!(selected.exists(), "returned recovery hint must resolve");
-        assert_eq!(fs::read_dir(tmpdir.path()).unwrap().count(), 1);
+        assert_eq!(
+            fs::read_dir(tmpdir.path())
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "log"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -909,7 +988,17 @@ mod tests {
 
         first_thread.join().expect("first commit thread");
         second_thread.join().expect("second commit thread");
-        assert_eq!(fs::read_dir(tmpdir.path()).unwrap().count(), 1);
+        assert_eq!(
+            fs::read_dir(tmpdir.path())
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "log"))
+                .count(),
+            1
+        );
     }
 
     #[test]
