@@ -18,7 +18,7 @@ pub enum Invocation {
     /// Invoke a one-shot expression using the hardened default switches.
     Execute(String),
     /// Invoke independently supplied arguments through environment transport,
-    /// so their CMD metacharacters remain data without enabling `/V`.
+    /// enabling delayed expansion only in a nested execution command.
     Transport {
         expression: String,
         environment: Vec<(OsString, OsString)>,
@@ -61,13 +61,12 @@ pub fn prepare_invocation(args: &[OsString]) -> Result<Invocation> {
             .iter()
             .enumerate()
             .map(|(index, argument)| {
-                validate_transport_argument(argument)?;
-                Ok((
+                (
                     OsString::from(format!("RTK_CMD_ARG_{index}")),
                     OsString::from(argument),
-                ))
+                )
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Vec<_>>();
         let expression = expression_args
             .iter()
             .enumerate()
@@ -75,13 +74,16 @@ pub fn prepare_invocation(args: &[OsString]) -> Result<Invocation> {
                 if argument.is_empty() {
                     "\"\"".to_owned()
                 } else {
-                    format!("%RTK_CMD_ARG_{index}%")
+                    format!("!RTK_CMD_ARG_{index}!")
                 }
             })
             .collect::<Vec<_>>()
             .join(" ");
         Invocation::Transport {
-            expression,
+            // The outer CMD parses this line with its default delayed expansion
+            // disabled. The nested CMD enables it only after the literal
+            // `!RTK_CMD_ARG_n!` tokens have crossed that parser boundary.
+            expression: format!("cmd.exe /D /S /V:ON /C {expression}"),
             environment,
         }
     };
@@ -203,15 +205,6 @@ fn execute_cmd(arguments: &[OsString], environment: &[(OsString, OsString)]) -> 
         .status()
         .context("Failed to execute cmd.exe")?;
     Ok(crate::core::utils::exit_code_from_status(&status, "cmd"))
-}
-
-fn validate_transport_argument(argument: &str) -> Result<()> {
-    if argument.contains(['\r', '\n']) {
-        bail!(
-            "multi-argument rtk cmd cannot safely represent CR or LF; pass one raw CMD expression"
-        );
-    }
-    Ok(())
 }
 
 fn quote_runner_executable(path: &str) -> String {

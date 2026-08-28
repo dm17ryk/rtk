@@ -126,3 +126,42 @@ fn multi_argument_empty_and_bang_values_match_default_cmd_semantics() {
     assert_eq!(bang_rtk.stdout, bang_native.stdout);
     assert_eq!(bang_rtk.stderr, bang_native.stderr);
 }
+
+#[test]
+fn multi_argument_percent_and_crlf_payloads_remain_data() {
+    let directory = tempdir().unwrap();
+    let percent_injected = directory.path().join("percent-must-not-exist.txt");
+    let percent_payload = format!(
+        "100% complete & echo injected > {}",
+        percent_injected.display()
+    );
+    let percent_output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["cmd", "echo", &percent_payload])
+        .output()
+        .expect("rtk cmd should start");
+    assert!(percent_output.status.success());
+    assert_eq!(
+        percent_output.stdout,
+        format!("{percent_payload}\r\n").as_bytes()
+    );
+    assert!(
+        !percent_injected.exists(),
+        "percent-bearing payload must not create a redirected marker"
+    );
+
+    let crlf_injected = directory.path().join("crlf-must-not-exist.txt");
+    let crlf_payload = format!(
+        "first line\r\n& echo injected > {}",
+        crlf_injected.display()
+    );
+    let crlf_output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["cmd", "echo", &crlf_payload])
+        .output()
+        .expect("rtk cmd should start");
+    assert!(crlf_output.status.success());
+    assert_eq!(crlf_output.stdout, format!("{crlf_payload}\r\n").as_bytes());
+    assert!(
+        !crlf_injected.exists(),
+        "CR/LF payload must not create a redirected marker"
+    );
+}

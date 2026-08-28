@@ -73,9 +73,9 @@ segments without recursive orchestration.
 
 - Structured filters and per-segment savings accounting are intentionally not
   implemented until Task 3. Hidden runners are identity execution only.
-- The multi-argument transport rejects CR and LF; callers needing line-spanning
-  forms should pass one raw expression, which remains parser-governed and
-  fail-open where required.
+- Multi-argument transport starts a nested CMD process to establish a safe
+  delayed-expansion boundary. Raw one-expression input remains the route for
+  exact parent-CMD control-flow semantics.
 
 ## Fix Round 1
 
@@ -179,4 +179,55 @@ segments without recursive orchestration.
 - `rtk test cargo test --test windows_cmd_e2e` — `5 passed; 0 failed`.
 - `rtk test cargo test --all` — main unit suite `2730 passed; 0 failed; 8
   ignored`; all remaining targets passed, including `5 passed; 0 failed` for
+  the Windows CMD E2E suite.
+
+## Fix Round 3
+
+### Changed Behavior
+
+- Removed the shell-injectable `%RTK_CMD_ARG_n%` transport. Untrusted values
+  are no longer percent-expanded into the outer CMD command line.
+- The public multi-argument path still invokes its resolved outer CMD with the
+  required exact switches `/D /S /C`. Its expression launches a nested
+  `cmd.exe /D /S /V:ON /C` only after the outer parser, whose delayed expansion
+  is off by default, has received literal `!RTK_CMD_ARG_n!` tokens.
+- The nested command expands each environment transport value after parsing,
+  preserving literal `%`, `!`, embedded quotes, `&|<>^`, empty values, and
+  CR/LF as data. Input-redirection fallback remains intact.
+
+### Safe Probe and Direct Coverage
+
+- `multi_argument_percent_and_crlf_payloads_remain_data` is a real Windows
+  probe: a percent-bearing `& ... > marker` value and a CR/LF-bearing value
+  with the same redirected marker syntax both produce their exact echo payload
+  and leave marker files absent.
+- `multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_command`
+  continues to require exact stdout and no marker file for quote plus `&` and
+  `>` input.
+- `multi_argument_empty_and_bang_values_match_default_cmd_semantics` compares
+  status, stdout, and stderr with native `/D /S /C` for empty and literal bang
+  values.
+- `public_cmd_transport_preserves_percent_and_crlf_values` verifies the
+  generated nested delayed-expansion command and unmodified environment values.
+
+### TDD Red/Green Evidence
+
+1. RED: `rtk test cargo test
+   public_cmd_transport_preserves_percent_and_crlf_values --bin rtk` reported
+   `0 passed; 1 failed` while percent transport was still generated and CR/LF
+   was rejected.
+2. RED: `rtk test cargo test --test windows_cmd_e2e
+   multi_argument_percent_and_crlf_payloads_remain_data` reported `0 passed; 1
+   failed` before the nested delayed-expansion boundary was introduced.
+3. GREEN: the unit probe reported `1 passed; 0 failed`; the Windows percent and
+   CR/LF probe reported `1 passed; 0 failed`; focused quote/metacharacter and
+   empty/bang parity probes also each reported `1 passed; 0 failed`.
+
+### Fix Round 3 Verification
+
+- `rtk cargo fmt` — passed (exit 0).
+- `rtk test cargo test "cmds::windows::tests::" --bin rtk` — `20 passed; 0 failed`.
+- `rtk test cargo test --test windows_cmd_e2e` — `6 passed; 0 failed`.
+- `rtk test cargo test --all` — main unit suite `2731 passed; 0 failed; 8
+  ignored`; all remaining targets passed, including `6 passed; 0 failed` for
   the Windows CMD E2E suite.

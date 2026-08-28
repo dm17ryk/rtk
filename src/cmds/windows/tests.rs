@@ -233,7 +233,7 @@ fn public_cmd_keeps_one_expression_raw_and_transports_multiple_arguments() {
         prepare_invocation(&[OsString::from("dir"), OsString::from("folder with spaces"),])
             .unwrap(),
         Invocation::Transport {
-            expression: "%RTK_CMD_ARG_0% %RTK_CMD_ARG_1%".to_owned(),
+            expression: "cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!".to_owned(),
             environment: vec![
                 (OsString::from("RTK_CMD_ARG_0"), OsString::from("dir")),
                 (
@@ -255,7 +255,7 @@ fn public_cmd_normalizes_c_but_keeps_interactive_k_and_no_argument_sessions_nati
         ])
         .unwrap(),
         Invocation::Transport {
-            expression: "%RTK_CMD_ARG_0% %RTK_CMD_ARG_1%".to_owned(),
+            expression: "cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!".to_owned(),
             environment: vec![
                 (OsString::from("RTK_CMD_ARG_0"), OsString::from("dir")),
                 (OsString::from("RTK_CMD_ARG_1"), OsString::from("/b")),
@@ -281,7 +281,7 @@ fn public_cmd_transports_embedded_quotes_and_cmd_metacharacters_as_data() {
         ])
         .unwrap(),
         Invocation::Transport {
-            expression: "%RTK_CMD_ARG_0% %RTK_CMD_ARG_1%".to_owned(),
+            expression: "cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!".to_owned(),
             environment: vec![
                 (OsString::from("RTK_CMD_ARG_0"), OsString::from("echo")),
                 (
@@ -294,7 +294,7 @@ fn public_cmd_transports_embedded_quotes_and_cmd_metacharacters_as_data() {
 }
 
 #[test]
-fn public_cmd_transport_preserves_empty_and_bang_arguments_without_delayed_expansion() {
+fn public_cmd_transport_enables_delayed_expansion_inside_the_default_cmd_expression() {
     assert_eq!(
         prepare_invocation(&[
             OsString::from("echo"),
@@ -303,13 +303,34 @@ fn public_cmd_transport_preserves_empty_and_bang_arguments_without_delayed_expan
         ])
         .unwrap(),
         Invocation::Transport {
-            expression: "%RTK_CMD_ARG_0% \"\" %RTK_CMD_ARG_2%".to_owned(),
+            expression: "cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! \"\" !RTK_CMD_ARG_2!".to_owned(),
             environment: vec![
                 (OsString::from("RTK_CMD_ARG_0"), OsString::from("echo")),
                 (OsString::from("RTK_CMD_ARG_1"), OsString::from("")),
                 (
                     OsString::from("RTK_CMD_ARG_2"),
                     OsString::from("!RTK_CMD_UNSET!"),
+                ),
+            ],
+        }
+    );
+}
+
+#[test]
+fn public_cmd_transport_preserves_percent_and_crlf_values() {
+    assert_eq!(
+        prepare_invocation(&[
+            OsString::from("echo"),
+            OsString::from("100% complete\r\nsecond line"),
+        ])
+        .unwrap(),
+        Invocation::Transport {
+            expression: "cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!".to_owned(),
+            environment: vec![
+                (OsString::from("RTK_CMD_ARG_0"), OsString::from("echo")),
+                (
+                    OsString::from("RTK_CMD_ARG_1"),
+                    OsString::from("100% complete\r\nsecond line"),
                 ),
             ],
         }
