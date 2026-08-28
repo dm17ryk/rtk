@@ -419,6 +419,26 @@ fn wait_for_test_file(directory: &Path, prefix: &str) -> std::path::PathBuf {
     }
 }
 
+fn wait_for_test_file_count(directory: &Path, prefix: &str, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let count = fs::read_dir(directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
+            .count();
+        if count >= expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {expected} {prefix} markers in {}",
+            directory.display()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn hidden_cmd_runner_serializes_lossless_tee_commits_between_processes() {
     let directory = tempdir().unwrap();
@@ -453,6 +473,7 @@ fn hidden_cmd_runner_serializes_lossless_tee_commits_between_processes() {
             .env("RTK_TEE_DIR", &tee_dir)
             .env("RTK_TEST_TEE_COMMIT_HOLD_DIR", &hook_dir)
             .env("RTK_TEST_TEE_COMMIT_OBSERVATION_DIR", &hook_dir)
+            .env("RTK_TEST_TEE_PUBLICATION_DIR", &hook_dir)
             .env("RTK_TEST_TEE_MAX_FILES", "1")
             .envs((0..16).map(|index| {
                 (
@@ -469,7 +490,7 @@ fn hidden_cmd_runner_serializes_lossless_tee_commits_between_processes() {
     let first = child("first");
     wait_for_test_file(&hook_dir, "entered-");
     let mut second = child("second");
-    thread::sleep(Duration::from_millis(100));
+    wait_for_test_file_count(&hook_dir, "attempting-", 2);
     let entered = fs::read_dir(&hook_dir)
         .unwrap()
         .filter_map(Result::ok)
@@ -484,6 +505,13 @@ fn hidden_cmd_runner_serializes_lossless_tee_commits_between_processes() {
         "second process must wait for the first process's tee commit lock"
     );
     fs::write(hook_dir.join("release"), "release").unwrap();
+    let first_publication = wait_for_test_file(&hook_dir, "published-");
+    let first_published_path = fs::read_to_string(first_publication).unwrap();
+    assert!(
+        Path::new(first_published_path.trim()).is_file(),
+        "the first hint target exists after stdout publication while its lock is held"
+    );
+    fs::write(hook_dir.join("publication-release"), "release").unwrap();
 
     let first_output = first.wait_with_output().unwrap();
     let second_output = second.wait_with_output().unwrap();

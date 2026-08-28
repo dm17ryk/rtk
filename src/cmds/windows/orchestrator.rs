@@ -9,6 +9,47 @@ use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::Command;
 
+enum SegmentStdout {
+    Native(Vec<u8>),
+    Lossless(crate::core::tee::LosslessTeeCommit),
+}
+
+impl SegmentStdout {
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Native(bytes) => bytes,
+            Self::Lossless(commit) => commit.as_bytes(),
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn lossless_path(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Native(_) => None,
+            Self::Lossless(commit) => Some(commit.path()),
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+fn observe_test_lossless_publication(stdout: &SegmentStdout) {
+    let (Some(path), Ok(directory)) = (
+        stdout.lossless_path(),
+        std::env::var("RTK_TEST_TEE_PUBLICATION_DIR"),
+    ) else {
+        return;
+    };
+    if path.is_file() {
+        let directory = std::path::Path::new(&directory);
+        let marker = directory.join(format!("published-{}", std::process::id()));
+        let _ = std::fs::write(marker, path.display().to_string());
+        let release = directory.join("publication-release");
+        while !release.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
 /// Internal subcommand used from a rewritten CMD segment.
 pub const SEGMENT_RUNNER: &str = "__cmd-run";
 
@@ -224,11 +265,13 @@ pub fn run_segment(encoded: &str) -> Result<i32> {
     let stdout = if output.status.success() {
         render_segment_stdout(&source, &output.stdout)
     } else {
-        output.stdout
+        SegmentStdout::Native(output.stdout)
     };
     io::stdout()
-        .write_all(&stdout)
+        .write_all(stdout.as_bytes())
         .context("Failed to write CMD stdout")?;
+    #[cfg(debug_assertions)]
+    observe_test_lossless_publication(&stdout);
     io::stderr()
         .write_all(&output.stderr)
         .context("Failed to write CMD stderr")?;
@@ -238,31 +281,33 @@ pub fn run_segment(encoded: &str) -> Result<i32> {
 /// Filter only a successful, UTF-8, cataloged structured display. Every
 /// rejected layout, non-text output, identity adapter, and failed command is
 /// emitted byte-for-byte by `run_segment`.
-fn render_segment_stdout(source: &str, stdout: &[u8]) -> Vec<u8> {
+fn render_segment_stdout(source: &str, stdout: &[u8]) -> SegmentStdout {
     let Some((command, entry)) = source_command_and_catalog_entry(source) else {
-        return stdout.to_vec();
+        return SegmentStdout::Native(stdout.to_vec());
     };
     let Some(AdapterStrategy::Structured { adapter }) = entry.strategy else {
-        return stdout.to_vec();
+        return SegmentStdout::Native(stdout.to_vec());
     };
     let Ok(raw) = std::str::from_utf8(stdout) else {
-        return stdout.to_vec();
+        return SegmentStdout::Native(stdout.to_vec());
     };
     let Some(filtered) = adapters::filter_display(adapter, source, raw) else {
-        return stdout.to_vec();
+        return SegmentStdout::Native(stdout.to_vec());
     };
     if filtered == raw || !should_attempt_lossy_output(raw, &filtered) {
-        return stdout.to_vec();
+        return SegmentStdout::Native(stdout.to_vec());
     }
 
     // A lossy display is never emitted unless the full native stdout has a
     // recoverable tee artifact. The guard also includes the hint itself.
     let label = format!("cmd-{command}");
     let Some(reservation) = crate::core::tee::reserve_lossless_tee(raw, &label) else {
-        return stdout.to_vec();
+        return SegmentStdout::Native(stdout.to_vec());
     };
-    crate::core::tee::commit_lossless_if_better(raw, &filtered, reservation)
-        .map_or_else(|| stdout.to_vec(), String::into_bytes)
+    crate::core::tee::commit_lossless_if_better(raw, &filtered, reservation).map_or_else(
+        || SegmentStdout::Native(stdout.to_vec()),
+        SegmentStdout::Lossless,
+    )
 }
 
 fn should_attempt_lossy_output(raw: &str, filtered: &str) -> bool {

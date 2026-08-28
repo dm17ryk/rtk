@@ -5,7 +5,7 @@ use crate::core::config::Config;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Mutex,
+    Mutex, MutexGuard,
 };
 
 /// Minimum output size to tee (smaller outputs don't need recovery)
@@ -72,22 +72,33 @@ pub(crate) fn get_tee_dir(config: &Config) -> Option<PathBuf> {
 
 /// Rotate old tee files: keep only the last `max_files`, delete oldest.
 fn cleanup_old_files(dir: &std::path::Path, max_files: usize) {
-    cleanup_old_files_except(dir, max_files, None);
+    cleanup_files_except(dir, max_files, None, |path| {
+        path.extension().is_some_and(|extension| extension == "log") && !is_lossless_log(path)
+    });
 }
 
 /// Rotate tee files while preserving a newly committed recovery artifact even
 /// when a clock-skewed filename would otherwise sort after it.
-fn cleanup_old_files_except(
+fn cleanup_lossless_files_except(
     dir: &std::path::Path,
     max_files: usize,
     preserve: Option<&std::path::Path>,
+) {
+    cleanup_files_except(dir, max_files, preserve, is_lossless_log);
+}
+
+fn cleanup_files_except(
+    dir: &std::path::Path,
+    max_files: usize,
+    preserve: Option<&std::path::Path>,
+    include: impl Fn(&std::path::Path) -> bool,
 ) {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .ok()
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
+        .filter(|entry| include(&entry.path()))
         .filter(|entry| preserve != Some(entry.path().as_path()))
         .collect();
 
@@ -104,6 +115,11 @@ fn cleanup_old_files_except(
     for entry in entries.iter().take(to_remove) {
         let _ = std::fs::remove_file(entry.path());
     }
+}
+
+fn is_lossless_log(path: &std::path::Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.to_string_lossy().ends_with(".lossless.log"))
 }
 
 /// Check if tee should be skipped based on config, mode, exit code, and size.
@@ -170,6 +186,16 @@ fn wait_for_test_lossless_tee_commit_lock() {
     while !release.exists() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+}
+
+#[cfg(debug_assertions)]
+fn observe_test_lossless_tee_lock_attempt() {
+    let Ok(directory) = std::env::var("RTK_TEST_TEE_COMMIT_HOLD_DIR") else {
+        return;
+    };
+    let marker =
+        std::path::Path::new(&directory).join(format!("attempting-{}", std::process::id()));
+    let _ = std::fs::write(marker, "attempting");
 }
 
 #[cfg(debug_assertions)]
@@ -259,6 +285,27 @@ pub struct LosslessTeeReservation {
     committed: bool,
 }
 
+/// A selected lossy CMD display whose recovery artifact remains protected
+/// until the caller has written its hint to stdout.
+pub struct LosslessTeeCommit {
+    output: String,
+    #[cfg(debug_assertions)]
+    path: PathBuf,
+    _process_lock: MutexGuard<'static, ()>,
+    _interprocess_lock: std::fs::File,
+}
+
+impl LosslessTeeCommit {
+    pub fn as_bytes(&self) -> &[u8] {
+        self.output.as_bytes()
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 impl LosslessTeeReservation {
     #[cfg(test)]
     fn path(&self) -> &std::path::Path {
@@ -273,7 +320,7 @@ impl LosslessTeeReservation {
     /// Keep the complete artifact once the caller has selected compact output.
     fn commit_path_locked(&mut self) -> Option<PathBuf> {
         std::fs::rename(&self.pending_path, &self.committed_path).ok()?;
-        cleanup_old_files_except(
+        cleanup_lossless_files_except(
             self.committed_path.parent().expect("tee path has parent"),
             self.max_files,
             Some(&self.committed_path),
@@ -282,11 +329,13 @@ impl LosslessTeeReservation {
         Some(self.committed_path.clone())
     }
 
-    fn commit_with_lock<T>(&mut self, complete: impl FnOnce(&std::path::Path) -> T) -> Option<T> {
-        let _commit_lock = LOSSLESS_TEE_COMMIT_LOCK
+    fn commit_with_lock(mut self, output: String) -> Option<LosslessTeeCommit> {
+        let process_lock = LOSSLESS_TEE_COMMIT_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _interprocess_lock = acquire_lossless_tee_commit_lock(
+        #[cfg(debug_assertions)]
+        observe_test_lossless_tee_lock_attempt();
+        let interprocess_lock = acquire_lossless_tee_commit_lock(
             self.committed_path.parent().expect("tee path has parent"),
         )?;
         #[cfg(debug_assertions)]
@@ -294,16 +343,31 @@ impl LosslessTeeReservation {
         let committed_path = self.commit_path_locked()?;
         #[cfg(debug_assertions)]
         observe_test_lossless_tee_commit(&committed_path, self.max_files);
-        Some(complete(&committed_path))
+        #[cfg(not(debug_assertions))]
+        let _ = committed_path;
+        Some(LosslessTeeCommit {
+            output,
+            #[cfg(debug_assertions)]
+            path: committed_path,
+            _process_lock: process_lock,
+            _interprocess_lock: interprocess_lock,
+        })
     }
 
     #[cfg(test)]
-    fn commit_path(mut self) -> Option<PathBuf> {
-        self.commit_with_lock(|path| path.to_path_buf())
+    fn commit_path(self) -> Option<PathBuf> {
+        let output = self.hint();
+        self.commit_with_lock(output).map(|commit| commit.path)
     }
 
-    pub fn commit_hint(mut self) -> Option<String> {
-        self.commit_with_lock(format_hint)
+    pub fn commit_hint(self) -> Option<String> {
+        let hint = self.hint();
+        self.commit_with_lock(hint).map(|commit| commit.output)
+    }
+
+    fn commit_display(self, filtered: &str) -> Option<LosslessTeeCommit> {
+        let hint = self.hint();
+        self.commit_with_lock(format!("{filtered}\r\n{hint}\r\n"))
     }
 }
 
@@ -322,13 +386,12 @@ pub fn commit_lossless_if_better(
     raw: &str,
     filtered: &str,
     reservation: LosslessTeeReservation,
-) -> Option<String> {
+) -> Option<LosslessTeeCommit> {
     let shown = format!("{filtered}\r\n{}\r\n", reservation.hint());
     if crate::core::guard::never_worse(raw, &shown) == raw {
         return None;
     }
-    let hint = reservation.commit_hint()?;
-    Some(format!("{filtered}\r\n{hint}\r\n"))
+    reservation.commit_display(filtered)
 }
 
 /// Reserve a complete recovery artifact. Unlike the normal tee path, this
@@ -352,8 +415,8 @@ fn reserve_lossless_tee_file(
             .ok()?
             .as_nanos();
         let sequence = LOSSLESS_TEE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let committed_path = tee_dir.join(format!("{nanos}_{sequence}_{slug}.log"));
-        let pending_path = tee_dir.join(format!("{nanos}_{sequence}_{slug}.pending"));
+        let committed_path = tee_dir.join(format!("{nanos}_{sequence}_{slug}.lossless.log"));
+        let pending_path = tee_dir.join(format!("{nanos}_{sequence}_{slug}.lossless.pending"));
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         match crate::core::utils::open_private(&mut options, &pending_path) {
@@ -874,9 +937,8 @@ mod tests {
         let tmpdir = tempfile::tempdir().expect("tempdir");
         let reservation = reserve_lossless_tee_file("raw", "cmd-dir", tmpdir.path(), 1024, 2)
             .expect("reservation");
-        assert_eq!(
-            commit_lossless_if_better("raw", "summary", reservation),
-            None,
+        assert!(
+            commit_lossless_if_better("raw", "summary", reservation).is_none(),
             "the recovery hint makes this compact output worse than native raw output"
         );
         assert!(fs::read_dir(tmpdir.path()).unwrap().next().is_none());
@@ -904,12 +966,7 @@ mod tests {
         let artifacts = fs::read_dir(tmpdir.path())
             .unwrap()
             .filter_map(|entry| entry.ok())
-            .filter(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .is_some_and(|extension| extension == "log")
-            })
+            .filter(|entry| is_lossless_log(&entry.path()))
             .collect::<Vec<_>>();
         assert_eq!(artifacts.len(), 2);
         assert!(artifacts
@@ -939,13 +996,30 @@ mod tests {
             fs::read_dir(tmpdir.path())
                 .unwrap()
                 .filter_map(|entry| entry.ok())
-                .filter(|entry| entry
-                    .path()
-                    .extension()
-                    .is_some_and(|extension| extension == "log"))
+                .filter(|entry| is_lossless_log(&entry.path()))
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn ordinary_tee_rotation_never_removes_lossless_recovery_artifacts() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let reservation = reserve_lossless_tee_file("recovery", "cmd-set", tmpdir.path(), 1024, 1)
+            .expect("reservation");
+        let recovery = reservation.path().to_path_buf();
+        reservation.commit_hint().expect("lossless commit");
+
+        write_tee_file("ordinary-one", "ordinary", tmpdir.path(), 1024, 1)
+            .expect("first ordinary tee");
+        write_tee_file("ordinary-two", "ordinary-next", tmpdir.path(), 1024, 1)
+            .expect("second ordinary tee");
+
+        assert!(
+            recovery.is_file(),
+            "ordinary rotation must not delete recovery"
+        );
+        assert_eq!(fs::read_to_string(recovery).unwrap(), "recovery");
     }
 
     #[test]
