@@ -141,6 +141,14 @@ pub fn classify_command(cmd: &str) -> Classification {
     let cmd_normalized = strip_golangci_global_opts(&cmd_normalized);
     let cmd_clean = cmd_normalized.as_str();
 
+    if cmd_clean == "sqlite3" || cmd_clean.starts_with("sqlite3 ") {
+        let (sqlite3_command, _) = strip_trailing_redirects(cmd_clean);
+        let argv = shell_split(sqlite3_command);
+        if !crate::core::args_utils::sqlite3_output_is_filterable(&argv) {
+            return Classification::Ignored;
+        }
+    }
+
     // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
     if cmd_clean.starts_with("cat ")
         || cmd_clean.starts_with("head ")
@@ -2195,6 +2203,31 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_observed_git_remote_as_passthrough() {
+        assert_eq!(
+            classify_command("git remote -v"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git remote -v", &[]),
+            Some("rtk git remote -v".to_string())
+        );
+    }
+
+    #[test]
+    fn test_git_remote_rule_requires_a_complete_subcommand_token() {
+        assert!(matches!(
+            classify_command("git remotely"),
+            Classification::Unsupported { .. }
+        ));
+    }
+
+    #[test]
     fn test_classify_find_not_blocked_by_fi() {
         // Regression: "fi" in IGNORED_PREFIXES used to shadow "find" commands
         // because "find".starts_with("fi") is true. "fi" should only match exactly.
@@ -3099,6 +3132,79 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn test_classify_observed_gh_auth_as_passthrough() {
+        assert_eq!(
+            classify_command("gh auth status"),
+            Classification::Supported {
+                rtk_equivalent: "rtk gh",
+                category: "GitHub",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("gh auth status", &[]),
+            Some("rtk gh auth status".to_string())
+        );
+    }
+
+    #[test]
+    fn test_gh_auth_rule_requires_a_complete_subcommand_token() {
+        assert!(matches!(
+            classify_command("gh authority status"),
+            Classification::Unsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn test_classify_and_rewrite_observed_sqlite3_command() {
+        assert_eq!(
+            classify_command("sqlite3 history.db .tables"),
+            Classification::Supported {
+                rtk_equivalent: "rtk sqlite3",
+                category: "Database",
+                estimated_savings_pct: 65.0,
+                status: RtkStatus::Existing,
+            }
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("sqlite3 history.db .tables", &[]),
+            Some("rtk sqlite3 history.db .tables".to_string())
+        );
+        assert!(matches!(
+            classify_command("sqlite3 -header -column history.db .tables 2>&1"),
+            Classification::Supported {
+                rtk_equivalent: "rtk sqlite3",
+                ..
+            }
+        ));
+        assert_eq!(
+            rewrite_command_no_prefixes("sqlite3 -header -column history.db .tables 2>&1", &[]),
+            Some("rtk sqlite3 -header -column history.db .tables 2>&1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_sqlite3_interactive_and_structured_invocations_are_not_rewritten() {
+        for command in [
+            "sqlite3",
+            "sqlite3 history.db",
+            "sqlite3 -json history.db 'SELECT * FROM commands'",
+            "sqlite3 -ascii history.db 'SELECT * FROM commands'",
+            "sqlite3 -csv history.db 'SELECT * FROM commands'",
+            "sqlite3 -cmd '.mode markdown' history.db 'SELECT * FROM commands'",
+            "sqlite3 history.db .dump",
+        ] {
+            assert_eq!(
+                classify_command(command),
+                Classification::Ignored,
+                "{command}"
+            );
+            assert_eq!(rewrite_command_no_prefixes(command, &[]), None, "{command}");
+        }
     }
 
     #[test]

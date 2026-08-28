@@ -54,6 +54,7 @@ RTK intercepts shell commands and compresses their output before your agent read
 | `pytest` | Failures only, traceback trimmed |
 | `go test` | NDJSON parsed, failures only |
 | `docker ps` | Essential fields only |
+| `sqlite3` batch queries | Blank rows removed; oversized text results capped with recoverable omitted rows |
 
 ## How Savings Work
 
