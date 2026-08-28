@@ -276,6 +276,16 @@ fn structured_display_filters_only_recognized_cmd_layouts() {
     assert!(!is_display_form("set", "set RTK_VALUE=mutates"));
     assert!(!is_display_form("set", "set /a 1+1"));
     assert!(!is_display_form("dir", "dir /b"));
+    for source in ["dir /s/b", "dir /b/s", "dir /a-d/b", "dir /A-D/B"] {
+        assert!(
+            !is_display_form("dir", source),
+            "combined bare-format switch must remain native: {source}"
+        );
+    }
+    assert!(
+        is_display_form("dir", r#"dir "C:\reports /b archive""#),
+        "a quoted path containing /b is not a DIR switch"
+    );
     assert_eq!(
         filter_display("assoc", "assoc", "Association missing"),
         None
@@ -473,18 +483,7 @@ fn rewrite_keeps_identity_and_non_display_segments_in_the_parent_cmd_process() {
     let source = "  echo hello  && dir /b & cd .. & set RTK_TEST=value || type notes.txt";
     let rewritten = rewrite_expression(source, Path::new(r"C:\Program Files\rtk.exe"));
 
-    if rewritten == source {
-        return;
-    }
-
-    assert_eq!(
-        rewritten,
-        format!(
-            "  \"C:\\Program Files\\rtk.exe\" {SEGMENT_RUNNER} --hex 6563686f2068656c6c6f2020  \
-&& \"C:\\Program Files\\rtk.exe\" {SEGMENT_RUNNER} --hex 646972202f6220 & cd .. & set RTK_TEST=value || \
-\"C:\\Program Files\\rtk.exe\" {SEGMENT_RUNNER} --hex 74797065206e6f7465732e747874"
-        )
-    );
+    assert_eq!(rewritten, source);
 }
 
 #[test]
@@ -516,6 +515,13 @@ fn rewrite_only_uses_cataloged_structured_adapters_for_terminal_displays() {
     for source in ["assoc .rtk=RtkFile", "ftype RtkFile=cmd /c echo"] {
         assert_eq!(rewrite_expression(source, executable), source, "{source}");
     }
+    for source in ["dir /s/b", "dir /b/s", "dir /a-d/b", "dir /A-D/B"] {
+        assert_eq!(rewrite_expression(source, executable), source, "{source}");
+    }
+    assert!(
+        rewrite_expression(r#"dir "C:\reports /b archive""#, executable).contains(SEGMENT_RUNNER),
+        "quoted path text must not be parsed as a bare-format switch"
+    );
 }
 
 #[test]

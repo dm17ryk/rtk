@@ -258,13 +258,11 @@ fn render_segment_stdout(source: &str, stdout: &[u8]) -> Vec<u8> {
     // A lossy display is never emitted unless the full native stdout has a
     // recoverable tee artifact. The guard also includes the hint itself.
     let label = format!("cmd-{command}");
-    let Some(hint) = crate::core::tee::force_tee_lossless_hint(raw, &label) else {
+    let Some(reservation) = crate::core::tee::reserve_lossless_tee(raw, &label) else {
         return stdout.to_vec();
     };
-    let shown = format!("{filtered}\r\n{hint}");
-    crate::core::guard::never_worse(raw, &shown)
-        .as_bytes()
-        .to_vec()
+    crate::core::tee::commit_lossless_if_better(raw, &filtered, reservation)
+        .map_or_else(|| stdout.to_vec(), String::into_bytes)
 }
 
 fn should_attempt_lossy_output(raw: &str, filtered: &str) -> bool {

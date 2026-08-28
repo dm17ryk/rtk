@@ -41,9 +41,7 @@ pub fn is_display_form(adapter: &str, source: &str) -> bool {
 fn is_display_form_adapter(adapter: DisplayAdapter, source: &str) -> bool {
     let arguments = source_arguments(source);
     match adapter {
-        DisplayAdapter::Dir => !arguments
-            .split_whitespace()
-            .any(|argument| argument.eq_ignore_ascii_case("/b")),
+        DisplayAdapter::Dir => !dir_has_bare_format_switch(arguments),
         DisplayAdapter::Set => {
             !arguments.contains('=')
                 && !arguments.starts_with("/a")
@@ -54,6 +52,37 @@ fn is_display_form_adapter(adapter: DisplayAdapter, source: &str) -> bool {
         DisplayAdapter::Assoc | DisplayAdapter::Ftype => !arguments.contains('='),
         DisplayAdapter::Help => true,
     }
+}
+
+/// CMD accepts combined switches such as `/s/b` and `/a-d/b`. Inspect only
+/// unquoted switch tokens, so a quoted path containing `/b` stays a path.
+fn dir_has_bare_format_switch(arguments: &str) -> bool {
+    let mut in_quotes = false;
+    let mut token_start = None;
+    for (index, character) in arguments.char_indices() {
+        if character == '"' {
+            in_quotes = !in_quotes;
+            continue;
+        }
+        if !in_quotes && character.is_whitespace() {
+            if let Some(start) = token_start.take() {
+                if dir_switch_token_has_bare_format(&arguments[start..index]) {
+                    return true;
+                }
+            }
+        } else if !in_quotes && token_start.is_none() {
+            token_start = Some(index);
+        }
+    }
+    token_start.is_some_and(|start| dir_switch_token_has_bare_format(&arguments[start..]))
+}
+
+fn dir_switch_token_has_bare_format(token: &str) -> bool {
+    token.strip_prefix('/').is_some_and(|switches| {
+        switches
+            .split('/')
+            .any(|switch| switch.eq_ignore_ascii_case("b"))
+    })
 }
 
 /// Return a compact display only when the native layout is confidently known.

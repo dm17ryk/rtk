@@ -19,6 +19,16 @@ fn rtk_cmd(expression: &str) -> Output {
         .expect("rtk cmd should start")
 }
 
+fn hex_encode(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(DIGITS[(byte >> 4) as usize] as char);
+        encoded.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
 fn assert_cmd_parity(expression: &str) {
     let native = native_cmd(expression);
     let rtk = rtk_cmd(expression);
@@ -26,6 +36,35 @@ fn assert_cmd_parity(expression: &str) {
     assert_eq!(rtk.status.code(), native.status.code(), "{expression}");
     assert_eq!(rtk.stdout, native.stdout, "{expression}");
     assert_eq!(rtk.stderr, native.stderr, "{expression}");
+}
+
+/// A native `dir` footer includes free disk space, which can change between
+/// the two intentionally separate process launches while unrelated tests tee
+/// artifacts. Compare every stable native byte and mask only that live value.
+fn assert_dir_parity(expression: &str) {
+    let native = native_cmd(expression);
+    let rtk = rtk_cmd(expression);
+
+    assert_eq!(rtk.status.code(), native.status.code(), "{expression}");
+    assert_eq!(rtk.stderr, native.stderr, "{expression}");
+    assert_eq!(
+        dir_stdout_without_live_free_space(&rtk.stdout),
+        dir_stdout_without_live_free_space(&native.stdout),
+        "{expression}"
+    );
+}
+
+fn dir_stdout_without_live_free_space(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .map(|line| {
+            line.split_once(" Dir(s)").map_or_else(
+                || line.to_owned(),
+                |(prefix, _)| format!("{prefix} Dir(s) <free>"),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn assert_cmd_parity_in(expression: &str, current_dir: &Path) {
@@ -227,7 +266,7 @@ fn machine_consumed_builtin_output_is_native_even_for_structured_display_command
     fs::create_dir(&spaced).unwrap();
     fs::write(spaced.join("spaced.txt"), "payload").unwrap();
 
-    assert_cmd_parity(&format!("dir /a:-d /o:n {}", directory.path().display()));
+    assert_dir_parity(&format!("dir /a:-d /o:n {}", directory.path().display()));
 
     let mut set_display = (0..32)
         .map(|index| format!("set RTK_CMD_E2E_FILTER_{index:02}=alpha"))
@@ -236,19 +275,96 @@ fn machine_consumed_builtin_output_is_native_even_for_structured_display_command
     assert_cmd_parity(&set_display.join(" & "));
 
     assert_cmd_parity_in("dir /b", directory.path());
-    assert_cmd_parity(&format!(
+    assert_dir_parity(&format!(
         "dir /a:-d /o:n /t:w {}",
         directory.path().display()
     ));
-    assert_cmd_parity(&format!(
+    assert_dir_parity(&format!(
         "dir /s /a:-d {}\\*.txt",
         directory.path().display()
     ));
-    assert_cmd_parity(&format!("dir /a:-d /o:n \"{}\"", spaced.display()));
+    assert_dir_parity(&format!("dir /a:-d /o:n \"{}\"", spaced.display()));
     assert_cmd_parity("help assoc");
     assert_cmd_parity("set RTK_CMD_MISSING_FILTER_PREFIX");
     assert_cmd_parity("assoc .rtk_missing_extension");
     assert_cmd_parity("ftype RTK_MISSING_FILETYPE");
+}
+
+#[test]
+fn combined_dir_b_switches_keep_exact_native_output_when_captured() {
+    let directory = tempdir().unwrap();
+    fs::write(directory.path().join("visible.txt"), "payload").unwrap();
+    fs::create_dir(directory.path().join("nested")).unwrap();
+    fs::write(directory.path().join("nested").join("deep.txt"), "payload").unwrap();
+
+    for switches in ["/s/b", "/b/s", "/a-d/b", "/A-D/B"] {
+        assert_cmd_parity(&format!("dir {switches} {}", directory.path().display()));
+    }
+}
+
+#[test]
+fn hidden_cmd_runner_filters_with_complete_lossless_tee_and_native_result_metadata() {
+    let directory = tempdir().unwrap();
+    let appdata = directory.path().join("appdata");
+    let config_dir = appdata.join("rtk");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        "[tee]\nenabled = true\nmode = \"always\"\nmax_files = 2\nmax_file_size = 1048576\n",
+    )
+    .unwrap();
+    let tee_dir = directory.path().join("tee");
+    let environment = (0..32)
+        .map(|index| {
+            (
+                format!("RTK_CMD_RUNNER_{index:02}"),
+                format!("value-{}", "x".repeat(80)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let source = "set RTK_CMD_RUNNER_";
+
+    let native = Command::new("cmd.exe")
+        .args(["/D", "/S", "/C", source])
+        .envs(environment.iter().map(|(key, value)| (key, value)))
+        .output()
+        .expect("native cmd.exe should start");
+    let filtered = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["__cmd-run", "--hex", &hex_encode(source.as_bytes())])
+        .env("APPDATA", &appdata)
+        .env("RTK_TEE_DIR", &tee_dir)
+        .envs(environment.iter().map(|(key, value)| (key, value)))
+        .output()
+        .expect("hidden cmd runner should start");
+
+    assert_eq!(filtered.status.code(), native.status.code());
+    assert_eq!(filtered.stderr, native.stderr);
+    assert_ne!(
+        filtered.stdout, native.stdout,
+        "runner must emit compact output"
+    );
+    let shown = String::from_utf8(filtered.stdout).expect("structured output is UTF-8");
+    assert!(shown.starts_with("[set] 32 vars:"));
+    assert!(shown.ends_with("\r\n"), "filtered output keeps CMD CRLF");
+    assert!(
+        shown.as_bytes().iter().enumerate().all(
+            |(index, byte)| *byte != b'\n' || index > 0 && shown.as_bytes()[index - 1] == b'\r'
+        ),
+        "filtered output must not introduce bare LF"
+    );
+
+    let artifacts = fs::read_dir(&tee_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        artifacts.len(),
+        1,
+        "accepted compact output commits one tee"
+    );
+    let artifact = &artifacts[0];
+    assert!(shown.contains(artifact.file_name().to_string_lossy().as_ref()));
+    assert_eq!(fs::read(artifact.path()).unwrap(), native.stdout);
 }
 
 #[test]
