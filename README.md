@@ -389,10 +389,11 @@ CMD executable families and unknown names both stay on the native raw route;
 the distinction records the checked-in Windows Commands A-Z snapshot for later
 adapters, not a filter or an executable-presence guarantee. The snapshot also
 records built-in, server-only, subcommand-only, and unsupported exclusions
-(including `append` on Desktop Windows). WMIC is inbox and deprecated on
-Windows 10 before 21H1 is supported/inbox, while 21H1+ is deprecated/inbox.
-On Windows 11 before 24H2 it is deprecated and Feature on Demand (sometimes
-preinstalled); it is removed/unavailable starting with 24H2/current 2026.
+(including `append` on Desktop Windows). WMIC is supported and inbox on
+Windows 10 before 21H1, then deprecated but still inbox from 21H1 onward. On
+Windows 11 before 24H2 it is deprecated and available as a Feature on Demand
+(sometimes preinstalled); starting with Windows 11 24H2 it is unsupported,
+removed, and unavailable.
 
 No command catalog is downloaded during runtime or builds. The external
 manifest is an offline snapshot of the [Microsoft Learn Windows Commands

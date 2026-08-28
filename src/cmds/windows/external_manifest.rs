@@ -18,32 +18,24 @@ pub enum Presence {
     Unavailable,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReleaseSupport {
+    pub status: VersionStatus,
+    pub presence: Presence,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Win11Support {
-    pub before_24h2: VersionStatus,
-    pub from_24h2: VersionStatus,
+    pub before_24h2: ReleaseSupport,
+    pub from_24h2: ReleaseSupport,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Win10Support {
-    pub before_21h1: VersionStatus,
-    pub from_21h1: VersionStatus,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Win10Presence {
-    pub before_21h1: Presence,
-    pub from_21h1: Presence,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Win11Presence {
-    pub before_24h2: Presence,
-    pub from_24h2: Presence,
+    pub before_21h1: ReleaseSupport,
+    pub from_21h1: ReleaseSupport,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DesktopSupport {
     pub win10: Win10Support,
     pub win11: Win11Support,
-    pub presence: Presence,
-    pub win10_presence: Win10Presence,
-    pub win11_presence: Win11Presence,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExternalRoute {
@@ -111,6 +103,14 @@ pub struct CatalogCoverage {
     pub provenance: Provenance,
 }
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OfficialSourceMetadata {
+    pub source_url: &'static str,
+    pub fetched_on: &'static str,
+    pub source_sha256: &'static str,
+    pub format: &'static str,
+}
+#[cfg(test)]
 pub const OFFICIAL_SOURCE_RAW_SHA256: &str =
     "b177c3014e3fa42294ed6fd5356d4bfa08e1a58a8b841e383dd5bcdc01837cc7";
 #[cfg(test)]
@@ -119,73 +119,33 @@ pub const OFFICIAL_SOURCE_ENTRY_COUNT: usize = 339;
 pub const OFFICIAL_SOURCE_FIXTURE_SHA256: &str =
     "d46109ef38c01e9e022fa21393782df2c75a2e2f986b298b48d9471fed80347a";
 const SOURCE: Provenance = Provenance::MicrosoftWindowsCommandsAz20250729;
-const W11: Win11Support = Win11Support {
-    before_24h2: VersionStatus::Supported,
-    from_24h2: VersionStatus::Supported,
-};
-const W10: Win10Support = Win10Support {
-    before_21h1: VersionStatus::Supported,
-    from_21h1: VersionStatus::Supported,
-};
-const INBOX10: Win10Presence = Win10Presence {
-    before_21h1: Presence::Inbox,
-    from_21h1: Presence::Inbox,
-};
-const INBOX11: Win11Presence = Win11Presence {
-    before_24h2: Presence::Inbox,
-    from_24h2: Presence::Inbox,
-};
-const OPTIONAL10: Win10Presence = Win10Presence {
-    before_21h1: Presence::OptionalFeature,
-    from_21h1: Presence::OptionalFeature,
-};
-const OPTIONAL11: Win11Presence = Win11Presence {
-    before_24h2: Presence::OptionalFeature,
-    from_24h2: Presence::OptionalFeature,
-};
-const SEPARATE10: Win10Presence = Win10Presence {
-    before_21h1: Presence::SeparateInstall,
-    from_21h1: Presence::SeparateInstall,
-};
-const SEPARATE11: Win11Presence = Win11Presence {
-    before_24h2: Presence::SeparateInstall,
-    from_24h2: Presence::SeparateInstall,
-};
-const D: DesktopSupport = DesktopSupport {
-    win10: W10,
-    win11: W11,
-    presence: Presence::Inbox,
-    win10_presence: INBOX10,
-    win11_presence: INBOX11,
-};
-const O: DesktopSupport = DesktopSupport {
-    win10: W10,
-    win11: W11,
-    presence: Presence::OptionalFeature,
-    win10_presence: OPTIONAL10,
-    win11_presence: OPTIONAL11,
-};
-const S: DesktopSupport = DesktopSupport {
-    win10: W10,
-    win11: W11,
-    presence: Presence::SeparateInstall,
-    win10_presence: SEPARATE10,
-    win11_presence: SEPARATE11,
-};
+const fn release(status: VersionStatus, presence: Presence) -> ReleaseSupport {
+    ReleaseSupport { status, presence }
+}
+const fn uniform_desktop(presence: Presence) -> DesktopSupport {
+    let support = release(VersionStatus::Supported, presence);
+    DesktopSupport {
+        win10: Win10Support {
+            before_21h1: support,
+            from_21h1: support,
+        },
+        win11: Win11Support {
+            before_24h2: support,
+            from_24h2: support,
+        },
+    }
+}
+const D: DesktopSupport = uniform_desktop(Presence::Inbox);
+const O: DesktopSupport = uniform_desktop(Presence::OptionalFeature);
+const S: DesktopSupport = uniform_desktop(Presence::SeparateInstall);
 const W: DesktopSupport = DesktopSupport {
     win10: Win10Support {
-        before_21h1: VersionStatus::Supported,
-        from_21h1: VersionStatus::Deprecated,
+        before_21h1: release(VersionStatus::Supported, Presence::Inbox),
+        from_21h1: release(VersionStatus::Deprecated, Presence::Inbox),
     },
     win11: Win11Support {
-        before_24h2: VersionStatus::Deprecated,
-        from_24h2: VersionStatus::Unsupported,
-    },
-    presence: Presence::OptionalFeature,
-    win10_presence: INBOX10,
-    win11_presence: Win11Presence {
-        before_24h2: Presence::OptionalFeature,
-        from_24h2: Presence::Unavailable,
+        before_24h2: release(VersionStatus::Deprecated, Presence::OptionalFeature),
+        from_24h2: release(VersionStatus::Unsupported, Presence::Unavailable),
     },
 };
 macro_rules! x {($n:literal,$d:expr,$_m:expr)=>{ExternalCommand{name:$n,aliases:&[],route:ExternalRoute::NativeExecutable,desktop:$d,modes:ANY,strategy:ExternalStrategy::IdentityRaw,identity_reason:"no external adapter is released in the stable CMD increment",status:ExternalStatus::RecognizedRaw,provenance:SOURCE}};($n:literal,[$($a:literal),+],$d:expr,$_m:expr)=>{ExternalCommand{name:$n,aliases:&[$($a),+],route:ExternalRoute::NativeExecutable,desktop:$d,modes:ANY,strategy:ExternalStrategy::IdentityRaw,identity_reason:"no external adapter is released in the stable CMD increment",status:ExternalStatus::RecognizedRaw,provenance:SOURCE}}}
@@ -216,6 +176,38 @@ pub fn classify_external(name: &str) -> Option<&'static ExternalCommand> {
 #[cfg(test)]
 pub const fn external_commands() -> &'static [ExternalCommand] {
     EXTERNAL_COMMANDS
+}
+#[cfg(test)]
+pub fn official_source_metadata() -> Result<OfficialSourceMetadata, String> {
+    let fixture = include_str!("../../../tests/fixtures/windows_cmd/windows_commands_az.tsv");
+    let mut source_url = None;
+    let mut fetched_on = None;
+    let mut source_sha256 = None;
+    let mut format = None;
+    for line in fixture.lines().take_while(|line| line.starts_with('#')) {
+        let Some((key, value)) = line
+            .strip_prefix("# ")
+            .and_then(|line| line.split_once(": "))
+        else {
+            return Err(format!("malformed official fixture header: {line}"));
+        };
+        let field = match key {
+            "source-url" => &mut source_url,
+            "fetched-on" => &mut fetched_on,
+            "source-sha256" => &mut source_sha256,
+            "format" => &mut format,
+            _ => return Err(format!("unknown official fixture header field: {key}")),
+        };
+        if field.replace(value).is_some() {
+            return Err(format!("duplicate official fixture header field: {key}"));
+        }
+    }
+    Ok(OfficialSourceMetadata {
+        source_url: source_url.ok_or("missing source-url header")?,
+        fetched_on: fetched_on.ok_or("missing fetched-on header")?,
+        source_sha256: source_sha256.ok_or("missing source-sha256 header")?,
+        format: format.ok_or("missing format header")?,
+    })
 }
 #[cfg(test)]
 pub fn official_top_level_coverage() -> &'static [CatalogCoverage] {
@@ -255,25 +247,33 @@ pub fn official_top_level_coverage() -> &'static [CatalogCoverage] {
 #[cfg(test)]
 pub fn validate_external_manifest() -> Result<(), String> {
     let c = official_top_level_coverage();
+    validate_external_manifest_rows(c, EXTERNAL_COMMANDS)
+}
+
+#[cfg(test)]
+pub fn validate_external_manifest_rows(
+    c: &[CatalogCoverage],
+    external_commands: &[ExternalCommand],
+) -> Result<(), String> {
+    let builtins = super::catalog::builtins();
     let mut n = std::collections::HashSet::new();
-    for e in EXTERNAL_COMMANDS {
+    for e in external_commands {
         for name in std::iter::once(e.name).chain(e.aliases.iter().copied()) {
             if !n.insert(name.to_ascii_lowercase()) {
                 return Err(format!("duplicate external command name or alias: {name}"));
             }
         }
-        if !matches!(e.name, "net" | "sc")
-            && !c.iter().any(|r| {
-                r.normalized_name.eq_ignore_ascii_case(e.name)
-                    && matches!(
-                        r.disposition,
-                        CatalogDisposition::DesktopExternal
-                            | CatalogDisposition::OptionalDesktopFeature
-                            | CatalogDisposition::SeparateInstall
-                            | CatalogDisposition::VersionConditional
-                    )
-            })
-        {
+        if !c.iter().any(|r| {
+            r.normalized_name.eq_ignore_ascii_case(e.name)
+                && matches!(
+                    r.disposition,
+                    CatalogDisposition::DesktopExternal
+                        | CatalogDisposition::OptionalDesktopFeature
+                        | CatalogDisposition::SeparateInstall
+                        | CatalogDisposition::VersionConditional
+                        | CatalogDisposition::SubcommandOnly
+                )
+        }) {
             return Err(format!("{} absent", e.name));
         }
     }
@@ -284,13 +284,52 @@ pub fn validate_external_manifest() -> Result<(), String> {
         }
         if matches!(
             r.disposition,
-            CatalogDisposition::DesktopExternal
-                | CatalogDisposition::OptionalDesktopFeature
-                | CatalogDisposition::SeparateInstall
-                | CatalogDisposition::VersionConditional
-        ) && classify_external(r.normalized_name).is_none()
-        {
-            return Err(format!("{} lacks external", r.source_name));
+            CatalogDisposition::CmdBuiltin | CatalogDisposition::SubcommandOnly
+        ) {
+            let target = r.normalized_name;
+            let resolves_to_builtin = builtins.iter().any(|builtin| builtin.matches(target));
+            let resolves_to_external = external_commands.iter().any(|external| {
+                external.name.eq_ignore_ascii_case(target)
+                    || external
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.eq_ignore_ascii_case(target))
+            });
+            let resolves_to_canonical_family = c.iter().any(|candidate| {
+                candidate.source_name.eq_ignore_ascii_case(target)
+                    && candidate.normalized_name.eq_ignore_ascii_case(target)
+                    && candidate.disposition != CatalogDisposition::SubcommandOnly
+            });
+            if !(resolves_to_builtin || resolves_to_external || resolves_to_canonical_family) {
+                return Err(format!(
+                    "{} has unresolved command-family target: {target}",
+                    r.source_name
+                ));
+            }
+        }
+        let expected_desktop = match r.disposition {
+            CatalogDisposition::DesktopExternal => Some(D),
+            CatalogDisposition::OptionalDesktopFeature => Some(O),
+            CatalogDisposition::SeparateInstall => Some(S),
+            CatalogDisposition::VersionConditional => Some(W),
+            _ => None,
+        };
+        if let Some(expected_desktop) = expected_desktop {
+            let Some(external) = external_commands.iter().find(|external| {
+                external.name.eq_ignore_ascii_case(r.normalized_name)
+                    || external
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.eq_ignore_ascii_case(r.normalized_name))
+            }) else {
+                return Err(format!("{} lacks external", r.source_name));
+            };
+            if external.desktop != expected_desktop {
+                return Err(format!(
+                    "{} disposition does not match {} release metadata",
+                    r.source_name, external.name
+                ));
+            }
         }
     }
     Ok(())

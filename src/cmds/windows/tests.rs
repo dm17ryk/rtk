@@ -3,10 +3,10 @@ use super::catalog::{
     builtins, validate_catalog, validate_command_catalogs, AdapterStrategy, CommandMode,
 };
 use super::external_manifest::{
-    classify_external, external_commands, official_top_level_coverage, validate_external_manifest,
-    CatalogDisposition, CommandModes, ExternalCommand, ExternalRoute, ExternalStatus,
-    ExternalStrategy, Presence, VersionStatus, OFFICIAL_SOURCE_ENTRY_COUNT,
-    OFFICIAL_SOURCE_FIXTURE_SHA256, OFFICIAL_SOURCE_RAW_SHA256,
+    classify_external, external_commands, official_source_metadata, official_top_level_coverage,
+    validate_external_manifest, validate_external_manifest_rows, CatalogDisposition, CommandModes,
+    ExternalCommand, ExternalRoute, ExternalStatus, ExternalStrategy, Presence, VersionStatus,
+    OFFICIAL_SOURCE_ENTRY_COUNT, OFFICIAL_SOURCE_FIXTURE_SHA256, OFFICIAL_SOURCE_RAW_SHA256,
 };
 use super::orchestrator::{
     prepare_invocation as prepare_with_cmd, recognize_command, rewrite_expression,
@@ -261,13 +261,13 @@ fn external_manifest_is_static_complete_and_explicit() {
         assert!(!entry.identity_reason.trim().is_empty(), "{}", entry.name);
         assert!(!entry.modes.is_empty(), "{}", entry.name);
         assert_ne!(
-            entry.desktop.win10.before_21h1,
+            entry.desktop.win10.before_21h1.status,
             VersionStatus::Unsupported,
             "{}",
             entry.name
         );
         assert_ne!(
-            entry.desktop.win11.before_24h2,
+            entry.desktop.win11.before_24h2.status,
             VersionStatus::Unsupported,
             "{}",
             entry.name
@@ -291,11 +291,34 @@ fn external_manifest_is_static_complete_and_explicit() {
     );
 
     let wmic = classify_external("wmic").expect("WMIC remains an explicit entry");
-    assert_eq!(wmic.desktop.win11.before_24h2, VersionStatus::Deprecated);
-    assert_eq!(wmic.desktop.win11.from_24h2, VersionStatus::Unsupported);
-    assert_eq!(wmic.desktop.win10.before_21h1, VersionStatus::Supported);
-    assert_eq!(wmic.desktop.win10.from_21h1, VersionStatus::Deprecated);
-    assert_eq!(wmic.desktop.presence, Presence::OptionalFeature);
+    assert_eq!(
+        (
+            wmic.desktop.win10.before_21h1.status,
+            wmic.desktop.win10.before_21h1.presence
+        ),
+        (VersionStatus::Supported, Presence::Inbox)
+    );
+    assert_eq!(
+        (
+            wmic.desktop.win10.from_21h1.status,
+            wmic.desktop.win10.from_21h1.presence
+        ),
+        (VersionStatus::Deprecated, Presence::Inbox)
+    );
+    assert_eq!(
+        (
+            wmic.desktop.win11.before_24h2.status,
+            wmic.desktop.win11.before_24h2.presence
+        ),
+        (VersionStatus::Deprecated, Presence::OptionalFeature)
+    );
+    assert_eq!(
+        (
+            wmic.desktop.win11.from_24h2.status,
+            wmic.desktop.win11.from_24h2.presence
+        ),
+        (VersionStatus::Unsupported, Presence::Unavailable)
+    );
 
     assert!(official_top_level_coverage().iter().any(|entry| {
         entry.source_name == "append"
@@ -319,6 +342,19 @@ fn external_manifest_is_static_complete_and_explicit() {
     let mut builtin_alias_collision: ExternalCommand = *classify_external("ipconfig").unwrap();
     builtin_alias_collision.aliases = &["chdir"];
     assert!(validate_command_catalogs(&builtins(), &[builtin_alias_collision]).is_err());
+
+    let mut contradictory_release: ExternalCommand = *classify_external("ipconfig").unwrap();
+    contradictory_release.desktop.win11.from_24h2.status = VersionStatus::Unsupported;
+    assert!(validate_command_catalogs(&builtins(), &[contradictory_release]).is_err());
+
+    let mut unavailable_supported_release: ExternalCommand =
+        *classify_external("ipconfig").unwrap();
+    unavailable_supported_release
+        .desktop
+        .win10
+        .from_21h1
+        .presence = Presence::Unavailable;
+    assert!(validate_command_catalogs(&builtins(), &[unavailable_supported_release]).is_err());
 }
 
 #[test]
@@ -326,11 +362,29 @@ fn official_az_snapshot_is_exact_and_accounts_for_every_source_name() {
     use sha2::{Digest, Sha256};
 
     let fixture = include_str!("../../../tests/fixtures/windows_cmd/windows_commands_az.tsv");
+    let raw = include_str!("../../../tests/fixtures/windows_cmd/windows_commands_raw.md");
+    let metadata = official_source_metadata().unwrap();
+    assert_eq!(
+        metadata.source_url,
+        "https://raw.githubusercontent.com/MicrosoftDocs/windowsserverdocs/refs/heads/main/WindowsServerDocs/administration/windows-commands/windows-commands.md"
+    );
+    assert_eq!(metadata.fetched_on, "2026-08-29");
+    assert_eq!(
+        metadata.format,
+        "official A-Z name<TAB>native family or source-name<TAB>disposition"
+    );
+    let raw_sha256 = format!("{:x}", Sha256::digest(raw.as_bytes()));
+    assert_eq!(metadata.source_sha256, raw_sha256);
+    assert_eq!(OFFICIAL_SOURCE_RAW_SHA256, raw_sha256);
     assert_eq!(
         OFFICIAL_SOURCE_RAW_SHA256,
         "b177c3014e3fa42294ed6fd5356d4bfa08e1a58a8b841e383dd5bcdc01837cc7"
     );
     assert_eq!(OFFICIAL_SOURCE_ENTRY_COUNT, 339);
+    assert_eq!(
+        OFFICIAL_SOURCE_FIXTURE_SHA256,
+        "d46109ef38c01e9e022fa21393782df2c75a2e2f986b298b48d9471fed80347a"
+    );
     assert_eq!(
         format!("{:x}", Sha256::digest(fixture.as_bytes())),
         OFFICIAL_SOURCE_FIXTURE_SHA256
@@ -395,18 +449,77 @@ fn official_az_snapshot_is_exact_and_accounts_for_every_source_name() {
             .normalized_name,
         "manage-bde"
     );
+    for name in ["telnet", "tftp", "mount"] {
+        let desktop = classify_external(name).unwrap().desktop;
+        assert_eq!(
+            desktop.win10.before_21h1.presence,
+            Presence::OptionalFeature
+        );
+        assert_eq!(desktop.win10.from_21h1.presence, Presence::OptionalFeature);
+        assert_eq!(
+            desktop.win11.before_24h2.presence,
+            Presence::OptionalFeature
+        );
+        assert_eq!(desktop.win11.from_24h2.presence, Presence::OptionalFeature);
+    }
+    let pwsh = classify_external("pwsh").unwrap().desktop;
+    assert_eq!(pwsh.win10.before_21h1.presence, Presence::SeparateInstall);
+    assert_eq!(pwsh.win10.from_21h1.presence, Presence::SeparateInstall);
+    assert_eq!(pwsh.win11.before_24h2.presence, Presence::SeparateInstall);
+    assert_eq!(pwsh.win11.from_24h2.presence, Presence::SeparateInstall);
+}
+
+#[test]
+fn official_dispositions_must_match_release_scoped_manifest_metadata() {
+    let coverage = official_top_level_coverage();
+    let externals = external_commands();
+    assert_eq!(validate_external_manifest_rows(coverage, externals), Ok(()));
+
+    for (source_name, wrong_disposition) in [
+        ("arp", CatalogDisposition::OptionalDesktopFeature),
+        ("telnet", CatalogDisposition::DesktopExternal),
+        ("pwsh", CatalogDisposition::OptionalDesktopFeature),
+        ("wmic", CatalogDisposition::DesktopExternal),
+    ] {
+        let mut wrong_rows = coverage.to_vec();
+        wrong_rows
+            .iter_mut()
+            .find(|row| row.source_name == source_name)
+            .unwrap()
+            .disposition = wrong_disposition;
+        assert!(
+            validate_external_manifest_rows(&wrong_rows, externals).is_err(),
+            "{source_name} accepted {wrong_disposition:?}"
+        );
+    }
+
+    let mut wrong_externals = externals.to_vec();
+    wrong_externals
+        .iter_mut()
+        .find(|command| command.name == "arp")
+        .unwrap()
+        .desktop
+        .win11
+        .from_24h2
+        .presence = Presence::OptionalFeature;
+    assert!(validate_external_manifest_rows(coverage, &wrong_externals).is_err());
+}
+
+#[test]
+fn official_builtin_and_subcommand_targets_are_exhaustively_resolved() {
+    let coverage = official_top_level_coverage();
     assert_eq!(
-        classify_external("telnet").unwrap().desktop.presence,
-        Presence::OptionalFeature
+        validate_external_manifest_rows(coverage, external_commands()),
+        Ok(())
     );
-    assert_eq!(
-        classify_external("tftp").unwrap().desktop.presence,
-        Presence::OptionalFeature
-    );
-    assert_eq!(
-        classify_external("mount").unwrap().desktop.presence,
-        Presence::OptionalFeature
-    );
+
+    let mut typo = coverage.to_vec();
+    typo.iter_mut()
+        .find(|row| row.source_name == "active")
+        .unwrap()
+        .normalized_name = "diskpart-typo";
+    let error = validate_external_manifest_rows(&typo, external_commands()).unwrap_err();
+    assert!(error.contains("diskpart-typo"), "{error}");
 }
 
 #[test]

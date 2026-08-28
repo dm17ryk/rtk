@@ -4,7 +4,8 @@
 use std::collections::HashSet;
 
 use super::external_manifest::{
-    ExternalCommand, ExternalRoute, ExternalStatus, ExternalStrategy, Provenance, VersionStatus,
+    ExternalCommand, ExternalRoute, ExternalStatus, ExternalStrategy, Presence, Provenance,
+    ReleaseSupport, VersionStatus,
 };
 
 /// Whether CMD itself provides the command or it depends on command extensions.
@@ -480,8 +481,16 @@ pub fn validate_command_catalogs(
             || command.strategy != ExternalStrategy::IdentityRaw
             || command.status != ExternalStatus::RecognizedRaw
             || command.provenance != Provenance::MicrosoftWindowsCommandsAz20250729
-            || command.desktop.win10.before_21h1 == VersionStatus::Unsupported
-            || command.desktop.win11.before_24h2 == VersionStatus::Unsupported
+            || command.desktop.win10.before_21h1.status == VersionStatus::Unsupported
+            || command.desktop.win11.before_24h2.status == VersionStatus::Unsupported
+            || [
+                command.desktop.win10.before_21h1,
+                command.desktop.win10.from_21h1,
+                command.desktop.win11.before_24h2,
+                command.desktop.win11.from_24h2,
+            ]
+            .into_iter()
+            .any(|release| !release_support_is_consistent(release))
             || command.modes.is_empty()
             || command.identity_reason.trim().is_empty()
         {
@@ -497,4 +506,9 @@ pub fn validate_command_catalogs(
     }
 
     Ok(())
+}
+
+fn release_support_is_consistent(release: ReleaseSupport) -> bool {
+    matches!(release.status, VersionStatus::Unsupported)
+        == matches!(release.presence, Presence::Unavailable)
 }
