@@ -233,7 +233,7 @@ fn public_cmd_keeps_one_expression_raw_and_transports_multiple_arguments() {
         prepare_invocation(&[OsString::from("dir"), OsString::from("folder with spaces"),])
             .unwrap(),
         Invocation::Transport {
-            expression: "!RTK_CMD_ARG_0! !RTK_CMD_ARG_1!".to_owned(),
+            expression: "%RTK_CMD_ARG_0% %RTK_CMD_ARG_1%".to_owned(),
             environment: vec![
                 (OsString::from("RTK_CMD_ARG_0"), OsString::from("dir")),
                 (
@@ -255,7 +255,7 @@ fn public_cmd_normalizes_c_but_keeps_interactive_k_and_no_argument_sessions_nati
         ])
         .unwrap(),
         Invocation::Transport {
-            expression: "!RTK_CMD_ARG_0! !RTK_CMD_ARG_1!".to_owned(),
+            expression: "%RTK_CMD_ARG_0% %RTK_CMD_ARG_1%".to_owned(),
             environment: vec![
                 (OsString::from("RTK_CMD_ARG_0"), OsString::from("dir")),
                 (OsString::from("RTK_CMD_ARG_1"), OsString::from("/b")),
@@ -281,12 +281,35 @@ fn public_cmd_transports_embedded_quotes_and_cmd_metacharacters_as_data() {
         ])
         .unwrap(),
         Invocation::Transport {
-            expression: "!RTK_CMD_ARG_0! !RTK_CMD_ARG_1!".to_owned(),
+            expression: "%RTK_CMD_ARG_0% %RTK_CMD_ARG_1%".to_owned(),
             environment: vec![
                 (OsString::from("RTK_CMD_ARG_0"), OsString::from("echo")),
                 (
                     OsString::from("RTK_CMD_ARG_1"),
                     OsString::from(r#"safe" & echo injected > marker.txt"#),
+                ),
+            ],
+        }
+    );
+}
+
+#[test]
+fn public_cmd_transport_preserves_empty_and_bang_arguments_without_delayed_expansion() {
+    assert_eq!(
+        prepare_invocation(&[
+            OsString::from("echo"),
+            OsString::from(""),
+            OsString::from("!RTK_CMD_UNSET!"),
+        ])
+        .unwrap(),
+        Invocation::Transport {
+            expression: "%RTK_CMD_ARG_0% \"\" %RTK_CMD_ARG_2%".to_owned(),
+            environment: vec![
+                (OsString::from("RTK_CMD_ARG_0"), OsString::from("echo")),
+                (OsString::from("RTK_CMD_ARG_1"), OsString::from("")),
+                (
+                    OsString::from("RTK_CMD_ARG_2"),
+                    OsString::from("!RTK_CMD_UNSET!"),
                 ),
             ],
         }

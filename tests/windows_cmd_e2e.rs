@@ -99,8 +99,30 @@ fn multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_comm
         .expect("rtk cmd should start");
 
     assert!(output.status.success());
+    assert_eq!(output.stdout, format!("{payload}\r\n").as_bytes());
     assert!(
         !injected.exists(),
         "embedded metacharacters must stay data, not execute a redirected command"
     );
+}
+
+#[test]
+fn multi_argument_empty_and_bang_values_match_default_cmd_semantics() {
+    let empty_native = native_cmd(r#"echo """#);
+    let empty_rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["cmd", "echo", ""])
+        .output()
+        .expect("rtk cmd should start");
+    assert_eq!(empty_rtk.status.code(), empty_native.status.code());
+    assert_eq!(empty_rtk.stdout, empty_native.stdout);
+    assert_eq!(empty_rtk.stderr, empty_native.stderr);
+
+    let bang_native = native_cmd("echo !RTK_CMD_UNSET!");
+    let bang_rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["cmd", "echo", "!RTK_CMD_UNSET!"])
+        .output()
+        .expect("rtk cmd should start");
+    assert_eq!(bang_rtk.status.code(), bang_native.status.code());
+    assert_eq!(bang_rtk.stdout, bang_native.stdout);
+    assert_eq!(bang_rtk.stderr, bang_native.stderr);
 }

@@ -17,8 +17,8 @@ pub enum Invocation {
     Passthrough(Vec<OsString>),
     /// Invoke a one-shot expression using the hardened default switches.
     Execute(String),
-    /// Invoke independently supplied arguments through delayed-expansion
-    /// environment transport, so their CMD metacharacters remain data.
+    /// Invoke independently supplied arguments through environment transport,
+    /// so their CMD metacharacters remain data without enabling `/V`.
     Transport {
         expression: String,
         environment: Vec<(OsString, OsString)>,
@@ -68,8 +68,16 @@ pub fn prepare_invocation(args: &[OsString]) -> Result<Invocation> {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let expression = (0..expression_args.len())
-            .map(|index| format!("!RTK_CMD_ARG_{index}!"))
+        let expression = expression_args
+            .iter()
+            .enumerate()
+            .map(|(index, argument)| {
+                if argument.is_empty() {
+                    "\"\"".to_owned()
+                } else {
+                    format!("%RTK_CMD_ARG_{index}%")
+                }
+            })
             .collect::<Vec<_>>()
             .join(" ");
         Invocation::Transport {
@@ -160,7 +168,6 @@ pub fn run(args: &[OsString]) -> Result<i32> {
             &[
                 OsString::from("/D"),
                 OsString::from("/S"),
-                OsString::from("/V:ON"),
                 OsString::from("/C"),
                 OsString::from(expression),
             ],
@@ -199,9 +206,9 @@ fn execute_cmd(arguments: &[OsString], environment: &[(OsString, OsString)]) -> 
 }
 
 fn validate_transport_argument(argument: &str) -> Result<()> {
-    if argument.contains(['\r', '\n', '!']) {
+    if argument.contains(['\r', '\n']) {
         bail!(
-            "multi-argument rtk cmd cannot safely represent CR, LF, or !; pass one raw CMD expression"
+            "multi-argument rtk cmd cannot safely represent CR or LF; pass one raw CMD expression"
         );
     }
     Ok(())

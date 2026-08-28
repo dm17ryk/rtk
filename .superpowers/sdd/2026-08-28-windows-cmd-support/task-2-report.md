@@ -73,7 +73,7 @@ segments without recursive orchestration.
 
 - Structured filters and per-segment savings accounting are intentionally not
   implemented until Task 3. Hidden runners are identity execution only.
-- The multi-argument transport rejects CR, LF, and `!`; callers needing those
+- The multi-argument transport rejects CR and LF; callers needing line-spanning
   forms should pass one raw expression, which remains parser-governed and
   fail-open where required.
 
@@ -88,8 +88,8 @@ segments without recursive orchestration.
   string. It now passes each argument in a per-child environment variable and
   invokes CMD with `/V:ON` and `!RTK_CMD_ARG_n!` tokens. Delayed expansion is
   late enough that embedded quotes and `&|<>` remain argument data rather than
-  changing command syntax. CR, LF, and `!` are rejected for this transport with
-  a clear request to use one raw expression.
+  changing command syntax. At this Fix Round 1 point, CR, LF, and `!` were
+  rejected; Fix Round 2 removes the unnecessary bang restriction.
 
 ### Direct Coverage
 
@@ -132,4 +132,51 @@ segments without recursive orchestration.
 - `rtk test cargo test --test windows_cmd_e2e` — `4 passed; 0 failed`.
 - `rtk test cargo test --all` — main unit suite `2729 passed; 0 failed; 8
   ignored`; all remaining targets passed, including `4 passed; 0 failed` for
+  the Windows CMD E2E suite.
+
+## Fix Round 2
+
+### Changed Behavior
+
+- Multi-argument execution again uses exactly the public default CMD switches:
+  `/D /S /C`. The transport no longer supplies `/V:ON`.
+- Transport tokens use `%RTK_CMD_ARG_n%` with per-child environment values.
+  This retains embedded quotes and metacharacters as data without turning on
+  delayed expansion, so `!` is a valid literal argument value.
+- Empty positional arguments are emitted as the explicit CMD token `""` rather
+  than expanding to an empty gap, preserving `rtk cmd echo ""` parity.
+- The `RedirectInput` fallback from Fix Round 1 remains unchanged.
+
+### Direct Coverage
+
+- `public_cmd_transport_preserves_empty_and_bang_arguments_without_delayed_expansion`
+  checks `%` transport tokens, the explicit empty token, and a literal bang.
+- `multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_command`
+  now asserts the exact echo payload in addition to verifying that no marker
+  file was created.
+- `multi_argument_empty_and_bang_values_match_default_cmd_semantics` compares
+  status, stdout, and stderr against native `/D /S /C` for empty and bang
+  values.
+
+### TDD Red/Green Evidence
+
+1. RED: `rtk test cargo test
+   public_cmd_transport_preserves_empty_and_bang_arguments_without_delayed_expansion
+   --bin rtk` reported `0 passed; 1 failed` while the `/V:ON` transport rejected
+   `!` and produced delayed-expansion tokens.
+2. RED: `rtk test cargo test --test windows_cmd_e2e
+   multi_argument_empty_and_bang_values_match_default_cmd_semantics` reported
+   `0 passed; 1 failed` before empty-token and delayed-expansion behavior was
+   corrected.
+3. GREEN: each focused command reported `1 passed; 0 failed` after switching
+   to percent transport, removing `/V:ON`, and representing empty arguments as
+   `""`.
+
+### Fix Round 2 Verification
+
+- `rtk cargo fmt` — passed (exit 0).
+- `rtk test cargo test "cmds::windows::tests::" --bin rtk` — `19 passed; 0 failed`.
+- `rtk test cargo test --test windows_cmd_e2e` — `5 passed; 0 failed`.
+- `rtk test cargo test --all` — main unit suite `2730 passed; 0 failed; 8
+  ignored`; all remaining targets passed, including `5 passed; 0 failed` for
   the Windows CMD E2E suite.
