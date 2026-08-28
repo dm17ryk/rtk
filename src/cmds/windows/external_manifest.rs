@@ -139,10 +139,14 @@ const W: DesktopSupport = DesktopSupport {
     },
     presence: Presence::OptionalFeature,
 };
-macro_rules! x {($n:literal,$d:expr,$m:expr)=>{ExternalCommand{name:$n,aliases:&[],route:ExternalRoute::NativeExecutable,desktop:$d,modes:$m,strategy:ExternalStrategy::IdentityRaw,identity_reason:"no external adapter is released in the stable CMD increment",status:ExternalStatus::RecognizedRaw,provenance:SOURCE}};($n:literal,[$($a:literal),+],$d:expr,$m:expr)=>{ExternalCommand{name:$n,aliases:&[$($a),+],route:ExternalRoute::NativeExecutable,desktop:$d,modes:$m,strategy:ExternalStrategy::IdentityRaw,identity_reason:"no external adapter is released in the stable CMD increment",status:ExternalStatus::RecognizedRaw,provenance:SOURCE}}}
+macro_rules! x {($n:literal,$d:expr,$_m:expr)=>{ExternalCommand{name:$n,aliases:&[],route:ExternalRoute::NativeExecutable,desktop:$d,modes:ANY,strategy:ExternalStrategy::IdentityRaw,identity_reason:"no external adapter is released in the stable CMD increment",status:ExternalStatus::RecognizedRaw,provenance:SOURCE}};($n:literal,[$($a:literal),+],$d:expr,$_m:expr)=>{ExternalCommand{name:$n,aliases:&[$($a),+],route:ExternalRoute::NativeExecutable,desktop:$d,modes:ANY,strategy:ExternalStrategy::IdentityRaw,identity_reason:"no external adapter is released in the stable CMD increment",status:ExternalStatus::RecognizedRaw,provenance:SOURCE}}}
+#[allow(dead_code)]
 const Q: CommandModes = CommandModes::QUERY;
+#[allow(dead_code)]
 const QM: CommandModes = Q.union(CommandModes::MACHINE);
+#[allow(dead_code)]
 const QMUT: CommandModes = Q.union(CommandModes::MUTATION);
+#[allow(dead_code)]
 const QMUTSM: CommandModes = QMUT
     .union(CommandModes::STRUCTURED)
     .union(CommandModes::MACHINE);

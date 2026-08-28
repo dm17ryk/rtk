@@ -456,6 +456,17 @@ fn external_modes_are_conservative_and_interpreter_targets_are_explicit() {
 }
 
 #[test]
+fn every_recognized_raw_external_has_all_conservative_risk_modes() {
+    for command in external_commands() {
+        assert!(
+            command.modes.contains(CommandModes::CONSERVATIVE_ANY),
+            "{}",
+            command.name
+        );
+    }
+}
+
+#[test]
 fn raw_official_snapshot_header_and_names_match_the_checked_in_tsv() {
     let raw = include_str!("../../../tests/fixtures/windows_cmd/windows_commands_raw.md");
     let names: Vec<_> = raw
