@@ -384,15 +384,20 @@ The first stable increment only filters safe, terminal-facing display forms of
 the built-ins `dir`, display-only `set`, `help`, `assoc`, and `ftype`. Exact or
 machine-consumed output remains native: this includes `echo`, `type`, `dir /b`,
 redirected or piped expressions, assignments and state/control commands, batch
-files, unrecognized layouts/locales, and failed commands. CMD commands outside
-those built-ins are recognized by the checked-in Desktop Windows 10/11 manifest
-but are currently **raw**; recognition does not promise a filter.
+files, unrecognized layouts/locales, and failed commands. Cataloged external
+CMD executable families and unknown names both stay on the native raw route;
+the distinction records the checked-in Windows Commands A-Z snapshot for later
+adapters, not a filter or an executable-presence guarantee. The snapshot also
+records built-in, server-only, subcommand-only, and unsupported exclusions
+(including `append` on Desktop Windows) and marks optional/deprecated entries
+such as `wmic` on current Windows 11.
 
 No command catalog is downloaded during runtime or builds. The external
 manifest is an offline snapshot of the [Microsoft Learn Windows Commands
 catalog](https://learn.microsoft.com/windows-server/administration/windows-commands/windows-commands),
 which applies to Windows 10 and 11 (source last updated 2026-02-24; snapshot
-reviewed 2026-08-29).
+reviewed 2026-08-29). If an optional native executable is absent, `cmd.exe`
+reports its normal error unchanged.
 
 Interactive CMD sessions are intentionally unfiltered: `rtk cmd` with no
 arguments and `rtk cmd /K ...` pass through to `cmd.exe`; prompt-driven built-ins

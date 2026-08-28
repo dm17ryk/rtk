@@ -3,10 +3,13 @@ use super::catalog::{
     builtins, validate_catalog, validate_command_catalogs, AdapterStrategy, CommandMode,
 };
 use super::external_manifest::{
-    external_commands, CommandAvailability, ExternalCommand, ExternalStatus, ExternalStrategy,
+    classify_external, external_commands, official_top_level_coverage, validate_external_manifest,
+    CatalogDisposition, CommandModes, ExternalCommand, ExternalRoute, ExternalStatus,
+    ExternalStrategy, Presence, VersionStatus,
 };
 use super::orchestrator::{
-    prepare_invocation as prepare_with_cmd, rewrite_expression, Invocation, SEGMENT_RUNNER,
+    prepare_invocation as prepare_with_cmd, recognize_command, rewrite_expression,
+    CommandRecognition, Invocation, SEGMENT_RUNNER,
 };
 use super::parser::{parse_expression, OpaqueReason, OperatorKind, Span};
 use std::ffi::OsString;
@@ -242,73 +245,71 @@ fn catalog_validation_rejects_duplicate_aliases_and_missing_strategies() {
 }
 
 #[test]
-fn command_catalog_validation_requires_explicit_external_raw_metadata_and_unique_names() {
+fn external_manifest_is_static_complete_and_explicit() {
     assert_eq!(
-        validate_command_catalogs(&builtins(), &external_commands()),
+        validate_command_catalogs(&builtins(), external_commands()),
         Ok(())
     );
+    assert_eq!(validate_external_manifest(), Ok(()));
+    assert!(external_commands().len() >= 100);
 
-    let duplicate_builtin = ExternalCommand {
-        name: "dir",
-        aliases: vec![],
-        availability: Some(CommandAvailability::DesktopWindows10And11),
-        strategy: Some(ExternalStrategy::IdentityRaw),
-        status: Some(ExternalStatus::RecognizedRaw),
-    };
-    assert!(validate_command_catalogs(&builtins(), &[duplicate_builtin]).is_err());
-
-    let missing_metadata = ExternalCommand {
-        name: "future-command",
-        aliases: vec![],
-        availability: None,
-        strategy: None,
-        status: None,
-    };
-    assert!(validate_command_catalogs(&[], &[missing_metadata]).is_err());
-
-    for incomplete in [
-        ExternalCommand {
-            name: "missing-availability",
-            aliases: vec![],
-            availability: None,
-            strategy: Some(ExternalStrategy::IdentityRaw),
-            status: Some(ExternalStatus::RecognizedRaw),
-        },
-        ExternalCommand {
-            name: "missing-strategy",
-            aliases: vec![],
-            availability: Some(CommandAvailability::DesktopWindows10And11),
-            strategy: None,
-            status: Some(ExternalStatus::RecognizedRaw),
-        },
-        ExternalCommand {
-            name: "missing-status",
-            aliases: vec![],
-            availability: Some(CommandAvailability::DesktopWindows10And11),
-            strategy: Some(ExternalStrategy::IdentityRaw),
-            status: None,
-        },
-    ] {
-        assert!(validate_command_catalogs(&[], &[incomplete]).is_err());
+    for entry in external_commands() {
+        assert_eq!(entry.route, ExternalRoute::NativeExecutable);
+        assert_eq!(entry.strategy, ExternalStrategy::IdentityRaw);
+        assert_eq!(entry.status, ExternalStatus::RecognizedRaw);
+        assert!(!entry.identity_reason.trim().is_empty(), "{}", entry.name);
+        assert!(!entry.modes.is_empty(), "{}", entry.name);
+        assert_ne!(
+            entry.desktop.win10,
+            VersionStatus::Unsupported,
+            "{}",
+            entry.name
+        );
+        assert_ne!(
+            entry.desktop.win11,
+            VersionStatus::Unsupported,
+            "{}",
+            entry.name
+        );
     }
 
-    let duplicate_aliases = [
-        ExternalCommand {
-            name: "external-one",
-            aliases: vec!["shared-alias"],
-            availability: Some(CommandAvailability::DesktopWindows10And11),
-            strategy: Some(ExternalStrategy::IdentityRaw),
-            status: Some(ExternalStatus::RecognizedRaw),
-        },
-        ExternalCommand {
-            name: "external-two",
-            aliases: vec!["shared-alias"],
-            availability: Some(CommandAvailability::DesktopWindows10And11),
-            strategy: Some(ExternalStrategy::IdentityRaw),
-            status: Some(ExternalStatus::RecognizedRaw),
-        },
-    ];
-    assert!(validate_command_catalogs(&[], &duplicate_aliases).is_err());
+    let change = classify_external("chglogon").expect("change alias is recognized");
+    assert_eq!(change.name, "change");
+    assert!(change.aliases.contains(&"chgport"));
+    let query = classify_external("qprocess").expect("query alias is recognized");
+    assert_eq!(query.name, "query");
+    assert!(query.modes.contains(CommandModes::QUERY));
+    assert!(classify_external("not-a-windows-command").is_none());
+    assert_eq!(
+        recognize_command("ipconfig"),
+        CommandRecognition::ExternalRaw
+    );
+    assert_eq!(
+        recognize_command("not-a-windows-command"),
+        CommandRecognition::Unknown
+    );
+
+    let wmic = classify_external("wmic").expect("WMIC remains an explicit optional entry");
+    assert_eq!(wmic.desktop.win11, VersionStatus::Deprecated);
+    assert_eq!(wmic.desktop.presence, Presence::OptionalFeature);
+
+    assert!(official_top_level_coverage().iter().any(|entry| {
+        entry.name == "append" && entry.disposition == CatalogDisposition::UnsupportedOnDesktop
+    }));
+    assert!(official_top_level_coverage().iter().any(|entry| {
+        entry.name == "adprep" && entry.disposition == CatalogDisposition::ServerOnly
+    }));
+    assert!(official_top_level_coverage().iter().any(|entry| {
+        entry.name == "add" && entry.disposition == CatalogDisposition::SubcommandOnly
+    }));
+    assert!(official_top_level_coverage().iter().all(|entry| {
+        entry.disposition != CatalogDisposition::DesktopExternal
+            || classify_external(entry.name).is_some()
+    }));
+
+    let mut builtin_alias_collision: ExternalCommand = *classify_external("ipconfig").unwrap();
+    builtin_alias_collision.aliases = &["chdir"];
+    assert!(validate_command_catalogs(&builtins(), &[builtin_alias_collision]).is_err());
 }
 
 #[test]

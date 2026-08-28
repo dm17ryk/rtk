@@ -1,8 +1,8 @@
 //! Public and hidden execution paths for CMD expressions.
 
 use super::adapters;
-use super::catalog::{builtins, validate_command_catalogs, AdapterStrategy};
-use super::external_manifest::external_commands;
+use super::catalog::{builtins, AdapterStrategy, BuiltinCommand};
+use super::external_manifest::classify_external;
 use super::parser::{parse_expression, OperatorKind};
 use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
@@ -67,6 +67,35 @@ pub enum Invocation {
         expression: String,
         environment: Vec<(OsString, OsString)>,
     },
+}
+
+/// Recognition is intentionally separate from rewrite eligibility: an external
+/// name is known to this snapshot but still stays on the native raw route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CommandRecognition {
+    Builtin(AdapterStrategy),
+    ExternalRaw,
+    Unknown,
+}
+
+#[cfg(test)]
+pub(crate) fn recognize_command(name: &str) -> CommandRecognition {
+    let catalog = builtins();
+    recognize_command_in(name, &catalog)
+}
+
+fn recognize_command_in(name: &str, catalog: &[BuiltinCommand]) -> CommandRecognition {
+    if let Some(entry) = catalog.iter().find(|entry| entry.matches(name)) {
+        return entry
+            .strategy
+            .map(CommandRecognition::Builtin)
+            .unwrap_or(CommandRecognition::Unknown);
+    }
+    if classify_external(name).is_some() {
+        CommandRecognition::ExternalRaw
+    } else {
+        CommandRecognition::Unknown
+    }
 }
 
 /// Classify public `rtk cmd` arguments without losing a single raw expression.
@@ -183,15 +212,14 @@ pub fn rewrite_expression_for_terminal(
             .map(|operator| operator.span.start)
             .unwrap_or(source.len());
         let original = &source[segment.span.start..segment_end];
-        let eligible = catalog
-            .iter()
-            .find(|entry| entry.matches(command))
-            .is_some_and(|entry| match entry.strategy {
-                Some(AdapterStrategy::Structured { adapter }) => {
-                    adapters::is_display_form(adapter, original)
-                }
-                Some(AdapterStrategy::Identity { .. }) | None => false,
-            });
+        let eligible = match recognize_command_in(command, &catalog) {
+            CommandRecognition::Builtin(AdapterStrategy::Structured { adapter }) => {
+                adapters::is_display_form(adapter, original)
+            }
+            CommandRecognition::Builtin(AdapterStrategy::Identity { .. })
+            | CommandRecognition::ExternalRaw
+            | CommandRecognition::Unknown => false,
+        };
         if !eligible {
             continue;
         }
@@ -213,8 +241,6 @@ pub fn run(args: &[OsString]) -> Result<i32> {
     if !cfg!(windows) {
         bail!("rtk cmd is only supported on Windows 10 and 11");
     }
-    validate_checked_in_catalogs()?;
-
     let cmd_executable = resolve_cmd_executable()?;
     match prepare_invocation(args, &cmd_executable)? {
         Invocation::Passthrough(arguments) => execute_cmd(&cmd_executable, &arguments, &[]),
@@ -255,7 +281,6 @@ pub fn run_segment(encoded: &str) -> Result<i32> {
     if !cfg!(windows) {
         bail!("rtk cmd is only supported on Windows 10 and 11");
     }
-    validate_checked_in_catalogs()?;
     let bytes = hex_decode(encoded)?;
     let source = String::from_utf8(bytes).context("Invalid UTF-8 CMD segment")?;
     let cmd_executable = resolve_cmd_executable()?;
@@ -279,11 +304,6 @@ pub fn run_segment(encoded: &str) -> Result<i32> {
         .write_all(&output.stderr)
         .context("Failed to write CMD stderr")?;
     Ok(exit_code)
-}
-
-fn validate_checked_in_catalogs() -> Result<()> {
-    validate_command_catalogs(&builtins(), &external_commands())
-        .map_err(|error| anyhow::anyhow!("invalid checked-in CMD catalog: {error}"))
 }
 
 /// Filter only a successful, UTF-8, cataloged structured display. Every

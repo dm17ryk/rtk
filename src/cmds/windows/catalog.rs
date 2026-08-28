@@ -3,7 +3,9 @@
 
 use std::collections::HashSet;
 
-use super::external_manifest::{ExternalCommand, ExternalStatus, ExternalStrategy};
+use super::external_manifest::{
+    ExternalCommand, ExternalRoute, ExternalStatus, ExternalStrategy, Provenance, VersionStatus,
+};
 
 /// Whether CMD itself provides the command or it depends on command extensions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -474,28 +476,16 @@ pub fn validate_command_catalogs(
     }
 
     for command in external_catalog {
-        let availability = command
-            .availability
-            .ok_or_else(|| format!("{} has no availability", command.name))?;
-        let strategy = command
-            .strategy
-            .ok_or_else(|| format!("{} has no adapter strategy", command.name))?;
-        let status = command
-            .status
-            .ok_or_else(|| format!("{} has no rollout status", command.name))?;
-
-        if !matches!(
-            (availability, strategy, status),
-            (
-                super::external_manifest::CommandAvailability::DesktopWindows10And11,
-                ExternalStrategy::IdentityRaw,
-                ExternalStatus::RecognizedRaw,
-            )
-        ) {
-            return Err(format!(
-                "{} has an unsupported external availability/strategy/status combination",
-                command.name
-            ));
+        if command.route != ExternalRoute::NativeExecutable
+            || command.strategy != ExternalStrategy::IdentityRaw
+            || command.status != ExternalStatus::RecognizedRaw
+            || command.provenance != Provenance::MicrosoftWindowsCommandsAz20260224
+            || command.desktop.win10 == VersionStatus::Unsupported
+            || command.desktop.win11 == VersionStatus::Unsupported
+            || command.modes.is_empty()
+            || command.identity_reason.trim().is_empty()
+        {
+            return Err(format!("{} has incomplete external metadata", command.name));
         }
 
         for name in std::iter::once(command.name).chain(command.aliases.iter().copied()) {
