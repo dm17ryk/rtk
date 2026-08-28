@@ -1,7 +1,8 @@
 //! Public and hidden execution paths for CMD expressions.
 
 use super::adapters;
-use super::catalog::{builtins, AdapterStrategy};
+use super::catalog::{builtins, validate_command_catalogs, AdapterStrategy};
+use super::external_manifest::external_commands;
 use super::parser::{parse_expression, OperatorKind};
 use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
@@ -195,7 +196,7 @@ pub fn rewrite_expression_for_terminal(
             continue;
         }
 
-        let at_prefix = original.starts_with('@').then_some("@").unwrap_or("");
+        let at_prefix = if original.starts_with('@') { "@" } else { "" };
         let replacement = format!(
             "{at_prefix}{} {SEGMENT_RUNNER} --hex {}",
             quote_cmd_path(&rtk_executable.to_string_lossy()),
@@ -212,6 +213,7 @@ pub fn run(args: &[OsString]) -> Result<i32> {
     if !cfg!(windows) {
         bail!("rtk cmd is only supported on Windows 10 and 11");
     }
+    validate_checked_in_catalogs()?;
 
     let cmd_executable = resolve_cmd_executable()?;
     match prepare_invocation(args, &cmd_executable)? {
@@ -253,6 +255,7 @@ pub fn run_segment(encoded: &str) -> Result<i32> {
     if !cfg!(windows) {
         bail!("rtk cmd is only supported on Windows 10 and 11");
     }
+    validate_checked_in_catalogs()?;
     let bytes = hex_decode(encoded)?;
     let source = String::from_utf8(bytes).context("Invalid UTF-8 CMD segment")?;
     let cmd_executable = resolve_cmd_executable()?;
@@ -276,6 +279,11 @@ pub fn run_segment(encoded: &str) -> Result<i32> {
         .write_all(&output.stderr)
         .context("Failed to write CMD stderr")?;
     Ok(exit_code)
+}
+
+fn validate_checked_in_catalogs() -> Result<()> {
+    validate_command_catalogs(&builtins(), &external_commands())
+        .map_err(|error| anyhow::anyhow!("invalid checked-in CMD catalog: {error}"))
 }
 
 /// Filter only a successful, UTF-8, cataloged structured display. Every
@@ -371,7 +379,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(encoded: &str) -> Result<Vec<u8>> {
-    if encoded.len() % 2 != 0 {
+    if !encoded.len().is_multiple_of(2) {
         bail!("CMD segment encoding must contain an even number of hex digits");
     }
     encoded

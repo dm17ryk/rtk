@@ -79,6 +79,9 @@ jobs:
           $env:RTK_DEBUG = "1"
           cargo run -- --version
           cargo run -- rewrite dir
+          cargo run -- cmd "echo rtk-cmd-smoke & dir /b"
+          cargo test "cmds::windows::tests::" --bin rtk
+          cargo test --test windows_cmd_e2e
           cargo test service::mcp -- --nocapture
           cargo test --all
 

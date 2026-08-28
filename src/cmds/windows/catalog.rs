@@ -3,6 +3,8 @@
 
 use std::collections::HashSet;
 
+use super::external_manifest::{ExternalCommand, ExternalStatus, ExternalStrategy};
+
 /// Whether CMD itself provides the command or it depends on command extensions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BuiltinOrigin {
@@ -451,5 +453,58 @@ pub fn validate_catalog(catalog: &[BuiltinCommand]) -> Result<(), String> {
             }
         }
     }
+    Ok(())
+}
+
+/// Verify the complete CMD catalog is unambiguous and explicit.
+///
+/// Built-ins and external commands share one command namespace under CMD, so
+/// duplicate names and aliases are rejected across both checked-in catalogs.
+pub fn validate_command_catalogs(
+    builtin_catalog: &[BuiltinCommand],
+    external_catalog: &[ExternalCommand],
+) -> Result<(), String> {
+    validate_catalog(builtin_catalog)?;
+
+    let mut names = HashSet::new();
+    for command in builtin_catalog {
+        for name in std::iter::once(command.name).chain(command.aliases.iter().copied()) {
+            names.insert(name.to_ascii_lowercase());
+        }
+    }
+
+    for command in external_catalog {
+        let availability = command
+            .availability
+            .ok_or_else(|| format!("{} has no availability", command.name))?;
+        let strategy = command
+            .strategy
+            .ok_or_else(|| format!("{} has no adapter strategy", command.name))?;
+        let status = command
+            .status
+            .ok_or_else(|| format!("{} has no rollout status", command.name))?;
+
+        if !matches!(
+            (availability, strategy, status),
+            (
+                super::external_manifest::CommandAvailability::DesktopWindows10And11,
+                ExternalStrategy::IdentityRaw,
+                ExternalStatus::RecognizedRaw,
+            )
+        ) {
+            return Err(format!(
+                "{} has an unsupported external availability/strategy/status combination",
+                command.name
+            ));
+        }
+
+        for name in std::iter::once(command.name).chain(command.aliases.iter().copied()) {
+            let normalized = name.to_ascii_lowercase();
+            if !names.insert(normalized) {
+                return Err(format!("duplicate CMD command name or alias: {name}"));
+            }
+        }
+    }
+
     Ok(())
 }

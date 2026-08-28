@@ -367,6 +367,42 @@ After install, **restart Claude Code**.
 
 RTK works fully on native Windows. Since **v0.37.2** the auto-rewrite hook runs as a **native binary command** (`rtk hook claude`) — no Unix shell, bash, or jq required — so commands are rewritten transparently on Command Prompt, PowerShell, and Windows Terminal, just like on Linux and macOS.
 
+### CMD expressions
+
+Use `rtk cmd` when you need to run a CMD expression while retaining CMD's own
+operator, exit-code, and state semantics. One argument is passed as raw CMD
+syntax; multiple arguments are transported as separate CMD arguments, so a
+metacharacter inside an argument remains data rather than a second command.
+
+```powershell
+rtk cmd "echo %CD% & dir /b"
+rtk cmd dir "folder with spaces"
+rtk cmd /C dir /b
+```
+
+The first stable increment only filters safe, terminal-facing display forms of
+the built-ins `dir`, display-only `set`, `help`, `assoc`, and `ftype`. Exact or
+machine-consumed output remains native: this includes `echo`, `type`, `dir /b`,
+redirected or piped expressions, assignments and state/control commands, batch
+files, unrecognized layouts/locales, and failed commands. CMD commands outside
+those built-ins are recognized by the checked-in Desktop Windows 10/11 manifest
+but are currently **raw**; recognition does not promise a filter.
+
+No command catalog is downloaded during runtime or builds. The external
+manifest is an offline snapshot of the [Microsoft Learn Windows Commands
+catalog](https://learn.microsoft.com/windows-server/administration/windows-commands/windows-commands),
+which applies to Windows 10 and 11 (source last updated 2026-02-24; snapshot
+reviewed 2026-08-29).
+
+Interactive CMD sessions are intentionally unfiltered: `rtk cmd` with no
+arguments and `rtk cmd /K ...` pass through to `cmd.exe`; prompt-driven built-ins
+such as `pause`, `date`, `time`, and `start` also remain native. When exact CMD
+output is required, bypass filtering explicitly:
+
+```powershell
+rtk proxy cmd.exe /D /S /C "dir /b"
+```
+
 ### Native Windows
 
 ```powershell

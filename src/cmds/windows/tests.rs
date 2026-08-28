@@ -1,5 +1,10 @@
 use super::adapters::{filter_display, is_display_form, supports_adapter};
-use super::catalog::{builtins, validate_catalog, AdapterStrategy, CommandMode};
+use super::catalog::{
+    builtins, validate_catalog, validate_command_catalogs, AdapterStrategy, CommandMode,
+};
+use super::external_manifest::{
+    external_commands, CommandAvailability, ExternalCommand, ExternalStatus, ExternalStrategy,
+};
 use super::orchestrator::{
     prepare_invocation as prepare_with_cmd, rewrite_expression, Invocation, SEGMENT_RUNNER,
 };
@@ -7,7 +12,7 @@ use super::parser::{parse_expression, OpaqueReason, OperatorKind, Span};
 use std::ffi::OsString;
 use std::path::Path;
 
-fn segment_text<'a>(source: &'a str, span: Span) -> &'a str {
+fn segment_text(source: &str, span: Span) -> &str {
     &source[span.start..span.end]
 }
 
@@ -234,6 +239,76 @@ fn catalog_validation_rejects_duplicate_aliases_and_missing_strategies() {
         adapter: "missing-adapter",
     });
     assert!(validate_catalog(&[unknown_adapter]).is_err());
+}
+
+#[test]
+fn command_catalog_validation_requires_explicit_external_raw_metadata_and_unique_names() {
+    assert_eq!(
+        validate_command_catalogs(&builtins(), &external_commands()),
+        Ok(())
+    );
+
+    let duplicate_builtin = ExternalCommand {
+        name: "dir",
+        aliases: vec![],
+        availability: Some(CommandAvailability::DesktopWindows10And11),
+        strategy: Some(ExternalStrategy::IdentityRaw),
+        status: Some(ExternalStatus::RecognizedRaw),
+    };
+    assert!(validate_command_catalogs(&builtins(), &[duplicate_builtin]).is_err());
+
+    let missing_metadata = ExternalCommand {
+        name: "future-command",
+        aliases: vec![],
+        availability: None,
+        strategy: None,
+        status: None,
+    };
+    assert!(validate_command_catalogs(&[], &[missing_metadata]).is_err());
+
+    for incomplete in [
+        ExternalCommand {
+            name: "missing-availability",
+            aliases: vec![],
+            availability: None,
+            strategy: Some(ExternalStrategy::IdentityRaw),
+            status: Some(ExternalStatus::RecognizedRaw),
+        },
+        ExternalCommand {
+            name: "missing-strategy",
+            aliases: vec![],
+            availability: Some(CommandAvailability::DesktopWindows10And11),
+            strategy: None,
+            status: Some(ExternalStatus::RecognizedRaw),
+        },
+        ExternalCommand {
+            name: "missing-status",
+            aliases: vec![],
+            availability: Some(CommandAvailability::DesktopWindows10And11),
+            strategy: Some(ExternalStrategy::IdentityRaw),
+            status: None,
+        },
+    ] {
+        assert!(validate_command_catalogs(&[], &[incomplete]).is_err());
+    }
+
+    let duplicate_aliases = [
+        ExternalCommand {
+            name: "external-one",
+            aliases: vec!["shared-alias"],
+            availability: Some(CommandAvailability::DesktopWindows10And11),
+            strategy: Some(ExternalStrategy::IdentityRaw),
+            status: Some(ExternalStatus::RecognizedRaw),
+        },
+        ExternalCommand {
+            name: "external-two",
+            aliases: vec!["shared-alias"],
+            availability: Some(CommandAvailability::DesktopWindows10And11),
+            strategy: Some(ExternalStrategy::IdentityRaw),
+            status: Some(ExternalStatus::RecognizedRaw),
+        },
+    ];
+    assert!(validate_command_catalogs(&[], &duplicate_aliases).is_err());
 }
 
 #[test]
