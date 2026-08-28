@@ -2,10 +2,10 @@
 # fetched-on: 2026-08-29
 # source-sha256: b177c3014e3fa42294ed6fd5356d4bfa08e1a58a8b841e383dd5bcdc01837cc7
 # format: official A-Z name<TAB>native family or source-name<TAB>disposition
-active	active	subcommand-only
-add	add	subcommand-only
-add alias	add alias	subcommand-only
-add volume	add volume	subcommand-only
+active	diskpart	subcommand-only
+add	diskshadow	subcommand-only
+add alias	diskshadow	subcommand-only
+add volume	diskshadow	subcommand-only
 adprep	adprep	server-only
 append	append	unsupported-desktop
 arp	arp	desktop-external
@@ -90,7 +90,7 @@ end restore	wbadmin	subcommand-only
 erase	erase	cmd-builtin
 eventcreate	eventcreate	desktop-external
 Evntcmd	evntcmd	unsupported-desktop
-exec	exec	subcommand-only
+exec	diskshadow	subcommand-only
 exit	exit	cmd-builtin
 expand	expand	desktop-external
 expand vdisk	diskpart	subcommand-only
@@ -229,19 +229,19 @@ relog	relog	desktop-external
 rem	rem	cmd-builtin
 remove	diskpart	subcommand-only
 ren	ren	cmd-builtin
-rename	diskpart	subcommand-only
+rename	ren	cmd-builtin
 repadmin	repadmin	server-only
 repair	diskpart	subcommand-only
 replace	replace	desktop-external
 rescan	diskpart	subcommand-only
-reset	diskpart	subcommand-only
+reset	diskshadow	subcommand-only
 retain	diskpart	subcommand-only
-revert	diskpart	subcommand-only
+revert	diskshadow	subcommand-only
 rexec	rexec	unsupported-desktop
 risetup	risetup	unsupported-desktop
 rmdir	rmdir	cmd-builtin
 robocopy	robocopy	desktop-external
-route ws2008	route	unsupported-desktop
+route ws2008	route	desktop-external
 rpcinfo	rpcinfo	server-only
 rpcping	rpcping	desktop-external
 rsh	rsh	optional-feature

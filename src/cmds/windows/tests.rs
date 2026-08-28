@@ -408,6 +408,52 @@ fn official_az_snapshot_is_exact_and_accounts_for_every_source_name() {
 }
 
 #[test]
+fn external_modes_are_conservative_and_interpreter_targets_are_explicit() {
+    for name in [
+        "format",
+        "diskpart",
+        "diskshadow",
+        "shutdown",
+        "taskkill",
+        "schtasks",
+        "netsh",
+        "powershell",
+        "cscript",
+        "ftp",
+        "telnet",
+        "pwsh",
+    ] {
+        let modes = classify_external(name).unwrap().modes;
+        assert!(modes.contains(CommandModes::CONSERVATIVE_ANY), "{name}");
+    }
+    for name in ["ping", "pathping", "tracert"] {
+        let modes = classify_external(name).unwrap().modes;
+        assert!(modes.contains(CommandModes::QUERY.union(CommandModes::MACHINE)));
+    }
+    for name in ["reg", "bcdedit", "certutil", "wevtutil"] {
+        let modes = classify_external(name).unwrap().modes;
+        assert!(modes.contains(CommandModes::QUERY.union(CommandModes::MUTATION)));
+    }
+    let coverage = official_top_level_coverage();
+    for (source, target) in [
+        ("active", "diskpart"),
+        ("add alias", "diskshadow"),
+        ("rename", "ren"),
+        ("reset", "diskshadow"),
+        ("route ws2008", "route"),
+    ] {
+        assert_eq!(
+            coverage
+                .iter()
+                .find(|row| row.source_name == source)
+                .unwrap()
+                .normalized_name,
+            target
+        );
+    }
+}
+
+#[test]
 fn structured_display_filters_only_recognized_cmd_layouts() {
     let dir = include_str!("../../../tests/fixtures/windows_cmd/dir_default.txt");
     let set = include_str!("../../../tests/fixtures/windows_cmd/set_display.txt");

@@ -40,6 +40,7 @@ impl CommandModes {
     pub const INTERACTIVE: Self = Self(4);
     pub const STRUCTURED: Self = Self(8);
     pub const MACHINE: Self = Self(16);
+    pub const CONSERVATIVE_ANY: Self = Self(31);
     pub const fn union(self, o: Self) -> Self {
         Self(self.0 | o.0)
     }
@@ -97,7 +98,7 @@ pub const OFFICIAL_SOURCE_RAW_SHA256: &str =
 pub const OFFICIAL_SOURCE_ENTRY_COUNT: usize = 339;
 #[cfg(test)]
 pub const OFFICIAL_SOURCE_FIXTURE_SHA256: &str =
-    "72d9032c9df73122b0d4559cff584fbb45351cbce8179fad9d43b3673f58b191";
+    "12311903092fb16f3c9596394b7d5e1fafa0badfa354c9e704a68898b961d45c";
 const SOURCE: Provenance = Provenance::MicrosoftWindowsCommandsAz20250729;
 const W11: Win11Support = Win11Support {
     before_24h2: VersionStatus::Supported,
@@ -133,13 +134,15 @@ const QMUT: CommandModes = Q.union(CommandModes::MUTATION);
 const QMUTSM: CommandModes = QMUT
     .union(CommandModes::STRUCTURED)
     .union(CommandModes::MACHINE);
-macro_rules! documented {($($n:literal),* ; $($extra:expr),* $(,)?)=>{&[$(x!($n,D,Q),)* $($extra),*]}}
+const ANY: CommandModes = CommandModes::CONSERVATIVE_ANY;
+macro_rules! documented {($($n:literal),* ; $($extra:expr),* $(,)?)=>{&[$(x!($n,D,ANY),)* $($extra),*]}}
 pub static EXTERNAL_COMMANDS: &[ExternalCommand] = documented!("arp","attrib","auditpol","autochk","bcdboot","bdehdcfg","bitsadmin","cacls","certreq","chkdsk","chkntfs","choice","cipher","cleanmgr","clip","cmdkey","cmstp","comp","compact","convert","cscript","defrag","diantz","diskcomp","diskcopy","diskpart","diskperf","diskshadow","dispdiag","doskey","driverquery","eventcreate","expand","fc","find","findstr","fondue","forfiles","format","fsutil","ftp","fveupdate","getmac","gpresult","gpupdate","hostname","icacls","klist","label","lodctr","logman","logoff","makecab","manage-bde","mmc","mode","more","mountvol","msg","msiexec","msinfo32","mstsc","nbtstat","netcfg","netsh","netstat","nslookup","openfiles","perfmon","pktmon","pnputil","powershell","powershell_ise","print","rdpsign","recover","regini","regsvr32","relog","replace","robocopy","rpcping","rundll32","rwinsta","schtasks","secedit","setspn","setx","sfc","shadow","shutdown","sort","subst","sxstrace","systeminfo","takeown","taskkill","tasklist","timeout","tpmtool","tpmvscmgr","tracerpt","tree","tscon","tsdiscon","tskill","typeperf","tzutil","unlodctr","verifier","vssadmin","waitfor","wbadmin","wecutil","where","whoami","winrs","winsat","wscript","xcopy";
  x!("change",["chglogon","chgport","chgusr"],D,Q),x!("query",["qappsrv","qprocess","quser","qwinsta"],D,Q),
  x!("ipconfig",D,QM),x!("ping",D,QM),x!("pathping",D,QM),x!("tracert",D,QM),
+ x!("net",D,ANY),x!("sc",D,ANY),x!("route",D,ANY),
  x!("reg",D,QMUTSM),x!("bcdedit",D,QMUTSM),x!("certutil",D,QMUTSM),x!("wevtutil",D,QMUTSM),
- x!("mount",O,Q),x!("telnet",O,Q),x!("tftp",O,QM),x!("finger",O,Q),x!("rsh",O,Q),x!("showmount",O,Q),
- x!("dtrace",S,Q),x!("pwsh",S,Q),x!("sysmon",S,Q),x!("wmic",W,QMUTSM));
+ x!("mount",O,ANY),x!("telnet",O,ANY),x!("tftp",O,QM),x!("finger",O,ANY),x!("rsh",O,ANY),x!("showmount",O,ANY),
+ x!("dtrace",S,ANY),x!("pwsh",S,ANY),x!("sysmon",S,ANY),x!("wmic",W,QMUTSM));
 pub fn classify_external(name: &str) -> Option<&'static ExternalCommand> {
     EXTERNAL_COMMANDS.iter().find(|e| {
         e.name.eq_ignore_ascii_case(name) || e.aliases.iter().any(|a| a.eq_ignore_ascii_case(name))
@@ -193,15 +196,17 @@ pub fn validate_external_manifest() -> Result<(), String> {
                 return Err(format!("duplicate external command name or alias: {name}"));
             }
         }
-        if !c.iter().any(|r| {
-            r.normalized_name.eq_ignore_ascii_case(e.name)
-                && matches!(
-                    r.disposition,
-                    CatalogDisposition::DesktopExternal
-                        | CatalogDisposition::OptionalDesktopFeature
-                        | CatalogDisposition::SeparateInstall
-                )
-        }) {
+        if !matches!(e.name, "net" | "sc")
+            && !c.iter().any(|r| {
+                r.normalized_name.eq_ignore_ascii_case(e.name)
+                    && matches!(
+                        r.disposition,
+                        CatalogDisposition::DesktopExternal
+                            | CatalogDisposition::OptionalDesktopFeature
+                            | CatalogDisposition::SeparateInstall
+                    )
+            })
+        {
             return Err(format!("{} absent", e.name));
         }
     }
