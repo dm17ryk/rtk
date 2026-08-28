@@ -389,14 +389,16 @@ CMD executable families and unknown names both stay on the native raw route;
 the distinction records the checked-in Windows Commands A-Z snapshot for later
 adapters, not a filter or an executable-presence guarantee. The snapshot also
 records built-in, server-only, subcommand-only, and unsupported exclusions
-(including `append` on Desktop Windows) and marks optional/deprecated entries
-such as `wmic` on current Windows 11.
+(including `append` on Desktop Windows). WMIC is inbox and deprecated on
+Windows 11 releases before 24H2, but removed starting with 24H2/current 2026;
+it is not modeled as a Feature on Demand.
 
 No command catalog is downloaded during runtime or builds. The external
 manifest is an offline snapshot of the [Microsoft Learn Windows Commands
 catalog](https://learn.microsoft.com/windows-server/administration/windows-commands/windows-commands),
-which applies to Windows 10 and 11 (source last updated 2026-02-24; snapshot
-reviewed 2026-08-29). If an optional native executable is absent, `cmd.exe`
+which applies to Windows 10 and 11. The checked-in raw-source fixture records
+the development fetch URL, its 2025-07-29 source date, SHA-256, and all 339 A-Z
+entries; tests are offline. If an optional native executable is absent, `cmd.exe`
 reports its normal error unchanged.
 
 Interactive CMD sessions are intentionally unfiltered: `rtk cmd` with no

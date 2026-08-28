@@ -5,7 +5,8 @@ use super::catalog::{
 use super::external_manifest::{
     classify_external, external_commands, official_top_level_coverage, validate_external_manifest,
     CatalogDisposition, CommandModes, ExternalCommand, ExternalRoute, ExternalStatus,
-    ExternalStrategy, Presence, VersionStatus,
+    ExternalStrategy, Presence, VersionStatus, OFFICIAL_SOURCE_ENTRY_COUNT,
+    OFFICIAL_SOURCE_FIXTURE_SHA256, OFFICIAL_SOURCE_RAW_SHA256,
 };
 use super::orchestrator::{
     prepare_invocation as prepare_with_cmd, recognize_command, rewrite_expression,
@@ -266,7 +267,7 @@ fn external_manifest_is_static_complete_and_explicit() {
             entry.name
         );
         assert_ne!(
-            entry.desktop.win11,
+            entry.desktop.win11.before_24h2,
             VersionStatus::Unsupported,
             "{}",
             entry.name
@@ -289,27 +290,121 @@ fn external_manifest_is_static_complete_and_explicit() {
         CommandRecognition::Unknown
     );
 
-    let wmic = classify_external("wmic").expect("WMIC remains an explicit optional entry");
-    assert_eq!(wmic.desktop.win11, VersionStatus::Deprecated);
-    assert_eq!(wmic.desktop.presence, Presence::OptionalFeature);
+    let wmic = classify_external("wmic").expect("WMIC remains an explicit entry");
+    assert_eq!(wmic.desktop.win11.before_24h2, VersionStatus::Deprecated);
+    assert_eq!(wmic.desktop.win11.from_24h2, VersionStatus::Unsupported);
+    assert_eq!(wmic.desktop.presence, Presence::Inbox);
 
     assert!(official_top_level_coverage().iter().any(|entry| {
-        entry.name == "append" && entry.disposition == CatalogDisposition::UnsupportedOnDesktop
+        entry.source_name == "append"
+            && entry.disposition == CatalogDisposition::UnsupportedOnDesktop
     }));
     assert!(official_top_level_coverage().iter().any(|entry| {
-        entry.name == "adprep" && entry.disposition == CatalogDisposition::ServerOnly
+        entry.source_name == "adprep" && entry.disposition == CatalogDisposition::ServerOnly
     }));
     assert!(official_top_level_coverage().iter().any(|entry| {
-        entry.name == "add" && entry.disposition == CatalogDisposition::SubcommandOnly
+        entry.source_name == "add" && entry.disposition == CatalogDisposition::SubcommandOnly
     }));
     assert!(official_top_level_coverage().iter().all(|entry| {
-        entry.disposition != CatalogDisposition::DesktopExternal
-            || classify_external(entry.name).is_some()
+        !matches!(
+            entry.disposition,
+            CatalogDisposition::DesktopExternal
+                | CatalogDisposition::OptionalDesktopFeature
+                | CatalogDisposition::SeparateInstall
+        ) || classify_external(entry.normalized_name).is_some()
     }));
 
     let mut builtin_alias_collision: ExternalCommand = *classify_external("ipconfig").unwrap();
     builtin_alias_collision.aliases = &["chdir"];
     assert!(validate_command_catalogs(&builtins(), &[builtin_alias_collision]).is_err());
+}
+
+#[test]
+fn official_az_snapshot_is_exact_and_accounts_for_every_source_name() {
+    use sha2::{Digest, Sha256};
+
+    let fixture = include_str!("../../../tests/fixtures/windows_cmd/windows_commands_az.tsv");
+    assert_eq!(
+        OFFICIAL_SOURCE_RAW_SHA256,
+        "b177c3014e3fa42294ed6fd5356d4bfa08e1a58a8b841e383dd5bcdc01837cc7"
+    );
+    assert_eq!(OFFICIAL_SOURCE_ENTRY_COUNT, 339);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(fixture.as_bytes())),
+        OFFICIAL_SOURCE_FIXTURE_SHA256
+    );
+
+    let coverage = official_top_level_coverage();
+    assert_eq!(coverage.len(), OFFICIAL_SOURCE_ENTRY_COUNT);
+    for expected in [
+        "add alias",
+        "begin backup",
+        "compact vdisk",
+        "Evntcmd",
+        "freedisk",
+        "gettype",
+        "gpfixup",
+        "gpt",
+        "graftabl",
+        "helpctr",
+        "inactive",
+        "ipxroute",
+        "irftp",
+        "jetpack",
+        "ktmutil",
+        "ktpass",
+        "load metadata",
+        "lpq",
+        "lpr",
+        "mmc",
+        "net print",
+        "powershell ise",
+        "refsutil",
+        "rwinsta",
+        "tftp",
+        "tpmtool",
+        "uniqueid",
+        "unlodctr",
+        "wdsutil",
+        "writer",
+        "detach vdisk",
+        "merge vdisk",
+        "route ws2008",
+        "winsat mem",
+    ] {
+        assert!(
+            coverage.iter().any(|row| row.source_name == expected),
+            "{expected}"
+        );
+    }
+    assert_eq!(
+        coverage
+            .iter()
+            .find(|row| row.source_name == "assign")
+            .unwrap()
+            .disposition,
+        CatalogDisposition::SubcommandOnly
+    );
+    assert_eq!(
+        coverage
+            .iter()
+            .find(|row| row.source_name == "manage bde")
+            .unwrap()
+            .normalized_name,
+        "manage-bde"
+    );
+    assert_eq!(
+        classify_external("telnet").unwrap().desktop.presence,
+        Presence::OptionalFeature
+    );
+    assert_eq!(
+        classify_external("tftp").unwrap().desktop.presence,
+        Presence::OptionalFeature
+    );
+    assert_eq!(
+        classify_external("mount").unwrap().desktop.presence,
+        Presence::OptionalFeature
+    );
 }
 
 #[test]

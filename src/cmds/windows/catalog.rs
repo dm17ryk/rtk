@@ -479,9 +479,9 @@ pub fn validate_command_catalogs(
         if command.route != ExternalRoute::NativeExecutable
             || command.strategy != ExternalStrategy::IdentityRaw
             || command.status != ExternalStatus::RecognizedRaw
-            || command.provenance != Provenance::MicrosoftWindowsCommandsAz20260224
+            || command.provenance != Provenance::MicrosoftWindowsCommandsAz20250729
             || command.desktop.win10 == VersionStatus::Unsupported
-            || command.desktop.win11 == VersionStatus::Unsupported
+            || command.desktop.win11.before_24h2 == VersionStatus::Unsupported
             || command.modes.is_empty()
             || command.identity_reason.trim().is_empty()
         {
