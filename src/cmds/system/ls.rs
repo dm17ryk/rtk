@@ -200,7 +200,7 @@ fn run_windows_native(args: &[String], verbose: u8) -> Result<i32> {
                 Some((name, metadata.len(), metadata.is_dir()))
             })
             .collect::<Vec<_>>();
-        entries.sort_by(|left, right| left.0.to_lowercase().cmp(&right.0.to_lowercase()));
+        entries.sort_by_key(|entry| entry.0.to_lowercase());
         output.extend(entries.into_iter().map(|(name, size, is_dir)| {
             format_windows_entry(Path::new(&name), size, is_dir, show_long)
         }));

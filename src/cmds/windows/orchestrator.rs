@@ -865,7 +865,9 @@ fn hex_decode(encoded: &str) -> Result<Vec<u8>> {
     }
     encoded
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let high = hex_value(pair[0])?;
             let low = hex_value(pair[1])?;
