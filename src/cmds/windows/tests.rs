@@ -839,17 +839,23 @@ fn nested_cmd_metacharacter_arguments_fail_closed_before_the_second_parse() {
 
 #[test]
 fn absolute_cmd_host_paths_use_the_same_fail_closed_policy() {
-    let result = prepare_invocation(&[
-        OsString::from(r"C:\Windows\System32\cmd.exe"),
-        OsString::from("/D"),
-        OsString::from("/C"),
-        OsString::from("echo"),
-        OsString::from("&"),
-    ]);
-    assert!(
-        result.is_err(),
-        "absolute cmd.exe paths must not bypass syntax checks"
-    );
+    for executable in [
+        r"C:\Windows\System32\cmd.exe",
+        r"C:\Windows\System32\cmd.exe.",
+        "C:\\Windows\\System32\\cmd.exe ",
+    ] {
+        let result = prepare_invocation(&[
+            OsString::from(executable),
+            OsString::from("/D"),
+            OsString::from("/C"),
+            OsString::from("echo"),
+            OsString::from("&"),
+        ]);
+        assert!(
+            result.is_err(),
+            "absolute cmd.exe path spelling {executable:?} must not bypass syntax checks"
+        );
+    }
 }
 
 #[test]
