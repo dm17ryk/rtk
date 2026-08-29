@@ -247,31 +247,6 @@ fn multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_comm
 }
 
 #[test]
-#[ignore]
-fn probe_nested_double_caret_forms() {
-    for expression in [
-        r#"cmd.exe /D /C echo ^^&"#,
-        r#"cmd.exe /D /C echo ^^^&"#,
-        r#"cmd.exe /D /C echo ^^|"#,
-        r#"cmd.exe /D /C echo ^^^|"#,
-        r#"cmd.exe /D /C echo ^^>"#,
-        r#"cmd.exe /D /C echo ^^^>"#,
-        r#"cmd.exe /D /C echo nested^^ ^"quoted^^ ^"value"#,
-        r#"cmd.exe /D /C type C:\Program^^ Files\missing.txt"#,
-    ] {
-        let mut command = Command::new("cmd.exe");
-        command.args(["/D", "/S", "/C"]);
-        command.raw_arg(expression);
-        let output = command.output().expect("cmd should start");
-        eprintln!(
-            "{expression:?} => {:?} {:?}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout)
-        );
-    }
-}
-
-#[test]
 fn multi_argument_empty_and_bang_values_match_default_cmd_semantics() {
     let empty_rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
         .args(["cmd", "echo", ""])
