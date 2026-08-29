@@ -170,8 +170,11 @@ pub fn prepare_invocation(args: &[OsString], _cmd_executable: &Path) -> Result<I
 
     let invocation = if expression_args.len() == 1 {
         Invocation::Execute(expression_args[0].clone())
-    } else if should_direct_external(expression_args) {
-        Invocation::Direct(expression_args.iter().map(OsString::from).collect())
+    } else if let Some(program) = resolve_direct_external(expression_args) {
+        let mut direct = Vec::with_capacity(expression_args.len());
+        direct.push(program.into_os_string());
+        direct.extend(expression_args.iter().skip(1).map(OsString::from));
+        Invocation::Direct(direct)
     } else if needs_hidden_transport {
         prepare_hidden_transport(expression_args)?
     } else {
@@ -198,24 +201,25 @@ fn prepare_hidden_transport(arguments: &[String]) -> Result<Invocation> {
     prepare_hidden_transport_with_key_check(arguments, |key| std::env::var_os(key).is_some())
 }
 
-fn should_direct_external(arguments: &[String]) -> bool {
+fn resolve_direct_external(arguments: &[String]) -> Option<std::path::PathBuf> {
     let Some(command) = arguments.first() else {
-        return false;
+        return None;
     };
     if builtins().iter().any(|entry| entry.matches(command))
         || command.eq_ignore_ascii_case("cmd")
         || command.eq_ignore_ascii_case("cmd.exe")
     {
-        return false;
+        return None;
     }
-    let extension = Path::new(command)
+    let resolved = crate::core::utils::resolve_binary(command).ok()?;
+    let extension = resolved
         .extension()
         .and_then(|extension| extension.to_str())
         .map(|extension| extension.to_ascii_lowercase());
-    if matches!(extension.as_deref(), Some("bat" | "cmd")) {
-        return false;
+    if matches!(extension.as_deref(), Some("bat" | "cmd" | "ps1")) {
+        return None;
     }
-    crate::core::utils::resolve_binary(command).is_ok()
+    Some(resolved)
 }
 
 pub(crate) fn prepare_hidden_transport_with_key_check<F>(
