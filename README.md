@@ -371,8 +371,11 @@ RTK works fully on native Windows. Since **v0.37.2** the auto-rewrite hook runs 
 
 Use `rtk cmd` when you need to run a CMD expression while retaining CMD's own
 operator, exit-code, and state semantics. One argument is passed as raw CMD
-syntax; multiple arguments are transported as separate CMD arguments, so a
-metacharacter inside an argument remains data rather than a second command.
+syntax; multiple arguments are reconstructed as one CMD-escaped
+expression, so quotes, expansion markers, whitespace, and metacharacters stay
+data rather than becoming a second command. Line-breaking values use an
+internal transport that is removed from the child environment before the
+requested command starts.
 
 ```powershell
 rtk cmd "echo %CD% & dir /b"
@@ -384,7 +387,13 @@ The first stable increment only filters safe, terminal-facing display forms of
 the built-ins `dir`, display-only `set`, `help`, `assoc`, and `ftype`. Exact or
 machine-consumed output remains native: this includes `echo`, `type`, `dir /b`,
 redirected or piped expressions, assignments and state/control commands, batch
-files, unrecognized layouts/locales, and failed commands. Cataloged external
+files, unrecognized layouts/locales, and failed commands. For `dir`, filtering
+is limited to the detailed layouts produced by `/A`, `/C`, `/L`, `/N`, `/O`,
+`/S`, `/T`, and `/4` (including documented combined and negative forms); `/P`,
+`/Q`, `/X`, `/W`, `/D`, `/R`, `/B`, and unknown switches stay native before
+capture. Filtered CMD displays include a paste-ready
+`type "C:\absolute\recovery.log"` command for the complete native output.
+Cataloged external
 CMD executable families and unknown names both stay on the native raw route;
 the distinction records the checked-in Windows Commands A-Z snapshot for later
 adapters, not a filter or an executable-presence guarantee. The snapshot also

@@ -383,7 +383,7 @@ fn official_az_snapshot_is_exact_and_accounts_for_every_source_name() {
     assert_eq!(OFFICIAL_SOURCE_ENTRY_COUNT, 339);
     assert_eq!(
         OFFICIAL_SOURCE_FIXTURE_SHA256,
-        "d46109ef38c01e9e022fa21393782df2c75a2e2f986b298b48d9471fed80347a"
+        "b5923b7a56ae1524664b117d972b05f253096568f892860afd234f3a3c3b19a1"
     );
     assert_eq!(
         format!("{:x}", Sha256::digest(fixture.as_bytes())),
@@ -523,6 +523,27 @@ fn official_builtin_and_subcommand_targets_are_exhaustively_resolved() {
 }
 
 #[test]
+fn official_cmd_row_is_a_recognized_raw_executable_not_a_self_satisfying_builtin() {
+    assert_eq!(recognize_command("cmd"), CommandRecognition::ExternalRaw);
+    let coverage = official_top_level_coverage();
+    let cmd = coverage
+        .iter()
+        .find(|row| row.source_name == "cmd")
+        .unwrap();
+    assert_eq!(cmd.normalized_name, "cmd");
+    assert_eq!(cmd.disposition, CatalogDisposition::DesktopExternal);
+
+    let mut invalid = coverage.to_vec();
+    let mut fake_builtin = invalid[0];
+    fake_builtin.source_name = "self-satisfying fake builtin";
+    fake_builtin.normalized_name = "self-satisfying fake builtin";
+    fake_builtin.disposition = CatalogDisposition::CmdBuiltin;
+    invalid.push(fake_builtin);
+    let error = validate_external_manifest_rows(&invalid, external_commands()).unwrap_err();
+    assert!(error.contains("actual CMD builtin"), "{error}");
+}
+
+#[test]
 fn external_modes_are_conservative_and_interpreter_targets_are_explicit() {
     for name in [
         "format",
@@ -638,6 +659,43 @@ fn structured_display_filters_only_recognized_cmd_layouts() {
     assert!(!is_display_form("set", "set /a 1+1"));
     assert!(!is_display_form("dir", "dir /b"));
     for source in [
+        "dir /a",
+        "dir /a:-d",
+        "dir /c",
+        "dir /-c",
+        "dir /l",
+        "dir /n",
+        "dir /o:-n",
+        "dir /s/a-d/o:n/t:w/4",
+        "dir /^s/^a-d/^o:n",
+    ] {
+        assert!(
+            is_display_form("dir", source),
+            "supported detailed DIR layout should be eligible: {source}"
+        );
+    }
+    for source in [
+        "dir /p",
+        "dir /q",
+        "dir /x",
+        "dir /w",
+        "dir /d",
+        "dir /r",
+        "dir /s/p",
+        "dir /s^/q",
+        "dir /^X/s",
+        "dir /z",
+        "dir /apple",
+        "dir /output",
+        "dir /tomorrow",
+        "dir /4ever",
+    ] {
+        assert!(
+            !is_display_form("dir", source),
+            "unsupported or alternate DIR layout must fail open before capture: {source}"
+        );
+    }
+    for source in [
         "dir /s/b",
         "dir /b/s",
         "dir /a-d/b",
@@ -656,6 +714,10 @@ fn structured_display_filters_only_recognized_cmd_layouts() {
     assert!(
         is_display_form("dir", r#"dir "C:\reports /b archive""#),
         "a quoted path containing /b is not a DIR switch"
+    );
+    assert!(
+        is_display_form("dir", r#"dir "C:\reports /p archive""#),
+        "a quoted path containing /p is not a DIR switch"
     );
     assert_eq!(
         filter_display("assoc", "assoc", "Association missing"),
@@ -709,7 +771,7 @@ fn catalog_identity_strategies_document_all_non_filtered_builtins_and_aliases() 
 }
 
 #[test]
-fn public_cmd_keeps_one_expression_raw_and_transports_multiple_arguments() {
+fn public_cmd_keeps_one_expression_raw_and_reconstructs_multiple_arguments() {
     assert_eq!(
         prepare_invocation(&[OsString::from("echo %CD% & dir /b")]).unwrap(),
         Invocation::Execute("echo %CD% & dir /b".to_owned())
@@ -717,18 +779,7 @@ fn public_cmd_keeps_one_expression_raw_and_transports_multiple_arguments() {
     assert_eq!(
         prepare_invocation(&[OsString::from("dir"), OsString::from("folder with spaces"),])
             .unwrap(),
-        Invocation::Transport {
-            expression:
-                "C:\\Windows\\System32\\cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!"
-                    .to_owned(),
-            environment: vec![
-                (OsString::from("RTK_CMD_ARG_0"), OsString::from("dir")),
-                (
-                    OsString::from("RTK_CMD_ARG_1"),
-                    OsString::from("folder with spaces"),
-                ),
-            ],
-        }
+        Invocation::Reconstructed("dir \"folder with spaces\"".to_owned())
     );
 }
 
@@ -741,15 +792,7 @@ fn public_cmd_normalizes_c_but_keeps_interactive_k_and_no_argument_sessions_nati
             OsString::from("/b"),
         ])
         .unwrap(),
-        Invocation::Transport {
-            expression:
-                "C:\\Windows\\System32\\cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!"
-                    .to_owned(),
-            environment: vec![
-                (OsString::from("RTK_CMD_ARG_0"), OsString::from("dir")),
-                (OsString::from("RTK_CMD_ARG_1"), OsString::from("/b")),
-            ],
-        }
+        Invocation::Reconstructed("dir /b".to_owned())
     );
     assert_eq!(
         prepare_invocation(&[OsString::from("/K"), OsString::from("echo ready")]).unwrap(),
@@ -762,30 +805,19 @@ fn public_cmd_normalizes_c_but_keeps_interactive_k_and_no_argument_sessions_nati
 }
 
 #[test]
-fn public_cmd_transports_embedded_quotes_and_cmd_metacharacters_as_data() {
+fn public_cmd_reconstruction_escapes_quotes_and_cmd_metacharacters_as_data() {
     assert_eq!(
         prepare_invocation(&[
             OsString::from("echo"),
             OsString::from(r#"safe" & echo injected > marker.txt"#),
         ])
         .unwrap(),
-        Invocation::Transport {
-            expression:
-                "C:\\Windows\\System32\\cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!"
-                    .to_owned(),
-            environment: vec![
-                (OsString::from("RTK_CMD_ARG_0"), OsString::from("echo")),
-                (
-                    OsString::from("RTK_CMD_ARG_1"),
-                    OsString::from(r#"safe" & echo injected > marker.txt"#),
-                ),
-            ],
-        }
+        Invocation::Reconstructed(r#"echo safe^"^ ^&^ echo^ injected^ ^>^ marker.txt"#.to_owned())
     );
 }
 
 #[test]
-fn public_cmd_transport_enables_delayed_expansion_inside_the_default_cmd_expression() {
+fn public_cmd_reconstruction_preserves_empty_and_bang_arguments() {
     assert_eq!(
         prepare_invocation(&[
             OsString::from("echo"),
@@ -793,59 +825,121 @@ fn public_cmd_transport_enables_delayed_expansion_inside_the_default_cmd_express
             OsString::from("!RTK_CMD_UNSET!"),
         ])
         .unwrap(),
-        Invocation::Transport {
-            expression:
-                "C:\\Windows\\System32\\cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! \"\" !RTK_CMD_ARG_2!"
-                    .to_owned(),
-            environment: vec![
-                (OsString::from("RTK_CMD_ARG_0"), OsString::from("echo")),
-                (OsString::from("RTK_CMD_ARG_1"), OsString::from("")),
-                (
-                    OsString::from("RTK_CMD_ARG_2"),
-                    OsString::from("!RTK_CMD_UNSET!"),
-                ),
-            ],
-        }
+        Invocation::Reconstructed("echo ^\"^\" ^!RTK_CMD_UNSET^!".to_owned())
     );
 }
 
 #[test]
-fn public_cmd_transport_preserves_percent_and_crlf_values() {
+fn public_cmd_reconstruction_preserves_percent_and_hides_line_break_transport() {
     assert_eq!(
-        prepare_invocation(&[
-            OsString::from("echo"),
-            OsString::from("100% complete\r\nsecond line"),
-        ])
-        .unwrap(),
-        Invocation::Transport {
-            expression:
-                "C:\\Windows\\System32\\cmd.exe /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!"
-                    .to_owned(),
-            environment: vec![
-                (OsString::from("RTK_CMD_ARG_0"), OsString::from("echo")),
-                (
-                    OsString::from("RTK_CMD_ARG_1"),
-                    OsString::from("100% complete\r\nsecond line"),
-                ),
-            ],
-        }
+        prepare_invocation(&[OsString::from("echo"), OsString::from("100% complete"),]).unwrap(),
+        Invocation::Reconstructed("echo 100^%^ complete".to_owned())
     );
+    let Invocation::HiddenTransport {
+        expression,
+        environment,
+    } = prepare_invocation(&[
+        OsString::from("echo"),
+        OsString::from("first line\r\nsecond line"),
+    ])
+    .unwrap()
+    else {
+        panic!("line breaks require the hidden transport");
+    };
+    for (key, _) in &environment {
+        let key = key.to_string_lossy();
+        assert!(expression.contains(&format!("set \"{key}=\"")));
+    }
+    assert!(environment
+        .iter()
+        .all(|(key, _)| !key.to_string_lossy().starts_with("RTK_CMD_ARG_")));
 }
 
 #[test]
-fn public_cmd_transport_does_not_emit_a_bare_nested_cmd_executable() {
-    let invocation = prepare_with_cmd(
-        &[OsString::from("echo"), OsString::from("safe")],
-        Path::new(r"C:\Program Files\Windows\cmd.exe"),
-    )
-    .unwrap();
-    let Invocation::Transport { expression, .. } = invocation else {
-        panic!("multiple arguments must use transport");
+fn hidden_line_break_transport_does_not_collide_with_user_environment() {
+    let first_key = std::cell::RefCell::new(None);
+    let result = super::orchestrator::prepare_line_break_transport_with_key_check(
+        &["echo".to_owned(), "first\r\nsecond".to_owned()],
+        |key| {
+            let mut first_key = first_key.borrow_mut();
+            if first_key.is_none() {
+                *first_key = Some(key.to_owned());
+                true
+            } else {
+                false
+            }
+        },
+    );
+
+    let Invocation::HiddenTransport { environment, .. } = result.unwrap() else {
+        panic!("line breaks require hidden transport");
+    };
+    assert!(environment
+        .iter()
+        .all(|(key, _)| Some(key.to_string_lossy().as_ref()) != first_key.borrow().as_deref()));
+}
+
+#[test]
+fn multi_argument_dir_reaches_the_normal_terminal_rewrite_path() {
+    let Invocation::Reconstructed(source) =
+        prepare_invocation(&[OsString::from("dir"), OsString::from("folder with spaces")]).unwrap()
+    else {
+        panic!("multiple arguments must reconstruct one normal expression");
     };
 
+    let rewritten = super::orchestrator::rewrite_expression_for_terminal(
+        &source,
+        Path::new(r"C:\Program Files\rtk.exe"),
+        true,
+    );
+    assert!(rewritten.contains(SEGMENT_RUNNER));
+}
+
+#[test]
+fn rewrite_fails_open_when_interpolated_rtk_path_can_expand_or_inject() {
+    let source = "dir /o:n";
+    for executable in [
+        r"C:\%TEMP%\rtk.exe",
+        r"C:\bang!name\rtk.exe",
+        "C:\\quoted\" & echo injected\\rtk.exe",
+        "C:\\line\r\nbreak\\rtk.exe",
+    ] {
+        assert_eq!(
+            rewrite_expression(source, Path::new(executable)),
+            source,
+            "unsafe executable interpolation must fail open: {executable:?}"
+        );
+    }
+
+    let quoted_safe =
+        rewrite_expression(source, Path::new(r"C:\Program Files\rtk & tools\rtk.exe"));
+    assert!(quoted_safe.starts_with(r#""C:\Program Files\rtk & tools\rtk.exe" __cmd-run"#));
+}
+
+#[test]
+fn rewrite_enforces_the_full_8191_utf16_cmd_command_line_boundary() {
+    let cmd = Path::new(r"C:\Windows\System32\cmd.exe");
+    let rtk = Path::new(r"C:\xrtk.exe");
+    let at_limit = format!("dir {}", "x".repeat(4058));
+    let over_limit = format!("dir {}", "x".repeat(4059));
+
+    let rewritten =
+        super::orchestrator::rewrite_expression_for_command_line(&at_limit, rtk, cmd, true);
+    assert_ne!(
+        rewritten, at_limit,
+        "the fully encoded standard argument command line is exactly 8191 UTF-16 units"
+    );
     assert_eq!(
-        expression,
-        "\"C:\\Program Files\\Windows\\cmd.exe\" /D /S /V:ON /C !RTK_CMD_ARG_0! !RTK_CMD_ARG_1!"
+        super::orchestrator::rewrite_expression_for_command_line(&over_limit, rtk, cmd, true),
+        over_limit,
+        "one more source byte expands to two hex units and must fail open"
+    );
+
+    let non_ascii = format!("dir {}", "界".repeat(1400));
+    assert_eq!(
+        super::orchestrator::rewrite_expression_for_command_line(&non_ascii, rtk, cmd, true),
+        non_ascii,
+        "UTF-8 source bytes become ASCII hex before the UTF-16 command-line check"
     );
 }
 

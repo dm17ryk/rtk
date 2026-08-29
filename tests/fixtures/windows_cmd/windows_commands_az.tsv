@@ -48,7 +48,7 @@ clean	diskpart	subcommand-only
 cleanmgr	cleanmgr	desktop-external
 clip	clip	desktop-external
 cls	cls	cmd-builtin
-cmd	cmd	cmd-builtin
+cmd	cmd	desktop-external
 cmdkey	cmdkey	desktop-external
 cmstp	cmstp	desktop-external
 color	color	cmd-builtin

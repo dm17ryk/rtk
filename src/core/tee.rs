@@ -317,6 +317,10 @@ impl LosslessTeeReservation {
         format_hint(&self.committed_path)
     }
 
+    fn cmd_hint(&self) -> String {
+        format_cmd_hint(&self.committed_path)
+    }
+
     /// Keep the complete artifact once the caller has selected compact output.
     fn commit_path_locked(&mut self) -> Option<PathBuf> {
         std::fs::rename(&self.pending_path, &self.committed_path).ok()?;
@@ -365,6 +369,7 @@ impl LosslessTeeReservation {
         self.commit_with_lock(hint).map(|commit| commit.output)
     }
 
+    #[cfg(test)]
     fn commit_display(self, filtered: &str) -> Option<LosslessTeeCommit> {
         let hint = self.hint();
         self.commit_with_lock(format!("{filtered}\r\n{hint}\r\n"))
@@ -382,6 +387,7 @@ impl Drop for LosslessTeeReservation {
 /// Commit a recovery artifact only when the compact display, its exact hint,
 /// and its final CRLF are still cheaper than native output. Returning `None`
 /// drops the reservation and removes its unselected artifact.
+#[cfg(test)]
 pub fn commit_lossless_if_better(
     raw: &str,
     filtered: &str,
@@ -392,6 +398,21 @@ pub fn commit_lossless_if_better(
         return None;
     }
     reservation.commit_display(filtered)
+}
+
+/// Commit a complete recovery artifact with a hint that can be pasted into
+/// CMD directly. Other adapters retain the shell-neutral recovery hint.
+pub fn commit_lossless_if_better_for_cmd(
+    raw: &str,
+    filtered: &str,
+    reservation: LosslessTeeReservation,
+) -> Option<LosslessTeeCommit> {
+    let hint = reservation.cmd_hint();
+    let shown = format!("{filtered}\r\n{hint}\r\n");
+    if crate::core::guard::never_worse(raw, &shown) == raw {
+        return None;
+    }
+    reservation.commit_with_lock(shown)
 }
 
 /// Reserve a complete recovery artifact. Unlike the normal tee path, this
@@ -546,6 +567,22 @@ fn display_shell_path(path: &std::path::Path) -> String {
 
 fn format_hint(path: &std::path::Path) -> String {
     format!("[full output: {}]", display_shell_path(path))
+}
+
+fn format_cmd_hint(path: &std::path::Path) -> String {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|directory| directory.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let escaped = absolute
+        .to_string_lossy()
+        .replace('^', "^^")
+        .replace('%', "^%")
+        .replace('!', "^!");
+    format!("[full output: type \"{escaped}\"]")
 }
 
 /// Convenience: tee + format hint in one call.
@@ -942,6 +979,25 @@ mod tests {
             "the recovery hint makes this compact output worse than native raw output"
         );
         assert!(fs::read_dir(tmpdir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn cmd_lossless_recovery_hint_is_a_directly_usable_absolute_type_command() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let raw = "native output\r\n".repeat(80);
+        let reservation = reserve_lossless_tee_file(&raw, "cmd-dir", tmpdir.path(), 4096, 2)
+            .expect("reservation");
+        let commit = commit_lossless_if_better_for_cmd(&raw, "[dir] summary", reservation)
+            .expect("compact display should win");
+        let shown = std::str::from_utf8(commit.as_bytes()).unwrap();
+
+        assert!(shown.contains("[full output: type \""), "{shown}");
+        assert!(
+            shown.contains(&tmpdir.path().display().to_string()),
+            "{shown}"
+        );
+        assert!(!shown.contains("$HOME"), "{shown}");
+        assert!(!shown.contains("cat "), "{shown}");
     }
 
     #[test]

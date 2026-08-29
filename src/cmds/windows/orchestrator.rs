@@ -9,6 +9,9 @@ use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static HIDDEN_TRANSPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 enum SegmentStdout {
     Native(Vec<u8>),
@@ -53,6 +56,7 @@ fn observe_test_lossless_publication(stdout: &SegmentStdout) {
 
 /// Internal subcommand used from a rewritten CMD segment.
 pub const SEGMENT_RUNNER: &str = "__cmd-run";
+const CMD_COMMAND_LINE_UTF16_LIMIT: usize = 8191;
 
 /// The execution shape selected before starting `cmd.exe`.
 #[derive(Debug, PartialEq, Eq)]
@@ -61,9 +65,12 @@ pub enum Invocation {
     Passthrough(Vec<OsString>),
     /// Invoke a one-shot expression using the hardened default switches.
     Execute(String),
-    /// Invoke independently supplied arguments through environment transport,
-    /// enabling delayed expansion only in a nested execution command.
-    Transport {
+    /// Invoke a CMD-safe expression reconstructed from independent arguments.
+    Reconstructed(String),
+    /// Carry argument data that cannot be reconstructed as CMD source through
+    /// delayed expansion, capture it in non-environment FOR variables, then
+    /// clear the transport keys before the requested command starts.
+    HiddenTransport {
         expression: String,
         environment: Vec<(OsString, OsString)>,
     },
@@ -99,7 +106,7 @@ fn recognize_command_in(name: &str, catalog: &[BuiltinCommand]) -> CommandRecogn
 }
 
 /// Classify public `rtk cmd` arguments without losing a single raw expression.
-pub fn prepare_invocation(args: &[OsString], cmd_executable: &Path) -> Result<Invocation> {
+pub fn prepare_invocation(args: &[OsString], _cmd_executable: &Path) -> Result<Invocation> {
     if args.is_empty() {
         return Ok(Invocation::Passthrough(Vec::new()));
     }
@@ -127,43 +134,131 @@ pub fn prepare_invocation(args: &[OsString], cmd_executable: &Path) -> Result<In
         return Ok(Invocation::Execute(String::new()));
     }
 
+    let echo_arguments = expression_args
+        .first()
+        .is_some_and(|command| command.eq_ignore_ascii_case("echo"));
+    let needs_hidden_transport = expression_args.iter().enumerate().any(|(index, argument)| {
+        argument.contains(['\r', '\n'])
+            || index > 0
+                && !echo_arguments
+                && argument.contains('"')
+                && argument.chars().any(char::is_whitespace)
+    });
+
     let invocation = if expression_args.len() == 1 {
         Invocation::Execute(expression_args[0].clone())
+    } else if needs_hidden_transport {
+        prepare_hidden_transport(expression_args)?
     } else {
-        let environment = expression_args
-            .iter()
-            .enumerate()
-            .map(|(index, argument)| {
-                (
-                    OsString::from(format!("RTK_CMD_ARG_{index}")),
-                    OsString::from(argument),
-                )
-            })
-            .collect::<Vec<_>>();
         let expression = expression_args
             .iter()
             .enumerate()
-            .map(|(index, argument)| {
-                if argument.is_empty() {
-                    "\"\"".to_owned()
-                } else {
-                    format!("!RTK_CMD_ARG_{index}!")
-                }
-            })
-            .collect::<Vec<_>>()
+            .map(|(index, argument)| escape_cmd_argument(argument, index > 0 && echo_arguments))
+            .collect::<Result<Vec<_>>>()?
             .join(" ");
-        Invocation::Transport {
-            // The outer CMD parses this line with its default delayed expansion
-            // disabled. The nested CMD enables it only after the literal
-            // `!RTK_CMD_ARG_n!` tokens have crossed that parser boundary.
-            expression: format!(
-                "{} /D /S /V:ON /C {expression}",
-                quote_cmd_path(&cmd_executable.to_string_lossy())
-            ),
-            environment,
-        }
+        Invocation::Reconstructed(expression)
     };
     Ok(invocation)
+}
+
+fn prepare_hidden_transport(arguments: &[String]) -> Result<Invocation> {
+    prepare_hidden_transport_with_key_check(arguments, |key| std::env::var_os(key).is_some())
+}
+
+pub(crate) fn prepare_hidden_transport_with_key_check<F>(
+    arguments: &[String],
+    mut key_is_taken: F,
+) -> Result<Invocation>
+where
+    F: FnMut(&str) -> bool,
+{
+    const FOR_VARIABLES: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    if arguments.len() > FOR_VARIABLES.len() {
+        bail!("too many CMD arguments for line-break transport");
+    }
+
+    let keys = loop {
+        let sequence = HIDDEN_TRANSPORT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let namespace = format!("RTK_INTERNAL_CMD_{}_{sequence}", std::process::id());
+        let keys = (0..arguments.len())
+            .map(|index| format!("{namespace}_ARG_{index}"))
+            .collect::<Vec<_>>();
+        if keys.iter().all(|key| !key_is_taken(key)) {
+            break keys;
+        }
+    };
+
+    let mut environment = Vec::new();
+    let mut for_prefix = String::new();
+    let mut clear = Vec::new();
+    let mut command = Vec::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        if argument.is_empty() {
+            command.push("\"\"".to_owned());
+            continue;
+        }
+        let key = &keys[index];
+        let variable = FOR_VARIABLES[index] as char;
+        for_prefix.push_str(&format!("for %{variable} in (\"!{key}!\") do @"));
+        clear.push(format!("set \"{key}=\""));
+        command.push(format!("%~{variable}"));
+        environment.push((OsString::from(key), OsString::from(argument)));
+    }
+    let expression = format!("{for_prefix}{} & {}", clear.join(" & "), command.join(" "));
+    Ok(Invocation::HiddenTransport {
+        expression,
+        environment,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn prepare_line_break_transport_with_key_check<F>(
+    arguments: &[String],
+    key_is_taken: F,
+) -> Result<Invocation>
+where
+    F: FnMut(&str) -> bool,
+{
+    prepare_hidden_transport_with_key_check(arguments, key_is_taken)
+}
+
+/// Reconstruct one independently supplied argument as inert CMD data. Caret
+/// escaping keeps metacharacters, quotes, expansion markers, and whitespace
+/// in the argument that supplied them instead of turning them into syntax.
+fn escape_cmd_argument(argument: &str, echo_data: bool) -> Result<String> {
+    if argument.is_empty() {
+        // Preserve an empty echo operand as the two literal quote characters
+        // that native `cmd /C echo ""` emits.
+        return Ok(if echo_data {
+            "^\"^\"".to_owned()
+        } else {
+            "\"\"".to_owned()
+        });
+    }
+    if argument.chars().any(char::is_whitespace) && !echo_data {
+        if argument.contains('"') {
+            bail!("CMD cannot safely reconstruct a quoted argument that also contains whitespace");
+        }
+        let mut quoted = String::with_capacity(argument.len() + 2);
+        quoted.push('"');
+        for character in argument.chars() {
+            if matches!(character, '%' | '!') {
+                quoted.push('^');
+            }
+            quoted.push(character);
+        }
+        quoted.push('"');
+        return Ok(quoted);
+    }
+
+    let mut escaped = String::with_capacity(argument.len());
+    for character in argument.chars() {
+        if character.is_whitespace() || "\"&|<>^()%!".contains(character) {
+            escaped.push('^');
+        }
+        escaped.push(character);
+    }
+    Ok(escaped)
 }
 
 /// Rewrite only cataloged, stateless query segments. Any opaque parser result
@@ -175,12 +270,33 @@ pub fn rewrite_expression(source: &str, rtk_executable: &Path) -> String {
 
 /// Rewrite only when stdout is attached to a terminal. Redirected or piped
 /// output is machine-consumed data and therefore retains the exact CMD path.
+#[cfg(test)]
 pub fn rewrite_expression_for_terminal(
     source: &str,
     rtk_executable: &Path,
     stdout_is_terminal: bool,
 ) -> String {
+    rewrite_expression_for_command_line(
+        source,
+        rtk_executable,
+        Path::new("cmd.exe"),
+        stdout_is_terminal,
+    )
+}
+
+pub(crate) fn rewrite_expression_for_command_line(
+    source: &str,
+    rtk_executable: &Path,
+    cmd_executable: &Path,
+    stdout_is_terminal: bool,
+) -> String {
     if !stdout_is_terminal {
+        return source.to_owned();
+    }
+    let Some(rtk_path) = rtk_executable.to_str() else {
+        return source.to_owned();
+    };
+    if !cmd_interpolation_path_is_safe(rtk_path) {
         return source.to_owned();
     }
     let parsed = parse_expression(source);
@@ -227,28 +343,38 @@ pub fn rewrite_expression_for_terminal(
         let at_prefix = if original.starts_with('@') { "@" } else { "" };
         let replacement = format!(
             "{at_prefix}{} {SEGMENT_RUNNER} --hex {}",
-            quote_cmd_path(&rtk_executable.to_string_lossy()),
+            quote_cmd_path(rtk_path),
             hex_encode(original.as_bytes())
         );
         rewritten.replace_range(segment.span.start..segment.span.end, &replacement);
     }
-    rewritten
+    if rewritten != source
+        && cmd_command_line_utf16_len(cmd_executable, &rewritten) > CMD_COMMAND_LINE_UTF16_LIMIT
+    {
+        source.to_owned()
+    } else {
+        rewritten
+    }
 }
 
 /// Run the public route. This path intentionally does not track the compound
-/// expression: hidden runners are the sole future accounting boundary.
+/// expression: only hidden runners that actually filter output record savings.
 pub fn run(args: &[OsString]) -> Result<i32> {
     if !cfg!(windows) {
         bail!("rtk cmd is only supported on Windows 10 and 11");
     }
     let cmd_executable = resolve_cmd_executable()?;
     match prepare_invocation(args, &cmd_executable)? {
-        Invocation::Passthrough(arguments) => execute_cmd(&cmd_executable, &arguments, &[]),
+        Invocation::Passthrough(arguments) => execute_cmd(&cmd_executable, &arguments),
         Invocation::Execute(source) => {
             let executable =
                 std::env::current_exe().context("Failed to resolve the current RTK executable")?;
-            let expression =
-                rewrite_expression_for_terminal(&source, &executable, io::stdout().is_terminal());
+            let expression = rewrite_expression_for_command_line(
+                &source,
+                &executable,
+                &cmd_executable,
+                io::stdout().is_terminal(),
+            );
             execute_cmd(
                 &cmd_executable,
                 &[
@@ -257,22 +383,23 @@ pub fn run(args: &[OsString]) -> Result<i32> {
                     OsString::from("/C"),
                     OsString::from(expression),
                 ],
-                &[],
             )
         }
-        Invocation::Transport {
+        Invocation::Reconstructed(source) => {
+            let executable =
+                std::env::current_exe().context("Failed to resolve the current RTK executable")?;
+            let expression = rewrite_expression_for_command_line(
+                &source,
+                &executable,
+                &cmd_executable,
+                io::stdout().is_terminal(),
+            );
+            execute_cmd_expression(&cmd_executable, &expression)
+        }
+        Invocation::HiddenTransport {
             expression,
             environment,
-        } => execute_cmd(
-            &cmd_executable,
-            &[
-                OsString::from("/D"),
-                OsString::from("/S"),
-                OsString::from("/C"),
-                OsString::from(expression),
-            ],
-            &environment,
-        ),
+        } => execute_hidden_transport(&cmd_executable, &expression, &environment),
     }
 }
 
@@ -281,6 +408,7 @@ pub fn run_segment(encoded: &str) -> Result<i32> {
     if !cfg!(windows) {
         bail!("rtk cmd is only supported on Windows 10 and 11");
     }
+    let timer = crate::core::tracking::TimedExecution::start();
     let bytes = hex_decode(encoded)?;
     let source = String::from_utf8(bytes).context("Invalid UTF-8 CMD segment")?;
     let cmd_executable = resolve_cmd_executable()?;
@@ -293,8 +421,14 @@ pub fn run_segment(encoded: &str) -> Result<i32> {
     let stdout = if output.status.success() {
         render_segment_stdout(&source, &output.stdout)
     } else {
-        SegmentStdout::Native(output.stdout)
+        SegmentStdout::Native(output.stdout.clone())
     };
+    if let SegmentStdout::Lossless(commit) = &stdout {
+        if let Ok(raw) = std::str::from_utf8(&output.stdout) {
+            let shown = std::str::from_utf8(commit.as_bytes()).unwrap_or_default();
+            timer.track(&source, "rtk cmd (filtered segment)", raw, shown);
+        }
+    }
     io::stdout()
         .write_all(stdout.as_bytes())
         .context("Failed to write CMD stdout")?;
@@ -332,7 +466,7 @@ fn render_segment_stdout(source: &str, stdout: &[u8]) -> SegmentStdout {
     let Some(reservation) = crate::core::tee::reserve_lossless_tee(raw, &label) else {
         return SegmentStdout::Native(stdout.to_vec());
     };
-    crate::core::tee::commit_lossless_if_better(raw, &filtered, reservation).map_or_else(
+    crate::core::tee::commit_lossless_if_better_for_cmd(raw, &filtered, reservation).map_or_else(
         || SegmentStdout::Native(stdout.to_vec()),
         SegmentStdout::Lossless,
     )
@@ -365,16 +499,47 @@ fn resolve_cmd_executable() -> Result<std::path::PathBuf> {
     crate::core::utils::resolve_binary("cmd.exe").context("Failed to resolve cmd.exe from PATH")
 }
 
-fn execute_cmd(
-    cmd_executable: &Path,
-    arguments: &[OsString],
-    environment: &[(OsString, OsString)],
-) -> Result<i32> {
+fn execute_cmd(cmd_executable: &Path, arguments: &[OsString]) -> Result<i32> {
     let status = Command::new(cmd_executable)
         .args(arguments)
-        .envs(environment.iter().map(|(key, value)| (key, value)))
         .status()
         .context("Failed to execute cmd.exe")?;
+    Ok(crate::core::utils::exit_code_from_status(&status, "cmd"))
+}
+
+fn execute_cmd_expression(cmd_executable: &Path, expression: &str) -> Result<i32> {
+    let mut command = Command::new(cmd_executable);
+    command.args(["/D", "/S", "/C"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.raw_arg(expression);
+    }
+    #[cfg(not(windows))]
+    command.arg(expression);
+
+    let status = command.status().context("Failed to execute cmd.exe")?;
+    Ok(crate::core::utils::exit_code_from_status(&status, "cmd"))
+}
+
+fn execute_hidden_transport(
+    cmd_executable: &Path,
+    expression: &str,
+    environment: &[(OsString, OsString)],
+) -> Result<i32> {
+    let mut command = Command::new(cmd_executable);
+    command
+        .args(["/D", "/S", "/V:ON", "/C"])
+        .envs(environment.iter().map(|(key, value)| (key, value)));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.raw_arg(expression);
+    }
+    #[cfg(not(windows))]
+    command.arg(expression);
+
+    let status = command.status().context("Failed to execute cmd.exe")?;
     Ok(crate::core::utils::exit_code_from_status(&status, "cmd"))
 }
 
@@ -386,6 +551,50 @@ fn quote_cmd_path(path: &str) -> String {
         return path.to_owned();
     }
     format!("\"{}\"", path.replace('"', "^\""))
+}
+
+fn cmd_interpolation_path_is_safe(path: &str) -> bool {
+    !path
+        .chars()
+        .any(|character| matches!(character, '%' | '!' | '"' | '\r' | '\n'))
+}
+
+fn cmd_command_line_utf16_len(cmd_executable: &Path, expression: &str) -> usize {
+    let prefix = format!(
+        "{} /D /S /C ",
+        quote_cmd_path(&cmd_executable.to_string_lossy())
+    );
+    prefix.encode_utf16().count() + windows_encoded_argument_utf16_len(expression)
+}
+
+/// `Command::arg` uses the Windows C-runtime quoting convention. Count the
+/// encoded expression, including its surrounding quotes and quote-adjacent
+/// backslash expansion, before asking CMD to accept the rewritten line.
+fn windows_encoded_argument_utf16_len(argument: &str) -> usize {
+    let needs_quotes = argument.is_empty()
+        || argument
+            .chars()
+            .any(|character| character.is_whitespace() || character == '"');
+    if !needs_quotes {
+        return argument.encode_utf16().count();
+    }
+
+    let mut length = 2usize;
+    let mut backslashes = 0usize;
+    for character in argument.chars() {
+        match character {
+            '\\' => backslashes += 1,
+            '"' => {
+                length += backslashes * 2 + 2;
+                backslashes = 0;
+            }
+            _ => {
+                length += backslashes + character.len_utf16();
+                backslashes = 0;
+            }
+        }
+    }
+    length + backslashes * 2
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

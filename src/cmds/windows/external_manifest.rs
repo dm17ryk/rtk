@@ -117,7 +117,7 @@ pub const OFFICIAL_SOURCE_RAW_SHA256: &str =
 pub const OFFICIAL_SOURCE_ENTRY_COUNT: usize = 339;
 #[cfg(test)]
 pub const OFFICIAL_SOURCE_FIXTURE_SHA256: &str =
-    "d46109ef38c01e9e022fa21393782df2c75a2e2f986b298b48d9471fed80347a";
+    "b5923b7a56ae1524664b117d972b05f253096568f892860afd234f3a3c3b19a1";
 const SOURCE: Provenance = Provenance::MicrosoftWindowsCommandsAz20250729;
 const fn release(status: VersionStatus, presence: Presence) -> ReleaseSupport {
     ReleaseSupport { status, presence }
@@ -161,7 +161,7 @@ const QMUTSM: CommandModes = QMUT
     .union(CommandModes::MACHINE);
 const ANY: CommandModes = CommandModes::CONSERVATIVE_ANY;
 macro_rules! documented {($($n:literal),* ; $($extra:expr),* $(,)?)=>{&[$(x!($n,D,ANY),)* $($extra),*]}}
-pub static EXTERNAL_COMMANDS: &[ExternalCommand] = documented!("arp","attrib","auditpol","autochk","bcdboot","bdehdcfg","bitsadmin","cacls","certreq","chkdsk","chkntfs","choice","cipher","cleanmgr","clip","cmdkey","cmstp","comp","compact","convert","cscript","defrag","diantz","diskcomp","diskcopy","diskpart","diskperf","diskshadow","dispdiag","doskey","driverquery","eventcreate","expand","fc","find","findstr","fondue","forfiles","format","fsutil","ftp","fveupdate","getmac","gpresult","gpupdate","hostname","icacls","klist","label","lodctr","logman","logoff","makecab","manage-bde","mmc","mode","more","mountvol","msg","msiexec","msinfo32","mstsc","nbtstat","netcfg","netsh","netstat","nslookup","openfiles","perfmon","pktmon","pnputil","powershell","powershell_ise","print","rdpsign","recover","regini","regsvr32","relog","replace","robocopy","rpcping","rundll32","rwinsta","schtasks","secedit","setspn","setx","sfc","shadow","shutdown","sort","subst","sxstrace","systeminfo","takeown","taskkill","tasklist","timeout","tpmtool","tpmvscmgr","tracerpt","tree","tscon","tsdiscon","tskill","typeperf","tzutil","unlodctr","verifier","vssadmin","waitfor","wbadmin","wecutil","where","whoami","winrs","winsat","wscript","xcopy";
+pub static EXTERNAL_COMMANDS: &[ExternalCommand] = documented!("arp","attrib","auditpol","autochk","bcdboot","bdehdcfg","bitsadmin","cacls","certreq","chkdsk","chkntfs","choice","cipher","cleanmgr","clip","cmd","cmdkey","cmstp","comp","compact","convert","cscript","defrag","diantz","diskcomp","diskcopy","diskpart","diskperf","diskshadow","dispdiag","doskey","driverquery","eventcreate","expand","fc","find","findstr","fondue","forfiles","format","fsutil","ftp","fveupdate","getmac","gpresult","gpupdate","hostname","icacls","klist","label","lodctr","logman","logoff","makecab","manage-bde","mmc","mode","more","mountvol","msg","msiexec","msinfo32","mstsc","nbtstat","netcfg","netsh","netstat","nslookup","openfiles","perfmon","pktmon","pnputil","powershell","powershell_ise","print","rdpsign","recover","regini","regsvr32","relog","replace","robocopy","rpcping","rundll32","rwinsta","schtasks","secedit","setspn","setx","sfc","shadow","shutdown","sort","subst","sxstrace","systeminfo","takeown","taskkill","tasklist","timeout","tpmtool","tpmvscmgr","tracerpt","tree","tscon","tsdiscon","tskill","typeperf","tzutil","unlodctr","verifier","vssadmin","waitfor","wbadmin","wecutil","where","whoami","winrs","winsat","wscript","xcopy";
  x!("change",["chglogon","chgport","chgusr"],D,Q),x!("query",["qappsrv","qprocess","quser","qwinsta"],D,Q),
  x!("ipconfig",D,QM),x!("ping",D,QM),x!("pathping",D,QM),x!("tracert",D,QM),
  x!("net",D,ANY),x!("sc",D,ANY),x!("route",D,ANY),
@@ -282,10 +282,17 @@ pub fn validate_external_manifest_rows(
         if !s.insert(r.source_name.to_ascii_lowercase()) {
             return Err(format!("duplicate {}", r.source_name));
         }
-        if matches!(
-            r.disposition,
-            CatalogDisposition::CmdBuiltin | CatalogDisposition::SubcommandOnly
-        ) {
+        if r.disposition == CatalogDisposition::CmdBuiltin {
+            if !builtins
+                .iter()
+                .any(|builtin| builtin.matches(r.normalized_name))
+            {
+                return Err(format!(
+                    "{} must resolve to an actual CMD builtin: {}",
+                    r.source_name, r.normalized_name
+                ));
+            }
+        } else if r.disposition == CatalogDisposition::SubcommandOnly {
             let target = r.normalized_name;
             let resolves_to_builtin = builtins.iter().any(|builtin| builtin.matches(target));
             let resolves_to_external = external_commands.iter().any(|external| {

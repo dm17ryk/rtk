@@ -41,7 +41,7 @@ pub fn is_display_form(adapter: &str, source: &str) -> bool {
 fn is_display_form_adapter(adapter: DisplayAdapter, source: &str) -> bool {
     let arguments = source_arguments(source);
     match adapter {
-        DisplayAdapter::Dir => !dir_has_bare_format_switch(arguments),
+        DisplayAdapter::Dir => dir_uses_supported_detailed_layout(arguments),
         DisplayAdapter::Set => {
             !arguments.contains('=')
                 && !arguments.starts_with("/a")
@@ -54,9 +54,10 @@ fn is_display_form_adapter(adapter: DisplayAdapter, source: &str) -> bool {
     }
 }
 
-/// CMD accepts combined switches such as `/s/b` and `/a-d/b`. Inspect only
-/// unquoted switch tokens, so a quoted path containing `/b` stays a path.
-fn dir_has_bare_format_switch(arguments: &str) -> bool {
+/// Admit only switches whose native output retains the detailed layout parsed
+/// by `filter_dir`. CMD accepts combined forms such as `/s/a-d/o:n`; quoted
+/// path tokens are never interpreted as switches here.
+fn dir_uses_supported_detailed_layout(arguments: &str) -> bool {
     let mut in_quotes = false;
     let mut token_start = None;
     for (index, character) in arguments.char_indices() {
@@ -66,24 +67,75 @@ fn dir_has_bare_format_switch(arguments: &str) -> bool {
         }
         if !in_quotes && character.is_whitespace() {
             if let Some(start) = token_start.take() {
-                if dir_switch_token_has_bare_format(&arguments[start..index]) {
-                    return true;
+                if !dir_switch_token_is_supported(&arguments[start..index]) {
+                    return false;
                 }
             }
         } else if !in_quotes && token_start.is_none() {
             token_start = Some(index);
         }
     }
-    token_start.is_some_and(|start| dir_switch_token_has_bare_format(&arguments[start..]))
+    token_start.is_none_or(|start| dir_switch_token_is_supported(&arguments[start..]))
 }
 
-fn dir_switch_token_has_bare_format(token: &str) -> bool {
+fn dir_switch_token_is_supported(token: &str) -> bool {
     let token = normalize_cmd_caret_escapes(token);
-    token.strip_prefix('/').is_some_and(|switches| {
-        switches
-            .split('/')
-            .any(|switch| switch.eq_ignore_ascii_case("b"))
-    })
+    let Some(switches) = token.strip_prefix('/') else {
+        return true;
+    };
+    switches.split('/').all(dir_switch_is_supported)
+}
+
+fn dir_switch_is_supported(switch: &str) -> bool {
+    let mut characters = switch.chars();
+    let Some(kind) = characters.next() else {
+        return false;
+    };
+    let suffix = characters.as_str();
+    match kind.to_ascii_uppercase() {
+        'A' => dir_switch_list_is_supported(suffix, "DRAHSILO"),
+        'O' => dir_switch_list_is_supported(suffix, "NEGSDA"),
+        'T' => dir_time_switch_is_supported(suffix),
+        'C' | 'L' | 'N' | 'S' | '4' => suffix.is_empty(),
+        '-' => suffix.eq_ignore_ascii_case("c"),
+        _ => false,
+    }
+}
+
+fn dir_switch_list_is_supported(suffix: &str, allowed: &str) -> bool {
+    if suffix.is_empty() {
+        return true;
+    }
+    let value = suffix.strip_prefix(':').unwrap_or(suffix);
+    if value.is_empty() {
+        return false;
+    }
+    let mut previous_was_minus = false;
+    for character in value.chars() {
+        if character == '-' {
+            if previous_was_minus {
+                return false;
+            }
+            previous_was_minus = true;
+        } else if allowed.contains(character.to_ascii_uppercase()) {
+            previous_was_minus = false;
+        } else {
+            return false;
+        }
+    }
+    !previous_was_minus
+}
+
+fn dir_time_switch_is_supported(suffix: &str) -> bool {
+    if suffix.is_empty() {
+        return true;
+    }
+    let value = suffix.strip_prefix(':').unwrap_or(suffix);
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| "CAW".contains(character.to_ascii_uppercase()))
+        && characters.next().is_none()
 }
 
 /// CMD removes a caret when it quotes the following metacharacter before DIR

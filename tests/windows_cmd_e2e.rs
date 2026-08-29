@@ -1,6 +1,7 @@
 #![cfg(windows)]
 
 use std::fs;
+use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -145,18 +146,25 @@ fn multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_comm
         !injected.exists(),
         "embedded metacharacters must stay data, not execute a redirected command"
     );
+
+    let nested_payload = "nested \"quoted\" value";
+    let nested = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["cmd", "cmd.exe", "/D", "/C", "echo", nested_payload])
+        .output()
+        .expect("nested CMD should start");
+    assert!(nested.status.success());
+    assert_eq!(nested.stdout, format!("{nested_payload}\r\n").as_bytes());
 }
 
 #[test]
 fn multi_argument_empty_and_bang_values_match_default_cmd_semantics() {
-    let empty_native = native_cmd(r#"echo """#);
     let empty_rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
         .args(["cmd", "echo", ""])
         .output()
         .expect("rtk cmd should start");
-    assert_eq!(empty_rtk.status.code(), empty_native.status.code());
-    assert_eq!(empty_rtk.stdout, empty_native.stdout);
-    assert_eq!(empty_rtk.stderr, empty_native.stderr);
+    assert!(empty_rtk.status.success());
+    assert_eq!(empty_rtk.stdout, b"\"\"\r\n");
+    assert!(empty_rtk.stderr.is_empty());
 
     let bang_native = native_cmd("echo !RTK_CMD_UNSET!");
     let bang_rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
@@ -166,6 +174,41 @@ fn multi_argument_empty_and_bang_values_match_default_cmd_semantics() {
     assert_eq!(bang_rtk.status.code(), bang_native.status.code());
     assert_eq!(bang_rtk.stdout, bang_native.stdout);
     assert_eq!(bang_rtk.stderr, bang_native.stderr);
+}
+
+#[test]
+fn multi_argument_commands_do_not_expose_transport_environment_variables() {
+    let prefix_native = native_cmd("set RTK_CMD_ARG_");
+    let prefix_rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["cmd", "set", "RTK_CMD_ARG_"])
+        .output()
+        .expect("rtk cmd should start");
+    assert_eq!(prefix_rtk.status.code(), prefix_native.status.code());
+    assert_eq!(prefix_rtk.stdout, prefix_native.stdout);
+    assert_eq!(prefix_rtk.stderr, prefix_native.stderr);
+
+    let bare_native = native_cmd("cmd.exe /D /C set");
+    let bare_rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["cmd", "cmd.exe", "/D", "/C", "set"])
+        .output()
+        .expect("rtk cmd should start");
+    assert_eq!(bare_rtk.status.code(), bare_native.status.code());
+    assert_eq!(bare_rtk.stdout, bare_native.stdout);
+    assert_eq!(bare_rtk.stderr, bare_native.stderr);
+    assert!(!String::from_utf8_lossy(&bare_rtk.stdout).contains("RTK_CMD_ARG_"));
+
+    let hidden_native = native_cmd("cmd.exe /D /C set\r\n");
+    let hidden_rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["cmd", "cmd.exe", "/D", "/C", "set\r\n"])
+        .output()
+        .expect("rtk cmd line-break transport should start");
+    assert_eq!(hidden_rtk.status.code(), hidden_native.status.code());
+    assert_eq!(hidden_rtk.stdout, hidden_native.stdout);
+    assert_eq!(hidden_rtk.stderr, hidden_native.stderr);
+    assert!(
+        !String::from_utf8_lossy(&hidden_rtk.stdout).contains("RTK_INTERNAL_CMD_"),
+        "line-break transport must clear every hidden key before the target starts"
+    );
 }
 
 #[test]
@@ -204,6 +247,17 @@ fn multi_argument_percent_and_crlf_payloads_remain_data() {
     assert!(
         !crlf_injected.exists(),
         "CR/LF payload must not create a redirected marker"
+    );
+
+    let quoted_crlf_payload = "first \"quoted\" line\r\nsecond line";
+    let quoted_crlf_output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["cmd", "echo", quoted_crlf_payload])
+        .output()
+        .expect("rtk cmd should start");
+    assert!(quoted_crlf_output.status.success());
+    assert_eq!(
+        quoted_crlf_output.stdout,
+        format!("{quoted_crlf_payload}\r\n").as_bytes()
     );
 }
 
@@ -286,6 +340,27 @@ fn machine_consumed_builtin_output_is_native_even_for_structured_display_command
         directory.path().display()
     ));
     assert_dir_parity(&format!("dir /a:-d /o:n \"{}\"", spaced.display()));
+    let mut native_multiarg_command = Command::new("cmd.exe");
+    native_multiarg_command
+        .args(["/D", "/S", "/C"])
+        .raw_arg(format!("dir \"{}\"", spaced.display()));
+    let native_multiarg_dir = native_multiarg_command
+        .output()
+        .expect("native cmd.exe should start");
+    let captured_multiarg_dir = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["cmd", "dir", spaced.to_str().unwrap()])
+        .output()
+        .expect("rtk cmd should start");
+    assert_eq!(
+        captured_multiarg_dir.status.code(),
+        native_multiarg_dir.status.code()
+    );
+    assert_eq!(
+        dir_stdout_without_live_free_space(&captured_multiarg_dir.stdout),
+        dir_stdout_without_live_free_space(&native_multiarg_dir.stdout),
+        "captured multi-argument DIR output must stay native"
+    );
+    assert_eq!(captured_multiarg_dir.stderr, native_multiarg_dir.stderr);
     assert_cmd_parity("help assoc");
     assert_cmd_parity("set RTK_CMD_MISSING_FILTER_PREFIX");
     assert_cmd_parity("assoc .rtk_missing_extension");
@@ -320,7 +395,35 @@ fn hidden_cmd_runner_keeps_caret_escaped_dir_b_native() {
             .expect("hidden cmd runner should start");
 
         assert_eq!(hidden.status.code(), native.status.code(), "{source}");
-        assert_eq!(hidden.stdout, native.stdout, "{source}");
+        assert_eq!(
+            dir_stdout_without_live_free_space(&hidden.stdout),
+            dir_stdout_without_live_free_space(&native.stdout),
+            "{source}"
+        );
+        assert_eq!(hidden.stderr, native.stderr, "{source}");
+    }
+}
+
+#[test]
+fn alternate_and_interactive_dir_layouts_stay_native_in_the_hidden_runner() {
+    let directory = tempdir().unwrap();
+    fs::write(directory.path().join("visible.txt"), "payload").unwrap();
+    fs::create_dir(directory.path().join("nested")).unwrap();
+
+    for switches in ["/p", "/q", "/x", "/w", "/d", "/r", "/s/q", "/s^/x"] {
+        let source = format!("dir {switches} {}", directory.path().display());
+        let native = native_cmd(&source);
+        let hidden = Command::new(env!("CARGO_BIN_EXE_rtk"))
+            .args(["__cmd-run", "--hex", &hex_encode(source.as_bytes())])
+            .output()
+            .expect("hidden cmd runner should start");
+
+        assert_eq!(hidden.status.code(), native.status.code(), "{source}");
+        assert_eq!(
+            dir_stdout_without_live_free_space(&hidden.stdout),
+            dir_stdout_without_live_free_space(&native.stdout),
+            "{source}"
+        );
         assert_eq!(hidden.stderr, native.stderr, "{source}");
     }
 }
@@ -336,7 +439,10 @@ fn hidden_cmd_runner_filters_with_complete_lossless_tee_and_native_result_metada
         "[tee]\nenabled = true\nmode = \"always\"\nmax_files = 2\nmax_file_size = 1048576\n",
     )
     .unwrap();
-    let tee_dir = directory.path().join("tee");
+    let tee_dir = directory
+        .path()
+        .join("tee ^ %TEMP% !RTK_HINT_EXPAND! spaces");
+    let tracking_db = directory.path().join("history.db");
     let environment = (0..32)
         .map(|index| {
             (
@@ -356,6 +462,7 @@ fn hidden_cmd_runner_filters_with_complete_lossless_tee_and_native_result_metada
         .args(["__cmd-run", "--hex", &hex_encode(source.as_bytes())])
         .env("APPDATA", &appdata)
         .env("RTK_TEE_DIR", &tee_dir)
+        .env("RTK_DB_PATH", &tracking_db)
         .envs(environment.iter().map(|(key, value)| (key, value)))
         .output()
         .expect("hidden cmd runner should start");
@@ -376,6 +483,19 @@ fn hidden_cmd_runner_filters_with_complete_lossless_tee_and_native_result_metada
         "filtered output must not introduce bare LF"
     );
 
+    let tracking = rusqlite::Connection::open(&tracking_db).expect("tracking database");
+    let filtered_records: i64 = tracking
+        .query_row(
+            "SELECT COUNT(*) FROM commands WHERE rtk_cmd = 'rtk cmd (filtered segment)'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("filtered segment count");
+    assert_eq!(
+        filtered_records, 1,
+        "only the hidden filtered segment is tracked"
+    );
+
     let artifacts = fs::read_dir(&tee_dir)
         .unwrap()
         .filter_map(|entry| entry.ok())
@@ -394,6 +514,25 @@ fn hidden_cmd_runner_filters_with_complete_lossless_tee_and_native_result_metada
     let artifact = &artifacts[0];
     assert!(shown.contains(artifact.file_name().to_string_lossy().as_ref()));
     assert_eq!(fs::read(artifact.path()).unwrap(), native.stdout);
+
+    let hint = shown
+        .trim_end_matches("\r\n")
+        .strip_prefix(&shown[..shown.rfind("[full output: ").unwrap()])
+        .unwrap()
+        .strip_prefix("[full output: ")
+        .and_then(|value| value.strip_suffix(']'))
+        .expect("paste-ready CMD recovery hint");
+    let mut recovered_command = Command::new("cmd.exe");
+    recovered_command
+        .args(["/D", "/V:ON", "/S", "/C"])
+        .raw_arg(hint)
+        .env("TEMP", directory.path().join("expanded-temp"))
+        .env("RTK_HINT_EXPAND", "expanded-bang");
+    let recovered = recovered_command
+        .output()
+        .expect("recovery hint should start in CMD");
+    assert!(recovered.status.success(), "{hint}");
+    assert_eq!(recovered.stdout, native.stdout, "{hint}");
 }
 
 fn wait_for_test_file(directory: &Path, prefix: &str) -> std::path::PathBuf {
@@ -554,8 +693,7 @@ fn hidden_cmd_runner_serializes_lossless_tee_commits_between_processes() {
         assert!(
             observed_paths
                 .iter()
-                .any(|path| String::from_utf8_lossy(&output.stdout)
-                    .contains(&path.trim().replace('\\', "\\\\"))),
+                .any(|path| String::from_utf8_lossy(&output.stdout).contains(path.trim())),
             "each child returns a hint to the artifact it observed while holding the lock"
         );
     }

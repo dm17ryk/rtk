@@ -1,5 +1,5 @@
 //! Span-preserving parsing for CMD command expressions.
-#![allow(dead_code)] // Wired into `rtk cmd` by the subsequent orchestration task.
+#![allow(dead_code)] // The span model intentionally retains parser metadata for later adapters.
 
 /// A byte range in the original command expression.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
