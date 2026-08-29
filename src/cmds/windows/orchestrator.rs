@@ -208,9 +208,7 @@ fn prepare_hidden_transport_forced(arguments: &[String]) -> Result<Invocation> {
 }
 
 fn resolve_direct_external(arguments: &[String]) -> Option<std::path::PathBuf> {
-    let Some(command) = arguments.first() else {
-        return None;
-    };
+    let command = arguments.first()?;
     if builtins().iter().any(|entry| entry.matches(command))
         || command.eq_ignore_ascii_case("cmd")
         || command.eq_ignore_ascii_case("cmd.exe")
@@ -308,7 +306,7 @@ where
             ));
         }
         clear.push(format!("set \"{key}=\""));
-        command.push(if index == 0 || echo_data || (index > 0 && echo_data) {
+        command.push(if index == 0 || echo_data {
             format!("%~{variable}")
         } else {
             format!("%{variable}")
