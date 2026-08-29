@@ -379,6 +379,7 @@ impl LosslessTeeReservation {
 impl Drop for LosslessTeeReservation {
     fn drop(&mut self) {
         if !self.committed {
+            // nosemgrep: filesystem-deletion -- removes an uncommitted pending lossless tee artifact.
             let _ = std::fs::remove_file(&self.pending_path);
         }
     }
@@ -450,6 +451,7 @@ fn reserve_lossless_tee_file(
                         committed: false,
                     });
                 }
+                // nosemgrep: filesystem-deletion -- removes an incomplete pending tee artifact after a failed write.
                 let _ = std::fs::remove_file(pending_path);
                 return None;
             }

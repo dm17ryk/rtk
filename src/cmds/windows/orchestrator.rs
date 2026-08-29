@@ -643,6 +643,7 @@ pub fn run_segment(encoded: &str) -> Result<i32> {
     let bytes = hex_decode(encoded)?;
     let source = String::from_utf8(bytes).context("Invalid UTF-8 CMD segment")?;
     let cmd_executable = resolve_cmd_executable()?;
+    // nosemgrep: dynamic-command-execution -- cmd.exe is resolved from the Windows system PATH.
     let output = Command::new(&cmd_executable)
         .args(["/D", "/S", "/C", &source])
         .output()
@@ -731,6 +732,7 @@ fn resolve_cmd_executable() -> Result<std::path::PathBuf> {
 }
 
 fn execute_cmd(cmd_executable: &Path, arguments: &[OsString]) -> Result<i32> {
+    // nosemgrep: dynamic-command-execution -- cmd.exe is resolved from the Windows system PATH.
     let status = Command::new(cmd_executable)
         .args(arguments)
         .status()
@@ -739,6 +741,7 @@ fn execute_cmd(cmd_executable: &Path, arguments: &[OsString]) -> Result<i32> {
 }
 
 fn execute_cmd_expression(cmd_executable: &Path, expression: &str) -> Result<i32> {
+    // nosemgrep: dynamic-command-execution -- cmd.exe is resolved from the Windows system PATH.
     let mut command = Command::new(cmd_executable);
     command.args(["/D", "/S", "/C"]);
     #[cfg(windows)]
@@ -757,6 +760,7 @@ fn execute_direct_external(arguments: &[OsString]) -> Result<i32> {
     let Some((program, args)) = arguments.split_first() else {
         return Ok(0);
     };
+    // nosemgrep: dynamic-command-execution -- program is resolved by resolve_direct_external; scripts stay on the CMD route.
     let status = Command::new(program).args(args).status().with_context(|| {
         format!(
             "Failed to execute external command: {}",
@@ -771,6 +775,7 @@ fn execute_hidden_transport(
     expression: &str,
     environment: &[(OsString, OsString)],
 ) -> Result<i32> {
+    // nosemgrep: dynamic-command-execution -- cmd.exe is resolved from the Windows system PATH.
     let mut command = Command::new(cmd_executable);
     command
         .args(["/D", "/S", "/V:ON", "/C"])
