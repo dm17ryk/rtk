@@ -856,6 +856,14 @@ fn public_cmd_reconstruction_preserves_percent_and_hides_line_break_transport() 
 }
 
 #[test]
+fn public_cmd_reconstruction_keeps_literal_quotes_on_the_normal_route() {
+    assert_eq!(
+        prepare_invocation(&[OsString::from("python"), OsString::from(r#"{"a": 1}"#),]).unwrap(),
+        Invocation::Reconstructed(r#"python "{\"a\": 1}""#.to_owned())
+    );
+}
+
+#[test]
 fn hidden_line_break_transport_does_not_collide_with_user_environment() {
     let first_key = std::cell::RefCell::new(None);
     let result = super::orchestrator::prepare_line_break_transport_with_key_check(

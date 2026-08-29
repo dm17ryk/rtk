@@ -177,6 +177,46 @@ fn multi_argument_empty_and_bang_values_match_default_cmd_semantics() {
 }
 
 #[test]
+fn multi_argument_python_argv_matches_native_for_spaces_quotes_and_metacharacters() {
+    let directory = tempdir().unwrap();
+    let injected = directory.path().join("argv-injected.txt");
+    let code = "import json, sys; print(json.dumps(sys.argv[1:]))";
+    let rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args([
+            "cmd",
+            "python",
+            "-c",
+            code,
+            "hello world",
+            r#"{"a": 1}"#,
+            "",
+            "!RTK_CMD_UNSET!",
+            "100% complete",
+            &format!("safe & echo injected > {}", injected.display()),
+        ])
+        .output()
+        .expect("rtk cmd should start");
+
+    assert!(rtk.status.success());
+    let expected = serde_json::json!([
+        "hello world",
+        r#"{"a": 1}"#,
+        "",
+        "!RTK_CMD_UNSET!",
+        "100% complete",
+        format!("safe & echo injected > {}", injected.display()),
+    ]);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&rtk.stdout).unwrap(),
+        expected
+    );
+    assert!(
+        !injected.exists(),
+        "argv metacharacters must stay data, not execute a redirected command"
+    );
+}
+
+#[test]
 fn multi_argument_commands_do_not_expose_transport_environment_variables() {
     let prefix_native = native_cmd("set RTK_CMD_ARG_");
     let prefix_rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
@@ -258,6 +298,27 @@ fn multi_argument_percent_and_crlf_payloads_remain_data() {
     assert_eq!(
         quoted_crlf_output.stdout,
         format!("{quoted_crlf_payload}\r\n").as_bytes()
+    );
+}
+
+#[test]
+fn multi_argument_python_line_break_payload_executes_once_and_matches_native() {
+    let line_break = "first line\r\nsecond line with spaces & echo injected > marker.txt";
+    let code = "import json, sys; print(json.dumps(sys.argv[1:]))";
+    let rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["cmd", "python", "-c", code, line_break, "second arg"])
+        .output()
+        .expect("rtk cmd should start");
+
+    assert!(rtk.status.success());
+    let expected = serde_json::json!([line_break, "second arg"]);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&rtk.stdout).unwrap(),
+        expected
+    );
+    assert!(
+        !String::from_utf8_lossy(&rtk.stdout).contains("RTK_INTERNAL_CMD_"),
+        "line-break transport must clear every hidden key before the target starts"
     );
 }
 

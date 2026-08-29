@@ -137,13 +137,18 @@ pub fn prepare_invocation(args: &[OsString], _cmd_executable: &Path) -> Result<I
     let echo_arguments = expression_args
         .first()
         .is_some_and(|command| command.eq_ignore_ascii_case("echo"));
-    let needs_hidden_transport = expression_args.iter().enumerate().any(|(index, argument)| {
-        argument.contains(['\r', '\n'])
-            || index > 0
-                && !echo_arguments
-                && argument.contains('"')
-                && argument.chars().any(char::is_whitespace)
+    let cmd_host = expression_args.first().is_some_and(|command| {
+        command.eq_ignore_ascii_case("cmd") || command.eq_ignore_ascii_case("cmd.exe")
     });
+    // Newlines cannot be represented in a CMD source expression without
+    // changing its command boundaries, so carry those values through the
+    // delayed-expansion transport. Ordinary quoted arguments are safe to
+    // reconstruct below (literal quotes use the Windows argv escape form),
+    // and must not take the FOR path where embedded quotes can change its
+    // iteration cardinality.
+    let needs_hidden_transport = expression_args
+        .iter()
+        .any(|argument| argument.contains(['\r', '\n']));
 
     let invocation = if expression_args.len() == 1 {
         Invocation::Execute(expression_args[0].clone())
@@ -153,7 +158,9 @@ pub fn prepare_invocation(args: &[OsString], _cmd_executable: &Path) -> Result<I
         let expression = expression_args
             .iter()
             .enumerate()
-            .map(|(index, argument)| escape_cmd_argument(argument, index > 0 && echo_arguments))
+            .map(|(index, argument)| {
+                escape_cmd_argument(argument, index > 0 && (echo_arguments || cmd_host))
+            })
             .collect::<Result<Vec<_>>>()?
             .join(" ");
         Invocation::Reconstructed(expression)
@@ -191,6 +198,12 @@ where
     let mut environment = Vec::new();
     let mut for_prefix = String::new();
     let mut clear = Vec::new();
+    let echo_data = arguments
+        .first()
+        .is_some_and(|command| command.eq_ignore_ascii_case("echo"));
+    let cmd_host = arguments.first().is_some_and(|command| {
+        command.eq_ignore_ascii_case("cmd") || command.eq_ignore_ascii_case("cmd.exe")
+    });
     let mut command = Vec::new();
     for (index, argument) in arguments.iter().enumerate() {
         if argument.is_empty() {
@@ -201,7 +214,18 @@ where
         let variable = FOR_VARIABLES[index] as char;
         for_prefix.push_str(&format!("for %{variable} in (\"!{key}!\") do @"));
         clear.push(format!("set \"{key}=\""));
-        command.push(format!("%~{variable}"));
+        // Keep the FOR capture quotes for external/command arguments. CMD
+        // strips those outer quotes when constructing the child argv, which
+        // preserves whitespace and prevents one value from becoming several
+        // command tokens. Echo is a display builtin, so it intentionally
+        // receives the unquoted value to retain native `echo` output.
+        command.push(if index > 0 && (echo_data || cmd_host) {
+            format!("%~{variable}")
+        } else if index == 0 {
+            format!("%~{variable}")
+        } else {
+            format!("%{variable}")
+        });
         environment.push((OsString::from(key), OsString::from(argument)));
     }
     let expression = format!("{for_prefix}{} & {}", clear.join(" & "), command.join(" "));
@@ -236,16 +260,27 @@ fn escape_cmd_argument(argument: &str, echo_data: bool) -> Result<String> {
         });
     }
     if argument.chars().any(char::is_whitespace) && !echo_data {
-        if argument.contains('"') {
-            bail!("CMD cannot safely reconstruct a quoted argument that also contains whitespace");
-        }
+        // CMD does not treat a backslash as a source-level escape, but the
+        // Windows argv parser does. Keep the enclosing quotes for whitespace
+        // and use `\"` for literal quotes; caret-escape CMD metacharacters so
+        // they cannot become operators when an embedded quote temporarily
+        // closes the enclosing pair.
         let mut quoted = String::with_capacity(argument.len() + 2);
+        let embedded_quote = argument.contains('"');
         quoted.push('"');
         for character in argument.chars() {
-            if matches!(character, '%' | '!') {
-                quoted.push('^');
+            match character {
+                '"' => quoted.push_str(r#"\""#),
+                '%' | '!' if echo_data => {
+                    quoted.push('^');
+                    quoted.push(character);
+                }
+                '&' | '|' | '<' | '>' | '^' | '(' | ')' if embedded_quote => {
+                    quoted.push('^');
+                    quoted.push(character);
+                }
+                _ => quoted.push(character),
             }
-            quoted.push(character);
         }
         quoted.push('"');
         return Ok(quoted);
@@ -253,10 +288,22 @@ fn escape_cmd_argument(argument: &str, echo_data: bool) -> Result<String> {
 
     let mut escaped = String::with_capacity(argument.len());
     for character in argument.chars() {
-        if character.is_whitespace() || "\"&|<>^()%!".contains(character) {
-            escaped.push('^');
+        match character {
+            // Outside a quoted argument, a backslash before a quote is the
+            // form understood by the child CRT argv parser and preserves the
+            // quote as data (for example JSON `{\"a\":1}`).
+            '"' if echo_data => escaped.push_str("^\""),
+            '"' => escaped.push_str(r#"\""#),
+            character
+                if character.is_whitespace()
+                    || "&|<>^()%".contains(character)
+                    || (echo_data && character == '!') =>
+            {
+                escaped.push('^');
+                escaped.push(character);
+            }
+            _ => escaped.push(character),
         }
-        escaped.push(character);
     }
     Ok(escaped)
 }
