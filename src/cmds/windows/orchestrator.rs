@@ -141,9 +141,9 @@ pub fn prepare_invocation(args: &[OsString], cmd_executable: &Path) -> Result<In
     let echo_arguments = expression_args
         .first()
         .is_some_and(|command| command.eq_ignore_ascii_case("echo"));
-    let cmd_host = expression_args.first().is_some_and(|command| {
-        command.eq_ignore_ascii_case("cmd") || command.eq_ignore_ascii_case("cmd.exe")
-    });
+    let cmd_host = expression_args
+        .first()
+        .is_some_and(|command| is_cmd_host_command(command));
     // A nested CMD performs a second, independent source parse after the
     // outer process has consumed any carets. Passing separately supplied
     // arguments through the platform argv encoder preserves their grouping
@@ -225,10 +225,7 @@ fn prepare_hidden_transport_forced(arguments: &[String]) -> Result<Invocation> {
 
 fn resolve_direct_external(arguments: &[String]) -> Option<std::path::PathBuf> {
     let command = arguments.first()?;
-    if builtins().iter().any(|entry| entry.matches(command))
-        || command.eq_ignore_ascii_case("cmd")
-        || command.eq_ignore_ascii_case("cmd.exe")
-    {
+    if builtins().iter().any(|entry| entry.matches(command)) || is_cmd_host_command(command) {
         return None;
     }
     let resolved = crate::core::utils::resolve_binary(command).ok()?;
@@ -240,6 +237,12 @@ fn resolve_direct_external(arguments: &[String]) -> Option<std::path::PathBuf> {
         return None;
     }
     Some(resolved)
+}
+
+fn is_cmd_host_command(command: &str) -> bool {
+    let command = command.trim_matches('"');
+    let basename = command.rsplit(['\\', '/']).next().unwrap_or(command);
+    basename.eq_ignore_ascii_case("cmd") || basename.eq_ignore_ascii_case("cmd.exe")
 }
 
 #[cfg(test)]
