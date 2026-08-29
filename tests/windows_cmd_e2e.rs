@@ -331,18 +331,12 @@ fn multi_argument_commands_do_not_expose_transport_environment_variables() {
     assert_eq!(bare_rtk.stderr, bare_native.stderr);
     assert!(!String::from_utf8_lossy(&bare_rtk.stdout).contains("RTK_CMD_ARG_"));
 
-    let hidden_native = native_cmd("cmd.exe /D /C set\r\n");
     let hidden_rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
         .args(["cmd", "cmd.exe", "/D", "/C", "set\r\n"])
         .output()
-        .expect("rtk cmd line-break transport should start");
-    assert_eq!(hidden_rtk.status.code(), hidden_native.status.code());
-    assert_eq!(hidden_rtk.stdout, hidden_native.stdout);
-    assert_eq!(hidden_rtk.stderr, hidden_native.stderr);
-    assert!(
-        !String::from_utf8_lossy(&hidden_rtk.stdout).contains("RTK_INTERNAL_CMD_"),
-        "line-break transport must clear every hidden key before the target starts"
-    );
+        .expect("rtk cmd nested syntax check should start");
+    assert!(!hidden_rtk.status.success());
+    assert!(String::from_utf8_lossy(&hidden_rtk.stderr).contains("one raw expression"));
 }
 
 #[test]
