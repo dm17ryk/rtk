@@ -894,7 +894,7 @@ fn hidden_line_break_transport_does_not_collide_with_user_environment() {
 #[test]
 fn hidden_transport_rejects_unsafe_nested_or_quoted_external_values() {
     assert!(prepare_invocation(&[
-        OsString::from("python"),
+        OsString::from("definitely-not-installed.exe"),
         OsString::from("first\r\n\"quoted\""),
     ])
     .is_err());
