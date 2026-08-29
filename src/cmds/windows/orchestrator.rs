@@ -145,9 +145,9 @@ pub fn prepare_invocation(args: &[OsString], cmd_executable: &Path) -> Result<In
         .first()
         .is_some_and(|command| is_cmd_host_command(command));
     // A nested CMD performs a second, independent source parse after the
-    // outer process has consumed any carets. Passing separately supplied
-    // arguments through the platform argv encoder preserves their grouping
-    // and keeps metacharacters from becoming operators in that second parse.
+    // outer process has consumed any carets. Syntax-free separately supplied
+    // arguments can use the platform argv encoder for grouping; syntax-bearing
+    // values fail closed instead of crossing that second parse as operators.
     if cmd_host && expression_args.len() > 1 {
         if expression_args
             .iter()
