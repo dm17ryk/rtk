@@ -371,11 +371,13 @@ RTK works fully on native Windows. Since **v0.37.2** the auto-rewrite hook runs 
 
 Use `rtk cmd` when you need to run a CMD expression while retaining CMD's own
 operator, exit-code, and state semantics. One argument is passed as raw CMD
-syntax; multiple arguments are reconstructed as one CMD-escaped
-expression, so quotes, expansion markers, whitespace, and metacharacters stay
-data rather than becoming a second command. Line-breaking values use an
-internal transport that is removed from the child environment before the
-requested command starts.
+syntax. Multiple arguments use a CMD-safe reconstruction for built-ins, while
+resolved native executables receive their original argument vector directly;
+nested `cmd.exe` hosts are passed through the platform argument encoder so the
+inner parse cannot reinterpret metacharacters. Quotes, expansion markers,
+whitespace, and metacharacters therefore remain data rather than becoming a
+second command. Line-breaking values use an internal transport that is removed
+from the child environment before the requested command starts.
 
 ```powershell
 rtk cmd "echo %CD% & dir /b"

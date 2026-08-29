@@ -110,7 +110,7 @@ fn recognize_command_in(name: &str, catalog: &[BuiltinCommand]) -> CommandRecogn
 }
 
 /// Classify public `rtk cmd` arguments without losing a single raw expression.
-pub fn prepare_invocation(args: &[OsString], _cmd_executable: &Path) -> Result<Invocation> {
+pub fn prepare_invocation(args: &[OsString], cmd_executable: &Path) -> Result<Invocation> {
     if args.is_empty() {
         return Ok(Invocation::Passthrough(Vec::new()));
     }
@@ -144,20 +144,13 @@ pub fn prepare_invocation(args: &[OsString], _cmd_executable: &Path) -> Result<I
     let cmd_host = expression_args.first().is_some_and(|command| {
         command.eq_ignore_ascii_case("cmd") || command.eq_ignore_ascii_case("cmd.exe")
     });
-    let nested_source_index = cmd_host
-        .then(|| {
-            expression_args
-                .iter()
-                .position(|argument| argument.eq_ignore_ascii_case("/c"))
-                .filter(|index| {
-                    expression_args.get(index + 1).is_some_and(|command| {
-                        let name = command.split_whitespace().next().unwrap_or(command);
-                        builtins().iter().any(|entry| entry.matches(name))
-                    })
-                })
-                .map(|index| index + 1)
-        })
-        .flatten();
+    // A nested CMD performs a second, independent source parse after the
+    // outer process has consumed any carets. Passing separately supplied
+    // arguments through the platform argv encoder preserves their grouping
+    // and keeps metacharacters from becoming operators in that second parse.
+    if cmd_host && expression_args.len() > 1 {
+        return Ok(Invocation::Passthrough(args.to_vec()));
+    }
     // Newlines cannot be represented in a CMD source expression without
     // changing its command boundaries, so carry those values through the
     // delayed-expansion transport. Ordinary quoted arguments are safe to
@@ -176,20 +169,29 @@ pub fn prepare_invocation(args: &[OsString], _cmd_executable: &Path) -> Result<I
         direct.extend(expression_args.iter().skip(1).map(OsString::from));
         Invocation::Direct(direct)
     } else if needs_hidden_transport {
-        prepare_hidden_transport(expression_args)?
+        let mut hidden = prepare_hidden_transport(expression_args)?;
+        if let Invocation::HiddenTransport { expression, .. } = &hidden {
+            if hidden_transport_command_line_utf16_len(cmd_executable, expression)
+                > CMD_COMMAND_LINE_UTF16_LIMIT
+            {
+                hidden = prepare_hidden_transport_forced(expression_args)?;
+            }
+        }
+        if let Invocation::HiddenTransport { expression, .. } = &hidden {
+            if hidden_transport_command_line_utf16_len(cmd_executable, expression)
+                > CMD_COMMAND_LINE_UTF16_LIMIT
+            {
+                bail!(
+                    "CMD hidden transport exceeds the 8191 UTF-16 command-line limit; shorten the arguments or pass one raw expression"
+                );
+            }
+        }
+        hidden
     } else {
         let expression = expression_args
             .iter()
             .enumerate()
-            .map(|(index, argument)| {
-                escape_cmd_argument(
-                    argument,
-                    index > 0
-                        && (echo_arguments
-                            || nested_source_index
-                                .is_some_and(|source_index| index >= source_index)),
-                )
-            })
+            .map(|(index, argument)| escape_cmd_argument(argument, index > 0 && echo_arguments))
             .collect::<Result<Vec<_>>>()?
             .join(" ");
         Invocation::Reconstructed(expression)
@@ -198,7 +200,11 @@ pub fn prepare_invocation(args: &[OsString], _cmd_executable: &Path) -> Result<I
 }
 
 fn prepare_hidden_transport(arguments: &[String]) -> Result<Invocation> {
-    prepare_hidden_transport_with_key_check(arguments, |key| std::env::var_os(key).is_some())
+    prepare_hidden_transport_with_options(arguments, |key| std::env::var_os(key).is_some(), false)
+}
+
+fn prepare_hidden_transport_forced(arguments: &[String]) -> Result<Invocation> {
+    prepare_hidden_transport_with_options(arguments, |key| std::env::var_os(key).is_some(), true)
 }
 
 fn resolve_direct_external(arguments: &[String]) -> Option<std::path::PathBuf> {
@@ -222,9 +228,21 @@ fn resolve_direct_external(arguments: &[String]) -> Option<std::path::PathBuf> {
     Some(resolved)
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_hidden_transport_with_key_check<F>(
     arguments: &[String],
+    key_is_taken: F,
+) -> Result<Invocation>
+where
+    F: FnMut(&str) -> bool,
+{
+    prepare_hidden_transport_with_options(arguments, key_is_taken, false)
+}
+
+fn prepare_hidden_transport_with_options<F>(
+    arguments: &[String],
     mut key_is_taken: F,
+    force_transport: bool,
 ) -> Result<Invocation>
 where
     F: FnMut(&str) -> bool,
@@ -247,30 +265,13 @@ where
     let echo_data = arguments
         .first()
         .is_some_and(|command| command.eq_ignore_ascii_case("echo"));
-    let cmd_host = arguments.first().is_some_and(|command| {
-        command.eq_ignore_ascii_case("cmd") || command.eq_ignore_ascii_case("cmd.exe")
-    });
-    let nested_source_index = cmd_host
-        .then(|| {
-            arguments
-                .iter()
-                .position(|argument| argument.eq_ignore_ascii_case("/c"))
-                .filter(|index| {
-                    arguments.get(index + 1).is_some_and(|command| {
-                        let name = command.split_whitespace().next().unwrap_or(command);
-                        builtins().iter().any(|entry| entry.matches(name))
-                    })
-                })
-                .map(|index| index + 1)
-        })
-        .flatten();
     let mut command = Vec::new();
     let mut transported = Vec::new();
     for (index, argument) in arguments.iter().enumerate() {
-        let source_data = index > 0
-            && (echo_data || nested_source_index.is_some_and(|source_index| index >= source_index));
-        let needs_transport =
-            argument.contains(['\r', '\n']) || (!source_data && argument.contains('%'));
+        let source_data = index > 0 && echo_data;
+        let needs_transport = (force_transport && index > 0)
+            || argument.contains(['\r', '\n'])
+            || (!source_data && argument.contains('%'));
         transported.push(needs_transport);
     }
     let transport_count = transported.iter().filter(|transport| **transport).count();
@@ -284,14 +285,12 @@ where
             continue;
         }
         if !transported[index] {
-            let source_data = index > 0
-                && (echo_data
-                    || nested_source_index.is_some_and(|source_index| index >= source_index));
+            let source_data = index > 0 && echo_data;
             command.push(escape_cmd_argument(argument, source_data)?);
             continue;
         }
-        if !source_data_is_safe_for_transport(arguments, index, echo_data, nested_source_index) {
-            bail!("CMD line-break transport cannot safely carry quoted external arguments");
+        if !source_data_is_safe_for_transport(arguments, index, echo_data) {
+            bail!("CMD hidden transport cannot safely carry quoted external arguments");
         }
         let key = &keys[variable_index];
         let variable = FOR_VARIABLES[variable_index] as char;
@@ -309,27 +308,21 @@ where
             ));
         }
         clear.push(format!("set \"{key}=\""));
-        command.push(
-            if index == 0
-                || echo_data
-                || nested_source_index.is_some_and(|source_index| index >= source_index)
-            {
-                format!("%~{variable}")
-            } else {
-                format!("%{variable}")
-            },
-        );
+        command.push(if index == 0 || echo_data || (index > 0 && echo_data) {
+            format!("%~{variable}")
+        } else {
+            format!("%{variable}")
+        });
         let encoded_argument = if percent_sentinel.is_empty() {
             argument.to_owned()
         } else {
             argument.replace('%', &percent_sentinel)
         };
-        let environment_value =
-            if !echo_data && nested_source_index.is_none_or(|source_index| index <= source_index) {
-                double_trailing_backslashes(&encoded_argument)
-            } else {
-                encoded_argument
-            };
+        let environment_value = if !echo_data {
+            double_trailing_backslashes(&encoded_argument)
+        } else {
+            encoded_argument
+        };
         environment.push((OsString::from(key), OsString::from(environment_value)));
     }
     let expression = format!("{for_prefix}{} & {}", clear.join(" & "), command.join(" "));
@@ -438,31 +431,14 @@ fn escape_cmd_argument(argument: &str, echo_data: bool) -> Result<String> {
     Ok(escaped)
 }
 
-fn source_data_is_safe_for_transport(
-    arguments: &[String],
-    index: usize,
-    echo_data: bool,
-    nested_source_index: Option<usize>,
-) -> bool {
+fn source_data_is_safe_for_transport(arguments: &[String], index: usize, echo_data: bool) -> bool {
     if arguments[index].contains(['\r', '\n']) && arguments[index].contains('"') {
         // Quotes alter the FOR capture grammar once delayed data is inserted;
         // rejecting this narrow shape keeps a malformed value from changing
         // the number of command executions.
         return false;
     }
-    let source_data = index > 0
-        && (echo_data || nested_source_index.is_some_and(|source_index| index >= source_index));
-    let nested_cmd = arguments.first().is_some_and(|command| {
-        command.eq_ignore_ascii_case("cmd") || command.eq_ignore_ascii_case("cmd.exe")
-    });
-    if nested_cmd && !source_data {
-        // A nested external command is itself encoded as the child CMD
-        // source after `/C`; line-spanning or delayed transport values would
-        // become a second source parse. Keep those shapes explicit and fail
-        // open instead of guessing at their boundaries.
-        return false;
-    }
-    source_data || index == 0 || !arguments[index].contains('"')
+    (index == 0 || echo_data) || !arguments[index].contains('"')
 }
 
 fn double_trailing_backslashes(argument: &str) -> String {
@@ -813,6 +789,14 @@ fn cmd_command_line_utf16_len(cmd_executable: &Path, expression: &str) -> usize 
         quote_cmd_path(&cmd_executable.to_string_lossy())
     );
     prefix.encode_utf16().count() + windows_encoded_argument_utf16_len(expression)
+}
+
+fn hidden_transport_command_line_utf16_len(cmd_executable: &Path, expression: &str) -> usize {
+    let prefix = format!(
+        "{} /D /S /V:ON /C ",
+        quote_cmd_path(&cmd_executable.to_string_lossy())
+    );
+    prefix.encode_utf16().count() + expression.encode_utf16().count()
 }
 
 /// `Command::arg` uses the Windows C-runtime quoting convention. Count the

@@ -152,8 +152,54 @@ fn multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_comm
         .args(["cmd", "cmd.exe", "/D", "/C", "echo", nested_payload])
         .output()
         .expect("nested CMD should start");
-    assert!(nested.status.success());
-    assert_eq!(nested.stdout, format!("{nested_payload}\r\n").as_bytes());
+    let native_nested = Command::new("cmd.exe")
+        .args(["/D", "/C", "echo", nested_payload])
+        .output()
+        .expect("native nested CMD should start");
+    assert_eq!(nested.status.code(), native_nested.status.code());
+    assert_eq!(nested.stdout, native_nested.stdout);
+    assert_eq!(nested.stderr, native_nested.stderr);
+
+    let nested_injected = directory.path().join("nested-must-not-exist.txt");
+    let nested_payload = format!("'safe & echo injected > {}'", nested_injected.display());
+    let nested = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["cmd", "cmd.exe", "/D", "/C", "echo", &nested_payload])
+        .output()
+        .expect("nested CMD should start");
+    let native_nested = Command::new("cmd.exe")
+        .args(["/D", "/C", "echo", &nested_payload])
+        .output()
+        .expect("native nested CMD should start");
+    assert_eq!(nested.status.code(), native_nested.status.code());
+    assert_eq!(nested.stdout, native_nested.stdout);
+    assert_eq!(nested.stderr, native_nested.stderr);
+    assert!(
+        !nested_injected.exists(),
+        "nested CMD metacharacters must remain data"
+    );
+
+    let nested_directory = directory.path().join("folder with spaces");
+    fs::create_dir(&nested_directory).unwrap();
+    let nested_file = nested_directory.join("nested.txt");
+    fs::write(&nested_file, "nested file payload\r\n").unwrap();
+    let nested = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args([
+            "cmd",
+            "cmd.exe",
+            "/D",
+            "/C",
+            "type",
+            nested_file.to_str().unwrap(),
+        ])
+        .output()
+        .expect("nested CMD should start");
+    let native_nested = Command::new("cmd.exe")
+        .args(["/D", "/C", "type", nested_file.to_str().unwrap()])
+        .output()
+        .expect("native nested CMD should start");
+    assert_eq!(nested.status.code(), native_nested.status.code());
+    assert_eq!(nested.stdout, native_nested.stdout);
+    assert_eq!(nested.stderr, native_nested.stderr);
 }
 
 #[test]
@@ -300,6 +346,19 @@ fn multi_argument_percent_and_crlf_payloads_remain_data() {
         .expect("rtk cmd should start");
     assert!(!quoted_crlf_output.status.success());
     assert!(String::from_utf8_lossy(&quoted_crlf_output.stderr).contains("cannot safely carry"));
+}
+
+#[test]
+fn hidden_transport_bounds_the_cmd_line_when_a_percent_operand_is_present() {
+    let long_operand = "x".repeat(8_050);
+    let native = native_cmd(&format!("dir %RTK_CMD_LITERAL% {long_operand}"));
+    let rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["cmd", "dir", "%RTK_CMD_LITERAL%", &long_operand])
+        .output()
+        .expect("rtk cmd should start");
+
+    assert_eq!(rtk.status.code(), native.status.code());
+    assert!(!String::from_utf8_lossy(&rtk.stderr).contains("command line is too long"));
 }
 
 #[test]

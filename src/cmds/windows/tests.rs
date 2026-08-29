@@ -805,6 +805,47 @@ fn public_cmd_normalizes_c_but_keeps_interactive_k_and_no_argument_sessions_nati
 }
 
 #[test]
+fn nested_cmd_arguments_are_passed_as_argv_to_preserve_the_inner_parse() {
+    let arguments = [
+        OsString::from("cmd.exe"),
+        OsString::from("/D"),
+        OsString::from("/C"),
+        OsString::from("echo"),
+        OsString::from("'safe & echo INJECTED'"),
+    ];
+
+    assert_eq!(
+        prepare_invocation(&arguments).unwrap(),
+        Invocation::Passthrough(arguments.to_vec())
+    );
+}
+
+#[test]
+fn hidden_transport_moves_long_operands_out_of_the_cmd_source() {
+    let long_operand = "x".repeat(8_050);
+    let Invocation::HiddenTransport {
+        expression,
+        environment,
+    } = prepare_invocation(&[
+        OsString::from("dir"),
+        OsString::from("%RTK_LITERAL%"),
+        OsString::from(long_operand.clone()),
+    ])
+    .unwrap()
+    else {
+        panic!("percent-bearing built-in arguments require hidden transport");
+    };
+
+    assert!(
+        expression.len() < 2_000,
+        "long operands must be transported, not interpolated"
+    );
+    assert!(environment
+        .iter()
+        .any(|(_, value)| value == &OsString::from(long_operand.as_str())));
+}
+
+#[test]
 fn public_cmd_reconstruction_escapes_quotes_and_cmd_metacharacters_as_data() {
     assert_eq!(
         prepare_invocation(&[
@@ -892,20 +933,23 @@ fn hidden_line_break_transport_does_not_collide_with_user_environment() {
 }
 
 #[test]
-fn hidden_transport_rejects_unsafe_nested_or_quoted_external_values() {
+fn hidden_transport_rejects_unsafe_quoted_external_values_and_nested_cmd_is_passthrough() {
     assert!(prepare_invocation(&[
         OsString::from("definitely-not-installed.exe"),
         OsString::from("first\r\n\"quoted\""),
     ])
     .is_err());
-    assert!(prepare_invocation(&[
+    let nested = [
         OsString::from("cmd.exe"),
         OsString::from("/D"),
         OsString::from("/C"),
         OsString::from("python"),
         OsString::from("first\r\nsecond"),
-    ])
-    .is_err());
+    ];
+    assert_eq!(
+        prepare_invocation(&nested).unwrap(),
+        Invocation::Passthrough(nested.to_vec())
+    );
 }
 
 #[test]
