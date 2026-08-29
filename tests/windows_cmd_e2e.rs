@@ -191,7 +191,9 @@ fn multi_argument_python_argv_matches_native_for_spaces_quotes_and_metacharacter
             r#"{"a": 1}"#,
             "",
             "!RTK_CMD_UNSET!",
-            "100% complete",
+            "%TEMP% value",
+            "a b\\",
+            "a\\\"b",
             &format!("safe & echo injected > {}", injected.display()),
         ])
         .output()
@@ -203,7 +205,9 @@ fn multi_argument_python_argv_matches_native_for_spaces_quotes_and_metacharacter
         r#"{"a": 1}"#,
         "",
         "!RTK_CMD_UNSET!",
-        "100% complete",
+        "%TEMP% value",
+        "a b\\",
+        "a\\\"b",
         format!("safe & echo injected > {}", injected.display()),
     ]);
     assert_eq!(
@@ -294,24 +298,30 @@ fn multi_argument_percent_and_crlf_payloads_remain_data() {
         .args(["cmd", "echo", quoted_crlf_payload])
         .output()
         .expect("rtk cmd should start");
-    assert!(quoted_crlf_output.status.success());
-    assert_eq!(
-        quoted_crlf_output.stdout,
-        format!("{quoted_crlf_payload}\r\n").as_bytes()
-    );
+    assert!(!quoted_crlf_output.status.success());
+    assert!(String::from_utf8_lossy(&quoted_crlf_output.stderr).contains("cannot safely carry"));
 }
 
 #[test]
 fn multi_argument_python_line_break_payload_executes_once_and_matches_native() {
     let line_break = "first line\r\nsecond line with spaces & echo injected > marker.txt";
+    let trailing_slash = "tail\r\nslash\\";
     let code = "import json, sys; print(json.dumps(sys.argv[1:]))";
     let rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
-        .args(["cmd", "python", "-c", code, line_break, "second arg"])
+        .args([
+            "cmd",
+            "python",
+            "-c",
+            code,
+            line_break,
+            "second arg",
+            trailing_slash,
+        ])
         .output()
         .expect("rtk cmd should start");
 
     assert!(rtk.status.success());
-    let expected = serde_json::json!([line_break, "second arg"]);
+    let expected = serde_json::json!([line_break, "second arg", trailing_slash]);
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&rtk.stdout).unwrap(),
         expected

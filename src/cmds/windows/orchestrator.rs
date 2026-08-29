@@ -65,6 +65,10 @@ pub enum Invocation {
     Passthrough(Vec<OsString>),
     /// Invoke a one-shot expression using the hardened default switches.
     Execute(String),
+    /// Invoke a resolved external executable with the original argument
+    /// vector. This is the lossless route for multi-argument calls whose
+    /// quoting cannot be represented safely as CMD source.
+    Direct(Vec<OsString>),
     /// Invoke a CMD-safe expression reconstructed from independent arguments.
     Reconstructed(String),
     /// Carry argument data that cannot be reconstructed as CMD source through
@@ -140,18 +144,34 @@ pub fn prepare_invocation(args: &[OsString], _cmd_executable: &Path) -> Result<I
     let cmd_host = expression_args.first().is_some_and(|command| {
         command.eq_ignore_ascii_case("cmd") || command.eq_ignore_ascii_case("cmd.exe")
     });
+    let nested_source_index = cmd_host
+        .then(|| {
+            expression_args
+                .iter()
+                .position(|argument| argument.eq_ignore_ascii_case("/c"))
+                .filter(|index| {
+                    expression_args.get(index + 1).is_some_and(|command| {
+                        let name = command.split_whitespace().next().unwrap_or(command);
+                        builtins().iter().any(|entry| entry.matches(name))
+                    })
+                })
+                .map(|index| index + 1)
+        })
+        .flatten();
     // Newlines cannot be represented in a CMD source expression without
     // changing its command boundaries, so carry those values through the
     // delayed-expansion transport. Ordinary quoted arguments are safe to
     // reconstruct below (literal quotes use the Windows argv escape form),
     // and must not take the FOR path where embedded quotes can change its
     // iteration cardinality.
-    let needs_hidden_transport = expression_args
-        .iter()
-        .any(|argument| argument.contains(['\r', '\n']));
+    let needs_hidden_transport = expression_args.iter().any(|argument| {
+        argument.contains(['\r', '\n']) || (!echo_arguments && argument.contains('%'))
+    });
 
     let invocation = if expression_args.len() == 1 {
         Invocation::Execute(expression_args[0].clone())
+    } else if should_direct_external(expression_args) {
+        Invocation::Direct(expression_args.iter().map(OsString::from).collect())
     } else if needs_hidden_transport {
         prepare_hidden_transport(expression_args)?
     } else {
@@ -159,7 +179,13 @@ pub fn prepare_invocation(args: &[OsString], _cmd_executable: &Path) -> Result<I
             .iter()
             .enumerate()
             .map(|(index, argument)| {
-                escape_cmd_argument(argument, index > 0 && (echo_arguments || cmd_host))
+                escape_cmd_argument(
+                    argument,
+                    index > 0
+                        && (echo_arguments
+                            || nested_source_index
+                                .is_some_and(|source_index| index >= source_index)),
+                )
             })
             .collect::<Result<Vec<_>>>()?
             .join(" ");
@@ -172,6 +198,26 @@ fn prepare_hidden_transport(arguments: &[String]) -> Result<Invocation> {
     prepare_hidden_transport_with_key_check(arguments, |key| std::env::var_os(key).is_some())
 }
 
+fn should_direct_external(arguments: &[String]) -> bool {
+    let Some(command) = arguments.first() else {
+        return false;
+    };
+    if builtins().iter().any(|entry| entry.matches(command))
+        || command.eq_ignore_ascii_case("cmd")
+        || command.eq_ignore_ascii_case("cmd.exe")
+    {
+        return false;
+    }
+    let extension = Path::new(command)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase());
+    if matches!(extension.as_deref(), Some("bat" | "cmd")) {
+        return false;
+    }
+    crate::core::utils::resolve_binary(command).is_ok()
+}
+
 pub(crate) fn prepare_hidden_transport_with_key_check<F>(
     arguments: &[String],
     mut key_is_taken: F,
@@ -180,10 +226,6 @@ where
     F: FnMut(&str) -> bool,
 {
     const FOR_VARIABLES: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    if arguments.len() > FOR_VARIABLES.len() {
-        bail!("too many CMD arguments for line-break transport");
-    }
-
     let keys = loop {
         let sequence = HIDDEN_TRANSPORT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let namespace = format!("RTK_INTERNAL_CMD_{}_{sequence}", std::process::id());
@@ -204,29 +246,87 @@ where
     let cmd_host = arguments.first().is_some_and(|command| {
         command.eq_ignore_ascii_case("cmd") || command.eq_ignore_ascii_case("cmd.exe")
     });
+    let nested_source_index = cmd_host
+        .then(|| {
+            arguments
+                .iter()
+                .position(|argument| argument.eq_ignore_ascii_case("/c"))
+                .filter(|index| {
+                    arguments.get(index + 1).is_some_and(|command| {
+                        let name = command.split_whitespace().next().unwrap_or(command);
+                        builtins().iter().any(|entry| entry.matches(name))
+                    })
+                })
+                .map(|index| index + 1)
+        })
+        .flatten();
     let mut command = Vec::new();
+    let mut transported = Vec::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        let source_data = index > 0
+            && (echo_data || nested_source_index.is_some_and(|source_index| index >= source_index));
+        let needs_transport =
+            argument.contains(['\r', '\n']) || (!source_data && argument.contains('%'));
+        transported.push(needs_transport);
+    }
+    let transport_count = transported.iter().filter(|transport| **transport).count();
+    if transport_count > FOR_VARIABLES.len() {
+        bail!("too many CMD arguments for line-break transport");
+    }
+    let mut variable_index = 0usize;
     for (index, argument) in arguments.iter().enumerate() {
         if argument.is_empty() {
             command.push("\"\"".to_owned());
             continue;
         }
-        let key = &keys[index];
-        let variable = FOR_VARIABLES[index] as char;
-        for_prefix.push_str(&format!("for %{variable} in (\"!{key}!\") do @"));
-        clear.push(format!("set \"{key}=\""));
-        // Keep the FOR capture quotes for external/command arguments. CMD
-        // strips those outer quotes when constructing the child argv, which
-        // preserves whitespace and prevents one value from becoming several
-        // command tokens. Echo is a display builtin, so it intentionally
-        // receives the unquoted value to retain native `echo` output.
-        command.push(if index > 0 && (echo_data || cmd_host) {
-            format!("%~{variable}")
-        } else if index == 0 {
-            format!("%~{variable}")
+        if !transported[index] {
+            let source_data = index > 0
+                && (echo_data
+                    || nested_source_index.is_some_and(|source_index| index >= source_index));
+            command.push(escape_cmd_argument(argument, source_data)?);
+            continue;
+        }
+        if !source_data_is_safe_for_transport(arguments, index, echo_data, nested_source_index) {
+            bail!("CMD line-break transport cannot safely carry quoted external arguments");
+        }
+        let key = &keys[variable_index];
+        let variable = FOR_VARIABLES[variable_index] as char;
+        variable_index += 1;
+        let percent_sentinel = if argument.contains('%') {
+            unique_percent_sentinel(argument, key)
         } else {
-            format!("%{variable}")
-        });
-        environment.push((OsString::from(key), OsString::from(argument)));
+            String::new()
+        };
+        if percent_sentinel.is_empty() {
+            for_prefix.push_str(&format!("for %{variable} in (\"!{key}!\") do @"));
+        } else {
+            for_prefix.push_str(&format!(
+                "for %{variable} in (\"!{key}:{percent_sentinel}=%!\") do @"
+            ));
+        }
+        clear.push(format!("set \"{key}=\""));
+        command.push(
+            if index == 0
+                || echo_data
+                || nested_source_index.is_some_and(|source_index| index >= source_index)
+            {
+                format!("%~{variable}")
+            } else {
+                format!("%{variable}")
+            },
+        );
+        let encoded_argument = if percent_sentinel.is_empty() {
+            argument.to_owned()
+        } else {
+            argument.replace('%', &percent_sentinel)
+        };
+        let environment_value =
+            if !echo_data && nested_source_index.is_none_or(|source_index| index <= source_index) {
+                double_trailing_backslashes(&encoded_argument)
+            } else {
+                encoded_argument
+            };
+        environment.push((OsString::from(key), OsString::from(environment_value)));
     }
     let expression = format!("{for_prefix}{} & {}", clear.join(" & "), command.join(" "));
     Ok(Invocation::HiddenTransport {
@@ -259,7 +359,7 @@ fn escape_cmd_argument(argument: &str, echo_data: bool) -> Result<String> {
             "\"\"".to_owned()
         });
     }
-    if argument.chars().any(char::is_whitespace) && !echo_data {
+    if !echo_data && (argument.chars().any(char::is_whitespace) || argument.contains('"')) {
         // CMD does not treat a backslash as a source-level escape, but the
         // Windows argv parser does. Keep the enclosing quotes for whitespace
         // and use `\"` for literal quotes; caret-escape CMD metacharacters so
@@ -268,44 +368,127 @@ fn escape_cmd_argument(argument: &str, echo_data: bool) -> Result<String> {
         let mut quoted = String::with_capacity(argument.len() + 2);
         let embedded_quote = argument.contains('"');
         quoted.push('"');
+        let mut backslashes = 0usize;
         for character in argument.chars() {
             match character {
-                '"' => quoted.push_str(r#"\""#),
-                '%' | '!' if echo_data => {
-                    quoted.push('^');
-                    quoted.push(character);
+                '\\' => backslashes += 1,
+                '"' => {
+                    quoted.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                    quoted.push('"');
+                    backslashes = 0;
                 }
                 '&' | '|' | '<' | '>' | '^' | '(' | ')' if embedded_quote => {
+                    quoted.extend(std::iter::repeat_n('\\', backslashes));
+                    backslashes = 0;
                     quoted.push('^');
                     quoted.push(character);
                 }
-                _ => quoted.push(character),
+                _ => {
+                    quoted.extend(std::iter::repeat_n('\\', backslashes));
+                    backslashes = 0;
+                    quoted.push(character);
+                }
             }
         }
+        quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
         quoted.push('"');
         return Ok(quoted);
     }
 
     let mut escaped = String::with_capacity(argument.len());
+    let mut backslashes = 0usize;
     for character in argument.chars() {
         match character {
+            '\\' => backslashes += 1,
             // Outside a quoted argument, a backslash before a quote is the
             // form understood by the child CRT argv parser and preserves the
             // quote as data (for example JSON `{\"a\":1}`).
-            '"' if echo_data => escaped.push_str("^\""),
-            '"' => escaped.push_str(r#"\""#),
+            '"' if echo_data => {
+                escaped.extend(std::iter::repeat_n('\\', backslashes));
+                backslashes = 0;
+                escaped.push_str("^\"");
+            }
+            '"' => {
+                escaped.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                backslashes = 0;
+                escaped.push('"');
+            }
             character
                 if character.is_whitespace()
                     || "&|<>^()%".contains(character)
                     || (echo_data && character == '!') =>
             {
+                escaped.extend(std::iter::repeat_n('\\', backslashes));
+                backslashes = 0;
                 escaped.push('^');
                 escaped.push(character);
             }
-            _ => escaped.push(character),
+            _ => {
+                escaped.extend(std::iter::repeat_n('\\', backslashes));
+                backslashes = 0;
+                escaped.push(character);
+            }
         }
     }
+    escaped.extend(std::iter::repeat_n('\\', backslashes));
     Ok(escaped)
+}
+
+fn source_data_is_safe_for_transport(
+    arguments: &[String],
+    index: usize,
+    echo_data: bool,
+    nested_source_index: Option<usize>,
+) -> bool {
+    if arguments[index].contains(['\r', '\n']) && arguments[index].contains('"') {
+        // Quotes alter the FOR capture grammar once delayed data is inserted;
+        // rejecting this narrow shape keeps a malformed value from changing
+        // the number of command executions.
+        return false;
+    }
+    let source_data = index > 0
+        && (echo_data || nested_source_index.is_some_and(|source_index| index >= source_index));
+    let nested_cmd = arguments.first().is_some_and(|command| {
+        command.eq_ignore_ascii_case("cmd") || command.eq_ignore_ascii_case("cmd.exe")
+    });
+    if nested_cmd && !source_data {
+        // A nested external command is itself encoded as the child CMD
+        // source after `/C`; line-spanning or delayed transport values would
+        // become a second source parse. Keep those shapes explicit and fail
+        // open instead of guessing at their boundaries.
+        return false;
+    }
+    source_data || index == 0 || !arguments[index].contains('"')
+}
+
+fn double_trailing_backslashes(argument: &str) -> String {
+    let trailing = argument
+        .chars()
+        .rev()
+        .take_while(|character| *character == '\\')
+        .count();
+    if trailing == 0 {
+        return argument.to_owned();
+    }
+    let mut escaped = String::with_capacity(argument.len() + trailing);
+    escaped.push_str(argument);
+    escaped.extend(std::iter::repeat_n('\\', trailing));
+    escaped
+}
+
+fn unique_percent_sentinel(argument: &str, key: &str) -> String {
+    let base = format!("__RTK_CMD_PERCENT_{key}__");
+    if !argument.contains(&base) {
+        return base;
+    }
+    let mut suffix = 0usize;
+    loop {
+        let candidate = format!("{base}{suffix}__");
+        if !argument.contains(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
 }
 
 /// Rewrite only cataloged, stateless query segments. Any opaque parser result
@@ -432,6 +615,7 @@ pub fn run(args: &[OsString]) -> Result<i32> {
                 ],
             )
         }
+        Invocation::Direct(arguments) => execute_direct_external(&arguments),
         Invocation::Reconstructed(source) => {
             let executable =
                 std::env::current_exe().context("Failed to resolve the current RTK executable")?;
@@ -566,6 +750,19 @@ fn execute_cmd_expression(cmd_executable: &Path, expression: &str) -> Result<i32
     command.arg(expression);
 
     let status = command.status().context("Failed to execute cmd.exe")?;
+    Ok(crate::core::utils::exit_code_from_status(&status, "cmd"))
+}
+
+fn execute_direct_external(arguments: &[OsString]) -> Result<i32> {
+    let Some((program, args)) = arguments.split_first() else {
+        return Ok(0);
+    };
+    let status = Command::new(program).args(args).status().with_context(|| {
+        format!(
+            "Failed to execute external command: {}",
+            program.to_string_lossy()
+        )
+    })?;
     Ok(crate::core::utils::exit_code_from_status(&status, "cmd"))
 }
 

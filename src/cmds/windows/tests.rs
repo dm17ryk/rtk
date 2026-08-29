@@ -858,8 +858,12 @@ fn public_cmd_reconstruction_preserves_percent_and_hides_line_break_transport() 
 #[test]
 fn public_cmd_reconstruction_keeps_literal_quotes_on_the_normal_route() {
     assert_eq!(
-        prepare_invocation(&[OsString::from("python"), OsString::from(r#"{"a": 1}"#),]).unwrap(),
-        Invocation::Reconstructed(r#"python "{\"a\": 1}""#.to_owned())
+        prepare_invocation(&[
+            OsString::from("definitely-not-installed.exe"),
+            OsString::from(r#"{"a": 1}"#),
+        ])
+        .unwrap(),
+        Invocation::Reconstructed(r#"definitely-not-installed.exe "{\"a\": 1}""#.to_owned())
     );
 }
 
@@ -885,6 +889,23 @@ fn hidden_line_break_transport_does_not_collide_with_user_environment() {
     assert!(environment
         .iter()
         .all(|(key, _)| Some(key.to_string_lossy().as_ref()) != first_key.borrow().as_deref()));
+}
+
+#[test]
+fn hidden_transport_rejects_unsafe_nested_or_quoted_external_values() {
+    assert!(prepare_invocation(&[
+        OsString::from("python"),
+        OsString::from("first\r\n\"quoted\""),
+    ])
+    .is_err());
+    assert!(prepare_invocation(&[
+        OsString::from("cmd.exe"),
+        OsString::from("/D"),
+        OsString::from("/C"),
+        OsString::from("python"),
+        OsString::from("first\r\nsecond"),
+    ])
+    .is_err());
 }
 
 #[test]
