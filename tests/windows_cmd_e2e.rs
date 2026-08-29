@@ -166,17 +166,36 @@ fn multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_comm
         .args(["cmd", "cmd.exe", "/D", "/C", "echo", &nested_payload])
         .output()
         .expect("nested CMD should start");
-    let native_nested = Command::new("cmd.exe")
-        .args(["/D", "/C", "echo", &nested_payload])
-        .output()
-        .expect("native nested CMD should start");
-    assert_eq!(nested.status.code(), native_nested.status.code());
-    assert_eq!(nested.stdout, native_nested.stdout);
-    assert_eq!(nested.stderr, native_nested.stderr);
+    assert!(!nested.status.success());
+    assert!(String::from_utf8_lossy(&nested.stderr).contains("one raw expression"));
     assert!(
         !nested_injected.exists(),
         "nested CMD metacharacters must remain data"
     );
+
+    for (index, operator) in ["&", "|", ">"].into_iter().enumerate() {
+        let marker = directory
+            .path()
+            .join(format!("nested-operator-{index}.txt"));
+        let nested = Command::new(env!("CARGO_BIN_EXE_rtk"))
+            .args([
+                "cmd",
+                "cmd.exe",
+                "/D",
+                "/C",
+                "echo",
+                operator,
+                "echo",
+                "injected",
+                ">",
+                marker.to_str().unwrap(),
+            ])
+            .output()
+            .expect("nested CMD should start");
+        assert!(!nested.status.success());
+        assert!(String::from_utf8_lossy(&nested.stderr).contains("one raw expression"));
+        assert!(!marker.exists(), "nested {operator:?} must not execute");
+    }
 
     let nested_directory = directory.path().join("folder with spaces");
     fs::create_dir(&nested_directory).unwrap();
@@ -200,6 +219,31 @@ fn multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_comm
     assert_eq!(nested.status.code(), native_nested.status.code());
     assert_eq!(nested.stdout, native_nested.stdout);
     assert_eq!(nested.stderr, native_nested.stderr);
+}
+
+#[test]
+#[ignore]
+fn probe_nested_double_caret_forms() {
+    for expression in [
+        r#"cmd.exe /D /C echo ^^&"#,
+        r#"cmd.exe /D /C echo ^^^&"#,
+        r#"cmd.exe /D /C echo ^^|"#,
+        r#"cmd.exe /D /C echo ^^^|"#,
+        r#"cmd.exe /D /C echo ^^>"#,
+        r#"cmd.exe /D /C echo ^^^>"#,
+        r#"cmd.exe /D /C echo nested^^ ^"quoted^^ ^"value"#,
+        r#"cmd.exe /D /C type C:\Program^^ Files\missing.txt"#,
+    ] {
+        let mut command = Command::new("cmd.exe");
+        command.args(["/D", "/S", "/C"]);
+        command.raw_arg(expression);
+        let output = command.output().expect("cmd should start");
+        eprintln!(
+            "{expression:?} => {:?} {:?}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
 }
 
 #[test]

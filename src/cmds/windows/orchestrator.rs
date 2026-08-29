@@ -149,6 +149,15 @@ pub fn prepare_invocation(args: &[OsString], cmd_executable: &Path) -> Result<In
     // arguments through the platform argv encoder preserves their grouping
     // and keeps metacharacters from becoming operators in that second parse.
     if cmd_host && expression_args.len() > 1 {
+        if expression_args
+            .iter()
+            .skip(1)
+            .any(|argument| argument.chars().any(is_nested_cmd_syntax))
+        {
+            bail!(
+                "nested CMD arguments containing CMD syntax require one raw expression; pass the complete command as a single quoted argument"
+            );
+        }
         return Ok(Invocation::Passthrough(args.to_vec()));
     }
     // Newlines cannot be represented in a CMD source expression without
@@ -197,6 +206,13 @@ pub fn prepare_invocation(args: &[OsString], cmd_executable: &Path) -> Result<In
         Invocation::Reconstructed(expression)
     };
     Ok(invocation)
+}
+
+fn is_nested_cmd_syntax(character: char) -> bool {
+    matches!(
+        character,
+        '&' | '|' | '<' | '>' | '^' | '(' | ')' | '%' | '!' | '\r' | '\n'
+    )
 }
 
 fn prepare_hidden_transport(arguments: &[String]) -> Result<Invocation> {

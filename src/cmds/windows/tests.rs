@@ -811,13 +811,30 @@ fn nested_cmd_arguments_are_passed_as_argv_to_preserve_the_inner_parse() {
         OsString::from("/D"),
         OsString::from("/C"),
         OsString::from("echo"),
-        OsString::from("'safe & echo INJECTED'"),
+        OsString::from("nested quoted value"),
     ];
 
     assert_eq!(
         prepare_invocation(&arguments).unwrap(),
         Invocation::Passthrough(arguments.to_vec())
     );
+}
+
+#[test]
+fn nested_cmd_metacharacter_arguments_fail_closed_before_the_second_parse() {
+    for metacharacter in ["&", "|", ">"] {
+        let result = prepare_invocation(&[
+            OsString::from("cmd.exe"),
+            OsString::from("/D"),
+            OsString::from("/C"),
+            OsString::from("echo"),
+            OsString::from(metacharacter),
+        ]);
+        assert!(
+            result.is_err(),
+            "nested {metacharacter:?} must not reach CMD"
+        );
+    }
 }
 
 #[test]
@@ -933,7 +950,7 @@ fn hidden_line_break_transport_does_not_collide_with_user_environment() {
 }
 
 #[test]
-fn hidden_transport_rejects_unsafe_quoted_external_values_and_nested_cmd_is_passthrough() {
+fn hidden_transport_rejects_unsafe_quoted_external_values_and_nested_cmd_syntax() {
     assert!(prepare_invocation(&[
         OsString::from("definitely-not-installed.exe"),
         OsString::from("first\r\n\"quoted\""),
@@ -946,10 +963,7 @@ fn hidden_transport_rejects_unsafe_quoted_external_values_and_nested_cmd_is_pass
         OsString::from("python"),
         OsString::from("first\r\nsecond"),
     ];
-    assert_eq!(
-        prepare_invocation(&nested).unwrap(),
-        Invocation::Passthrough(nested.to_vec())
-    );
+    assert!(prepare_invocation(&nested).is_err());
 }
 
 #[test]
