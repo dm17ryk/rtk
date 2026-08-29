@@ -151,7 +151,6 @@ pub fn prepare_invocation(args: &[OsString], cmd_executable: &Path) -> Result<In
     if cmd_host && expression_args.len() > 1 {
         if expression_args
             .iter()
-            .skip(1)
             .any(|argument| argument.chars().any(is_nested_cmd_syntax))
         {
             bail!(
@@ -241,7 +240,11 @@ fn resolve_direct_external(arguments: &[String]) -> Option<std::path::PathBuf> {
 
 fn is_cmd_host_command(command: &str) -> bool {
     let command = command.trim_matches('"');
-    let basename = command.rsplit(['\\', '/']).next().unwrap_or(command);
+    let basename = command
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(command)
+        .trim_end_matches(['.', ' ']);
     basename.eq_ignore_ascii_case("cmd") || basename.eq_ignore_ascii_case("cmd.exe")
 }
 

@@ -199,28 +199,34 @@ fn multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_comm
 
     let absolute_cmd =
         std::env::var_os("ComSpec").unwrap_or_else(|| "C:\\Windows\\System32\\cmd.exe".into());
-    let absolute_marker = directory.path().join("absolute-cmd-operator.txt");
-    let absolute = Command::new(env!("CARGO_BIN_EXE_rtk"))
-        .args([
-            "cmd",
-            absolute_cmd.to_str().unwrap(),
-            "/D",
-            "/C",
-            "echo",
-            "&",
-            "echo",
-            "injected",
-            ">",
-            absolute_marker.to_str().unwrap(),
-        ])
-        .output()
-        .expect("absolute nested CMD should start");
-    assert!(!absolute.status.success());
-    assert!(String::from_utf8_lossy(&absolute.stderr).contains("one raw expression"));
-    assert!(
-        !absolute_marker.exists(),
-        "absolute cmd.exe must not bypass syntax checks"
-    );
+    let absolute_cmd = absolute_cmd.to_string_lossy();
+    for (index, suffix) in ["", ".", " "].into_iter().enumerate() {
+        let spelled_cmd = format!("{absolute_cmd}{suffix}");
+        let absolute_marker = directory
+            .path()
+            .join(format!("absolute-cmd-operator-{index}.txt"));
+        let absolute = Command::new(env!("CARGO_BIN_EXE_rtk"))
+            .args([
+                "cmd",
+                &spelled_cmd,
+                "/D",
+                "/C",
+                "echo",
+                "&",
+                "echo",
+                "injected",
+                ">",
+                absolute_marker.to_str().unwrap(),
+            ])
+            .output()
+            .expect("absolute nested CMD should start");
+        assert!(!absolute.status.success());
+        assert!(String::from_utf8_lossy(&absolute.stderr).contains("one raw expression"));
+        assert!(
+            !absolute_marker.exists(),
+            "absolute cmd.exe must not bypass syntax checks"
+        );
+    }
 
     let nested_directory = directory.path().join("folder with spaces");
     fs::create_dir(&nested_directory).unwrap();
