@@ -870,6 +870,14 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Maven Daemon (mvnd) with compact output — same filters as `rtk mvn`
+    #[command(name = "mvnd")]
+    Mvnd {
+        /// Maven goals and arguments (e.g., clean install, -DskipTests test, -X)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Show hook rewrite audit metrics (requires RTK_HOOK_AUDIT=1)
     #[command(name = "hook-audit")]
     HookAudit {
@@ -2551,6 +2559,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Mvn { args } => mvn_cmd::run(&args, cli.verbose)?,
 
+        Commands::Mvnd { args } => mvn_cmd::run_daemon(&args, cli.verbose)?,
+
         Commands::HookAudit { since } => {
             hooks::hook_audit_cmd::run(since, cli.verbose)?;
             0
@@ -3369,6 +3379,7 @@ mod tests {
             "golangci-lint",
             "gradlew",
             "mvn",
+            "mvnd",
             "sbt",
             "php",
             "phpunit",
