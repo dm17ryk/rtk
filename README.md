@@ -133,20 +133,23 @@ git status  # Automatically rewritten to rtk git status
 ```
 
 Each command installs every RTK integration supported by that client: its
-hook/plugin/rules and an `rtk mcp` stdio registration. Re-run the same command
-after moving or upgrading the RTK binary to refresh its absolute MCP command
-path. Use `--no-mcp` to install only the traditional integration.
+hook/plugin/rules and, when the client has a native MCP configuration, an
+`rtk mcp` stdio registration. Re-run the same command after moving or upgrading
+the RTK binary to refresh its absolute MCP command path. Use `--no-mcp` to
+install only the traditional integration.
 
 Instruction-backed integrations also install a direct-first command policy.
 Agents are told to call supported routes such as `rtk read`, `rtk rg`,
-`rtk git`, and `rtk cargo` directly. On Windows, `rtk proxy pwsh` and
-`rtk proxy cmd` are explicitly last-resort fallbacks for shell-only behavior,
-not wrappers for commands RTK already supports. MCP-aware clients receive the
-same policy in the server's initialization response and `run_filtered` tool
-description.
+`rtk git`, and `rtk cargo` directly. On Windows, `rtk cmd` and the MCP
+`run_cmd` tool are preferred for optimizable CMD expressions; raw
+`rtk proxy pwsh` and `rtk proxy cmd.exe` are last-resort fallbacks for shell-only
+behavior, not wrappers for commands RTK already supports. MCP-aware clients receive the
+same policy in the server's initialization response and tool descriptions. On
+Windows, the MCP `run_cmd` tool and the `rtk cmd` CLI route are the preferred
+way to run optimizable CMD expressions.
 
-Pi is the exception: Pi deliberately has no native MCP client, so its RTK
-TypeScript extension is the complete integration.
+Pi and Mistral Vibe are exceptions: neither currently has a native MCP client,
+so their RTK extension or hook integration is complete without an MCP entry.
 
 Hook-based agents rewrite Bash commands (e.g., `git status` -> `rtk git status`) before execution. Plugin-based agents, including Hermes, use their plugin API to rewrite commands before execution. The agent receives compact output without needing to call `rtk` explicitly.
 
@@ -441,11 +444,12 @@ rtk init -g
 ### Local MCP server
 
 RTK also provides a local synchronous stdio MCP server with typed command
-execution: `rtk mcp`. `rtk init` registers it automatically for the selected
-client (except Pi, which has no native MCP support). Its `run_filtered` tool
-accepts argv arrays, validates working directories, enforces timeout/output
-limits, and preserves exit codes. Because execution has local-machine
-capabilities, connect only trusted clients. See
+execution: `rtk mcp`. `rtk init` registers it automatically for selected clients
+with native MCP support. Its `run_filtered` tool accepts RTK argv arrays, while
+the Windows-only `run_cmd` tool accepts one raw CMD expression such as
+`{"expression":"echo %CD% & dir /b"}`. Both validate working directories,
+enforce timeout/output limits, and preserve exit codes. Because execution has
+local-machine capabilities, connect only trusted clients. See
 [the MCP guide](docs/guide/resources/mcp.md).
 
 ### WSL (optional)
