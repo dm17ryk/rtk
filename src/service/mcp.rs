@@ -89,6 +89,17 @@ fn tool_definitions() -> Vec<Value> {
             }}
         }),
         json!({
+            "name": "run_cmd",
+            "description": agent_policy::RUN_CMD_DESCRIPTION,
+            "inputSchema": { "type": "object", "required": ["expression"], "properties": {
+                "expression": { "type": "string", "minLength": 1 },
+                "cwd": { "type": "string" },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000 },
+                "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 10485760 },
+                "tee_on_failure": { "type": "boolean" }
+            }}
+        }),
+        json!({
             "name": "run_filtered",
             "description": agent_policy::RUN_FILTERED_DESCRIPTION,
             "inputSchema": { "type": "object", "required": ["rtk_args"], "properties": {
@@ -190,25 +201,33 @@ fn call_tool(name: &str, args: &Value) -> Result<Value> {
             let command = required_string(args, "command")?;
             Ok(serde_json::to_value(rewrite(command))?)
         }
+        "run_cmd" => {
+            let expression = required_string(args, "expression")?;
+            #[cfg(not(windows))]
+            {
+                let _ = expression;
+                anyhow::bail!("run_cmd is supported only on Windows");
+            }
+            #[cfg(windows)]
+            {
+                let (cwd, timeout, max_output, tee_on_failure) = execution_options(args)?;
+                let rtk_args = vec!["cmd".to_string(), expression.to_string()];
+                Ok(serde_json::to_value(run_filtered(
+                    &rtk_args,
+                    cwd.as_deref(),
+                    timeout,
+                    max_output,
+                    tee_on_failure,
+                )?)?)
+            }
+        }
         "run_filtered" => {
             let rtk_args = required_string_array(args, "rtk_args")?;
-            let cwd = args.get("cwd").and_then(Value::as_str).map(PathBuf::from);
-            let timeout_ms = bounded_u64(args, "timeout_ms", DEFAULT_TIMEOUT_MS, 1, 600_000)?;
-            let max_output = bounded_usize(
-                args,
-                "max_output_bytes",
-                DEFAULT_MAX_OUTPUT_BYTES,
-                1,
-                10 * 1024 * 1024,
-            )?;
-            let tee_on_failure = args
-                .get("tee_on_failure")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
+            let (cwd, timeout, max_output, tee_on_failure) = execution_options(args)?;
             Ok(serde_json::to_value(run_filtered(
                 &rtk_args,
                 cwd.as_deref(),
-                Duration::from_millis(timeout_ms),
+                timeout,
                 max_output,
                 tee_on_failure,
             )?)?)
@@ -420,6 +439,28 @@ fn required_string_array(value: &Value, key: &str) -> Result<Vec<String>> {
     Ok(result)
 }
 
+fn execution_options(args: &Value) -> Result<(Option<PathBuf>, Duration, usize, bool)> {
+    let cwd = args.get("cwd").and_then(Value::as_str).map(PathBuf::from);
+    let timeout_ms = bounded_u64(args, "timeout_ms", DEFAULT_TIMEOUT_MS, 1, 600_000)?;
+    let max_output = bounded_usize(
+        args,
+        "max_output_bytes",
+        DEFAULT_MAX_OUTPUT_BYTES,
+        1,
+        10 * 1024 * 1024,
+    )?;
+    let tee_on_failure = args
+        .get("tee_on_failure")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    Ok((
+        cwd,
+        Duration::from_millis(timeout_ms),
+        max_output,
+        tee_on_failure,
+    ))
+}
+
 fn bounded_u64(value: &Value, key: &str, default: u64, min: u64, max: u64) -> Result<u64> {
     let number = value.get(key).and_then(Value::as_u64).unwrap_or(default);
     if !(min..=max).contains(&number) {
@@ -510,6 +551,45 @@ mod tests {
             gain["inputSchema"]["properties"]["limit"]["maximum"],
             json!(500)
         );
+    }
+
+    #[test]
+    fn tools_list_exposes_first_class_cmd_execution_tool() {
+        let response = handle_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "tools/list"
+        }))
+        .expect("tools/list response");
+        let tools = response["result"]["tools"].as_array().expect("tools array");
+        let run_cmd = tools
+            .iter()
+            .find(|tool| tool["name"] == "run_cmd")
+            .expect("run_cmd tool");
+        assert!(run_cmd["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("rtk cmd")));
+        assert_eq!(run_cmd["inputSchema"]["required"], json!(["expression"]));
+        assert_eq!(
+            run_cmd["inputSchema"]["properties"]["expression"]["type"],
+            json!("string")
+        );
+    }
+
+    #[test]
+    fn run_cmd_requires_a_raw_expression() {
+        let error = call_tool("run_cmd", &json!({})).expect_err("missing expression");
+        assert!(error
+            .to_string()
+            .contains("expression must be a non-empty string"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn run_cmd_reports_windows_only() {
+        let error = call_tool("run_cmd", &json!({ "expression": "echo should not spawn" }))
+            .expect_err("run_cmd must be Windows-only");
+        assert!(error.to_string().contains("Windows"));
     }
 
     #[test]

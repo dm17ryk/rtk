@@ -653,6 +653,21 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Execute a CMD expression, filtering only semantically safe built-ins
+    Cmd {
+        /// CMD expression, either as one raw string or as command arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+
+    /// Execute one encoded CMD segment without recursive orchestration.
+    #[command(name = "__cmd-run", hide = true)]
+    CmdRun {
+        /// UTF-8 source bytes encoded as hexadecimal.
+        #[arg(long = "hex")]
+        encoded: String,
+    },
+
     /// Execute command without filtering but track usage
     Proxy {
         /// Command and arguments to execute
@@ -2609,6 +2624,10 @@ fn run_cli() -> Result<i32> {
             }
         }
 
+        Commands::Cmd { args } => cmds::windows::orchestrator::run(&args)?,
+
+        Commands::CmdRun { encoded } => cmds::windows::orchestrator::run_segment(&encoded)?,
+
         Commands::Proxy { args } => {
             use std::io::{Read, Write};
             use std::process::Stdio;
@@ -3245,7 +3264,7 @@ mod tests {
         // RTK meta-commands should produce parse errors (not fall through to raw execution).
         // Skip "proxy" because it uses trailing_var_arg (accepts any args by design).
         for cmd in core::constants::RTK_META_COMMANDS {
-            if matches!(*cmd, "proxy" | "run" | "rewrite" | "session") {
+            if matches!(*cmd, "proxy" | "run" | "cmd" | "rewrite" | "session") {
                 continue; // these use trailing_var_arg (accept any args by design)
             }
             let result = Cli::try_parse_from(["rtk", cmd, "--nonexistent-flag-xyz"]);
@@ -3364,6 +3383,23 @@ mod tests {
             }
             _ => panic!("Expected Run command"),
         }
+    }
+
+    #[test]
+    fn test_cmd_accepts_a_raw_cmd_expression() {
+        let result = Cli::try_parse_from(["rtk", "cmd", "echo %CD% & dir /b"]);
+
+        assert!(result.is_ok(), "rtk cmd must accept raw CMD syntax");
+    }
+
+    #[test]
+    fn test_hidden_cmd_runner_parses_only_its_encoded_segment_argument() {
+        let cli = Cli::try_parse_from(["rtk", "__cmd-run", "--hex", "646972202f62"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::CmdRun { encoded } if encoded == "646972202f62"
+        ));
     }
 
     #[test]

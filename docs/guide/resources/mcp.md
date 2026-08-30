@@ -41,21 +41,28 @@ only RTK's MCP entry along with the selected integration.
 | Factory Droid | `~/.factory/mcp.json` or `.factory/mcp.json` |
 | OpenCode | the `mcp.rtk` entry in `opencode.json` |
 | Pi | No native MCP client; RTK installs the Pi extension instead |
+| Mistral Vibe | No native MCP client; RTK installs the Vibe hook instead |
 
 The server implements `initialize`, `notifications/initialized`, `tools/list`,
 and `tools/call`. It exposes command rewriting, filtered RTK execution,
-tracking summaries, discovery results, and bounded tee-artifact access.
+Windows CMD expression execution, tracking summaries, discovery results, and
+bounded tee-artifact access.
 
 The `initialize` response includes a direct-first instruction for the model,
-and the `run_filtered` tool description repeats it. MCP-aware agents are told
-to prefer typed RTK argv over launching a host shell. On Windows, PowerShell,
-`pwsh`, and `cmd` are reserved for shell-only behavior.
+and the tool descriptions repeat it. MCP-aware agents are told to prefer typed
+RTK argv over launching a host shell. For Windows CMD syntax, use `run_cmd` (or
+the `rtk cmd` CLI route) so operators, expansion, state, and exit codes remain
+CMD-native. Raw PowerShell, `pwsh`, and `cmd.exe` remain fallbacks for
+interactive, exact-output, redirected, machine-consumed, batch, or opaque
+shell behavior.
 
 `run_filtered` accepts only a typed argument array such as
-`["git", "status"]`; it never accepts a shell command string. Working
-directories must already exist and output is bounded by an explicit byte limit.
-Execution uses the installed RTK executable, preserves the underlying exit
-code, and applies an explicit timeout.
+`["git", "status"]`; it never accepts a shell command string. On Windows,
+`run_cmd` accepts one raw `expression` string such as
+`{"expression":"echo %CD% & dir /b"}` and applies the same safety bounds.
+Working directories must already exist and output is bounded by an explicit
+byte limit. Execution uses the installed RTK executable, preserves the
+underlying exit code, and applies an explicit timeout.
 
 MCP execution is enabled by default and gives a connected client local-machine
 command capabilities. Run it only for trusted local clients. The server opens

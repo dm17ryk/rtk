@@ -133,20 +133,23 @@ git status  # Automatically rewritten to rtk git status
 ```
 
 Each command installs every RTK integration supported by that client: its
-hook/plugin/rules and an `rtk mcp` stdio registration. Re-run the same command
-after moving or upgrading the RTK binary to refresh its absolute MCP command
-path. Use `--no-mcp` to install only the traditional integration.
+hook/plugin/rules and, when the client has a native MCP configuration, an
+`rtk mcp` stdio registration. Re-run the same command after moving or upgrading
+the RTK binary to refresh its absolute MCP command path. Use `--no-mcp` to
+install only the traditional integration.
 
 Instruction-backed integrations also install a direct-first command policy.
 Agents are told to call supported routes such as `rtk read`, `rtk rg`,
-`rtk git`, and `rtk cargo` directly. On Windows, `rtk proxy pwsh` and
-`rtk proxy cmd` are explicitly last-resort fallbacks for shell-only behavior,
-not wrappers for commands RTK already supports. MCP-aware clients receive the
-same policy in the server's initialization response and `run_filtered` tool
-description.
+`rtk git`, and `rtk cargo` directly. On Windows, `rtk cmd` and the MCP
+`run_cmd` tool are preferred for optimizable CMD expressions; raw
+`rtk proxy pwsh` and `rtk proxy cmd.exe` are last-resort fallbacks for shell-only
+behavior, not wrappers for commands RTK already supports. MCP-aware clients receive the
+same policy in the server's initialization response and tool descriptions. On
+Windows, the MCP `run_cmd` tool and the `rtk cmd` CLI route are the preferred
+way to run optimizable CMD expressions.
 
-Pi is the exception: Pi deliberately has no native MCP client, so its RTK
-TypeScript extension is the complete integration.
+Pi and Mistral Vibe are exceptions: neither currently has a native MCP client,
+so their RTK extension or hook integration is complete without an MCP entry.
 
 Hook-based agents rewrite Bash commands (e.g., `git status` -> `rtk git status`) before execution. Plugin-based agents, including Hermes, use their plugin API to rewrite commands before execution. The agent receives compact output without needing to call `rtk` explicitly.
 
@@ -367,6 +370,62 @@ After install, **restart Claude Code**.
 
 RTK works fully on native Windows. Since **v0.37.2** the auto-rewrite hook runs as a **native binary command** (`rtk hook claude`) — no Unix shell, bash, or jq required — so commands are rewritten transparently on Command Prompt, PowerShell, and Windows Terminal, just like on Linux and macOS.
 
+### CMD expressions
+
+Use `rtk cmd` when you need to run a CMD expression while retaining CMD's own
+operator, exit-code, and state semantics. One argument is passed as raw CMD
+syntax. Multiple arguments use a CMD-safe reconstruction for built-ins, while
+resolved native executables receive their original argument vector directly;
+nested `cmd.exe` hosts are passed through the platform argument encoder so the
+inner parse cannot reinterpret metacharacters. Quotes, expansion markers,
+whitespace, and metacharacters therefore remain data rather than becoming a
+second command. Line-breaking values use an internal transport that is removed
+from the child environment before the requested command starts.
+
+```powershell
+rtk cmd "echo %CD% & dir /b"
+rtk cmd dir "folder with spaces"
+rtk cmd /C dir /b
+```
+
+The first stable increment only filters safe, terminal-facing display forms of
+the built-ins `dir`, display-only `set`, `help`, `assoc`, and `ftype`. Exact or
+machine-consumed output remains native: this includes `echo`, `type`, `dir /b`,
+redirected or piped expressions, assignments and state/control commands, batch
+files, unrecognized layouts/locales, and failed commands. For `dir`, filtering
+is limited to the detailed layouts produced by `/A`, `/C`, `/L`, `/N`, `/O`,
+`/S`, `/T`, and `/4` (including documented combined and negative forms); `/P`,
+`/Q`, `/X`, `/W`, `/D`, `/R`, `/B`, and unknown switches stay native before
+capture. Filtered CMD displays include a paste-ready
+`type "C:\absolute\recovery.log"` command for the complete native output.
+Cataloged external
+CMD executable families and unknown names both stay on the native raw route;
+the distinction records the checked-in Windows Commands A-Z snapshot for later
+adapters, not a filter or an executable-presence guarantee. The snapshot also
+records built-in, server-only, subcommand-only, and unsupported exclusions
+(including `append` on Desktop Windows). WMIC is supported and inbox on
+Windows 10 before 21H1, then deprecated but still inbox from 21H1 onward. On
+Windows 11 before 24H2 it is deprecated and available as a Feature on Demand
+(sometimes preinstalled); starting with Windows 11 24H2 it is unsupported,
+removed, and unavailable.
+
+No command catalog is downloaded during runtime or builds. The external
+manifest is an offline snapshot of the [Microsoft Learn Windows Commands
+catalog](https://learn.microsoft.com/windows-server/administration/windows-commands/windows-commands),
+which applies to Windows 10 and 11. The checked-in raw-source fixture records
+the development fetch URL, its 2025-07-29 source date, SHA-256, and all 339 A-Z
+entries; tests are offline. If an optional native executable is absent, `cmd.exe`
+reports its normal error unchanged.
+
+Interactive CMD sessions are intentionally unfiltered: `rtk cmd` with no
+arguments and `rtk cmd /K ...` pass through to `cmd.exe`; prompt-driven built-ins
+such as `pause`, `date`, `time`, and `start` also remain native. When exact CMD
+output is required, bypass filtering explicitly:
+
+```powershell
+rtk proxy cmd.exe /D /S /C "dir /b"
+```
+
 ### Native Windows
 
 ```powershell
@@ -385,11 +444,12 @@ rtk init -g
 ### Local MCP server
 
 RTK also provides a local synchronous stdio MCP server with typed command
-execution: `rtk mcp`. `rtk init` registers it automatically for the selected
-client (except Pi, which has no native MCP support). Its `run_filtered` tool
-accepts argv arrays, validates working directories, enforces timeout/output
-limits, and preserves exit codes. Because execution has local-machine
-capabilities, connect only trusted clients. See
+execution: `rtk mcp`. `rtk init` registers it automatically for selected clients
+with native MCP support. Its `run_filtered` tool accepts RTK argv arrays, while
+the Windows-only `run_cmd` tool accepts one raw CMD expression such as
+`{"expression":"echo %CD% & dir /b"}`. Both validate working directories,
+enforce timeout/output limits, and preserve exit codes. Because execution has
+local-machine capabilities, connect only trusted clients. See
 [the MCP guide](docs/guide/resources/mcp.md).
 
 ### WSL (optional)

@@ -5449,10 +5449,12 @@ mod tests {
                 "## Command Selection Priority",
                 "**Direct RTK first**",
                 "**Executable fallback**",
-                "**Shell fallback last**",
+                "**Native shell fallback last**",
                 "rtk --help",
+                "rtk cmd",
+                "run_cmd",
                 "rtk proxy pwsh",
-                "rtk proxy cmd",
+                "rtk proxy cmd.exe",
             ] {
                 assert!(
                     template.contains(required),
