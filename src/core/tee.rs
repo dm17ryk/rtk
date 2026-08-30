@@ -9,7 +9,7 @@ use std::sync::{
 };
 
 /// Minimum output size to tee (smaller outputs don't need recovery)
-const MIN_TEE_SIZE: usize = 500;
+pub(crate) const MIN_TEE_SIZE: usize = 500;
 
 /// Default max files to keep in tee directory
 const DEFAULT_MAX_FILES: usize = 20;
