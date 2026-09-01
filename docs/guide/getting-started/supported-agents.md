@@ -254,7 +254,9 @@ shell. On native Windows:
 - `rtk init -g` installs the native hook or plugin integration supported by the
   selected agent
 - Generated rules prefer direct commands such as `rtk read`, `rtk rg`, and
-  `rtk git`; `rtk proxy pwsh` and `rtk proxy cmd` are shell-only fallbacks
+  `rtk git`; `rtk cmd`, `rtk powershell`, and `rtk pwsh` cover optimizable
+  Windows shell expressions, while `rtk proxy pwsh` and `rtk proxy cmd` remain
+  exact-output fallbacks
 - Filters work normally (`rtk cargo test`, `rtk git status`)
 - PowerShell aliases such as `dir` are recognized as aliases and are rewritten
   to the corresponding RTK command where safe

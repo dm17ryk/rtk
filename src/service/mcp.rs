@@ -100,6 +100,18 @@ fn tool_definitions() -> Vec<Value> {
             }}
         }),
         json!({
+            "name": "run_powershell",
+            "description": agent_policy::RUN_POWERSHELL_DESCRIPTION,
+            "inputSchema": { "type": "object", "required": ["host", "expression"], "properties": {
+                "host": { "type": "string", "enum": ["powershell", "pwsh"] },
+                "expression": { "type": "string", "minLength": 1 },
+                "cwd": { "type": "string" },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000 },
+                "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 10485760 },
+                "tee_on_failure": { "type": "boolean" }
+            }}
+        }),
+        json!({
             "name": "run_filtered",
             "description": agent_policy::RUN_FILTERED_DESCRIPTION,
             "inputSchema": { "type": "object", "required": ["rtk_args"], "properties": {
@@ -212,6 +224,31 @@ fn call_tool(name: &str, args: &Value) -> Result<Value> {
             {
                 let (cwd, timeout, max_output, tee_on_failure) = execution_options(args)?;
                 let rtk_args = vec!["cmd".to_string(), expression.to_string()];
+                Ok(serde_json::to_value(run_filtered(
+                    &rtk_args,
+                    cwd.as_deref(),
+                    timeout,
+                    max_output,
+                    tee_on_failure,
+                )?)?)
+            }
+        }
+        "run_powershell" => {
+            let host = required_string(args, "host")?;
+            let expression = required_string(args, "expression")?;
+            let route = match host {
+                "powershell" | "pwsh" => host,
+                _ => anyhow::bail!("host must be either powershell or pwsh"),
+            };
+            #[cfg(not(windows))]
+            {
+                let _ = (route, expression);
+                anyhow::bail!("run_powershell is supported only on Windows");
+            }
+            #[cfg(windows)]
+            {
+                let (cwd, timeout, max_output, tee_on_failure) = execution_options(args)?;
+                let rtk_args = vec![route.to_string(), expression.to_string()];
                 Ok(serde_json::to_value(run_filtered(
                     &rtk_args,
                     cwd.as_deref(),
@@ -574,6 +611,39 @@ mod tests {
             run_cmd["inputSchema"]["properties"]["expression"]["type"],
             json!("string")
         );
+    }
+
+    #[test]
+    fn tools_list_exposes_first_class_powershell_execution_tool() {
+        let response = handle_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 23,
+            "method": "tools/list"
+        }))
+        .expect("tools/list response");
+        let tools = response["result"]["tools"].as_array().expect("tools array");
+        let run_powershell = tools
+            .iter()
+            .find(|tool| tool["name"] == "run_powershell")
+            .expect("run_powershell tool");
+        assert_eq!(
+            run_powershell["inputSchema"]["required"],
+            json!(["host", "expression"])
+        );
+        assert_eq!(
+            run_powershell["inputSchema"]["properties"]["host"]["enum"],
+            json!(["powershell", "pwsh"])
+        );
+    }
+
+    #[test]
+    fn run_powershell_rejects_unknown_hosts() {
+        let error = call_tool(
+            "run_powershell",
+            &json!({ "host": "cmd", "expression": "echo nope" }),
+        )
+        .expect_err("unknown host");
+        assert!(error.to_string().contains("host must be"));
     }
 
     #[test]

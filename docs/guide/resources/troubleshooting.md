@@ -117,6 +117,15 @@ rtk init --show
 
 If you need POSIX shell semantics or Linux-only utilities, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) as an optional separate environment. Native PowerShell aliases such as `dir` are recognized, but commands that require external POSIX tools still need those tools installed on PATH.
 
+### Choosing the PowerShell route
+
+Use `rtk powershell` when the machine has Windows PowerShell 5.1 and `rtk pwsh`
+when it has PowerShell 7.x. Both routes preserve native flags and fail open for
+interactive, `-File`, encoded, XML, redirected, remoting, job, or uncertain
+expressions. If `pwsh.exe` is not installed, `rtk pwsh` reports the normal
+missing-host error; install PowerShell 7.x or use `rtk powershell` instead.
+For exact output, bypass filtering with the native host or `rtk proxy pwsh`.
+
 ### Node.js tools not found
 
 **Symptom:**

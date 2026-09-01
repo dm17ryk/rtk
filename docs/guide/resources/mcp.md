@@ -45,21 +45,26 @@ only RTK's MCP entry along with the selected integration.
 
 The server implements `initialize`, `notifications/initialized`, `tools/list`,
 and `tools/call`. It exposes command rewriting, filtered RTK execution,
-Windows CMD expression execution, tracking summaries, discovery results, and
+Windows CMD and PowerShell expression execution, tracking summaries, discovery results, and
 bounded tee-artifact access.
 
 The `initialize` response includes a direct-first instruction for the model,
 and the tool descriptions repeat it. MCP-aware agents are told to prefer typed
 RTK argv over launching a host shell. For Windows CMD syntax, use `run_cmd` (or
 the `rtk cmd` CLI route) so operators, expansion, state, and exit codes remain
-CMD-native. Raw PowerShell, `pwsh`, and `cmd.exe` remain fallbacks for
-interactive, exact-output, redirected, machine-consumed, batch, or opaque
+CMD-native. For PowerShell, use `run_powershell` with `host: "powershell"` for
+Desktop 5.1 or `host: "pwsh"` for PowerShell 7.x. Raw hosts remain fallbacks
+for interactive, exact-output, redirected, machine-consumed, batch, or opaque
 shell behavior.
 
 `run_filtered` accepts only a typed argument array such as
 `["git", "status"]`; it never accepts a shell command string. On Windows,
 `run_cmd` accepts one raw `expression` string such as
 `{"expression":"echo %CD% & dir /b"}` and applies the same safety bounds.
+`run_powershell` requires `host` (`powershell` or `pwsh`) and one raw
+`expression`, for example `{"host":"pwsh","expression":"Get-Process"}`.
+The selected host's native flags and streams are preserved; uncertain syntax,
+encoded/file/XML modes, jobs, remoting, and redirection stay unfiltered.
 Working directories must already exist and output is bounded by an explicit
 byte limit. Execution uses the installed RTK executable, preserves the
 underlying exit code, and applies an explicit timeout.

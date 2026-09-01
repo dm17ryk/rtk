@@ -164,7 +164,7 @@ jobs:
   # this workflow has no pull_request trigger, they are release/manual gates
   # and cannot block ordinary hosted pull-request CI before that provisioning.
   windows-desktop-parity:
-    name: Desktop CMD parity (${{ matrix.desktop }})
+    name: Desktop PowerShell/CMD parity (${{ matrix.desktop }})
     runs-on: [self-hosted, Windows, X64, ${{ matrix.runner_label }}]
     strategy:
       fail-fast: false
@@ -182,10 +182,21 @@ jobs:
         shell: pwsh
         run: |
           cargo test "cmds::windows::tests::" --bin rtk
+          cargo test "cmds::powershell::" --bin rtk
       - name: Exit-code and side-effect parity
         shell: pwsh
         run: |
           cargo test --test windows_cmd_e2e
+          cargo test --test powershell_cli
+          cargo run -- powershell -NoProfile -NonInteractive -Command "Write-Output release-powershell-smoke"
+          cargo run -- pwsh -NoProfile -NonInteractive -Command "Write-Output release-pwsh-smoke"
+      - name: Verify offline PowerShell manifest is reproducible
+        shell: pwsh
+        run: |
+          $before = git hash-object src/cmds/powershell/manifest_snapshot.json
+          pwsh -NoProfile -File scripts/generate_powershell_manifest.ps1 -Output src/cmds/powershell/manifest_snapshot.json
+          $after = git hash-object src/cmds/powershell/manifest_snapshot.json
+          if ($before -ne $after) { throw "PowerShell manifest snapshot drifted; regenerate and commit it." }
 
   release:
     name: Create Release

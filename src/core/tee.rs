@@ -416,6 +416,22 @@ pub fn commit_lossless_if_better_for_cmd(
     reservation.commit_with_lock(shown)
 }
 
+/// Commit a complete recovery artifact for PowerShell's shell-neutral display.
+/// The caller supplies a compact success-stream representation; the original
+/// bytes remain available at the emitted recovery path.
+pub fn commit_lossless_if_better_for_powershell(
+    raw: &str,
+    filtered: &str,
+    reservation: LosslessTeeReservation,
+) -> Option<LosslessTeeCommit> {
+    let hint = reservation.hint();
+    let shown = format!("{filtered}\r\n{hint}\r\n");
+    if crate::core::guard::never_worse(raw, &shown) == raw {
+        return None;
+    }
+    reservation.commit_with_lock(shown)
+}
+
 /// Reserve a complete recovery artifact. Unlike the normal tee path, this
 /// refuses oversized output rather than truncating a file advertised as full.
 fn reserve_lossless_tee_file(

@@ -10,7 +10,9 @@ RTK. Pass RTK arguments without a leading `rtk`, for example \
 For a Windows CMD expression, use `rtk cmd` directly or the dedicated run_cmd tool with one raw expression, for example \
 {\"expression\":\"echo %CD% & dir /b\"}. Use a host shell only when the task requires \
 shell built-ins, a script, or control flow that cannot be expressed through an RTK route. \
-On Windows, raw PowerShell/pwsh and cmd.exe are last-resort fallbacks; never wrap an RTK-supported \
+For a Windows PowerShell expression, use `rtk powershell` for Desktop 5.1 or `rtk pwsh` for \
+PowerShell 7+, or the dedicated run_powershell tool with a host and one raw expression. \
+On Windows, raw PowerShell/pwsh and cmd.exe are last-resort fallbacks for exact-output behavior; never wrap an RTK-supported \
 command inside them.";
 
 pub const RUN_FILTERED_DESCRIPTION: &str = "Preferred execution tool for RTK-supported commands. \
@@ -24,6 +26,13 @@ preserving CMD operators, expansion, state, and exit-code semantics while applyi
 terminal-facing filters. This tool is Windows-only. Use one expression string such as `echo %CD% & \
 dir /b`; use raw `cmd.exe` (or `rtk proxy cmd.exe`) when exact output, interactive input, \
 redirection, machine consumption, batch files, or opaque control syntax must remain native.";
+
+pub const RUN_POWERSHELL_DESCRIPTION: &str =
+    "Execute one raw Windows PowerShell expression through \
+`rtk powershell` (Desktop 5.1) or `rtk pwsh` (PowerShell 7+). The route preserves native \
+PowerShell parsing and streams, filtering only confident terminal-facing success output. Use the \
+native host for interactive input, -File, -EncodedCommand, -NoExit, XML/machine output, \
+redirection, remoting, jobs, or exact output.";
 
 pub fn render(template: &str) -> String {
     debug_assert_eq!(
@@ -53,5 +62,14 @@ mod tests {
         assert!(RUN_CMD_DESCRIPTION.contains("Windows-only"));
         assert!(MARKDOWN.contains("rtk cmd"));
         assert!(MARKDOWN.contains("cmd.exe"));
+    }
+
+    #[test]
+    fn powershell_policy_names_both_host_routes() {
+        assert!(MCP_INSTRUCTIONS.contains("run_powershell"));
+        assert!(RUN_POWERSHELL_DESCRIPTION.contains("powershell"));
+        assert!(RUN_POWERSHELL_DESCRIPTION.contains("pwsh"));
+        assert!(MARKDOWN.contains("rtk powershell"));
+        assert!(MARKDOWN.contains("rtk pwsh"));
     }
 }

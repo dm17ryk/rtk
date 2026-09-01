@@ -140,13 +140,10 @@ install only the traditional integration.
 
 Instruction-backed integrations also install a direct-first command policy.
 Agents are told to call supported routes such as `rtk read`, `rtk rg`,
-`rtk git`, and `rtk cargo` directly. On Windows, `rtk cmd` and the MCP
-`run_cmd` tool are preferred for optimizable CMD expressions; raw
-`rtk proxy pwsh` and `rtk proxy cmd.exe` are last-resort fallbacks for shell-only
-behavior, not wrappers for commands RTK already supports. MCP-aware clients receive the
-same policy in the server's initialization response and tool descriptions. On
-Windows, the MCP `run_cmd` tool and the `rtk cmd` CLI route are the preferred
-way to run optimizable CMD expressions.
+`rtk git`, and `rtk cargo` directly. On Windows, `rtk cmd`, `rtk powershell`, and
+`rtk pwsh` (plus the MCP `run_cmd` and `run_powershell` tools) are preferred for
+optimizable shell expressions. Native hosts and `rtk proxy` remain exact-output
+fallbacks for interactive, redirected, machine, or opaque behavior.
 
 Pi and Mistral Vibe are exceptions: neither currently has a native MCP client,
 so their RTK extension or hook integration is complete without an MCP entry.
@@ -417,6 +414,46 @@ which applies to Windows 10 and 11. The checked-in raw-source fixture records
 the development fetch URL, its 2025-07-29 source date, SHA-256, and all 339 A-Z
 entries; tests are offline. If an optional native executable is absent, `cmd.exe`
 reports its normal error unchanged.
+
+### PowerShell and pwsh expressions
+
+Use `rtk powershell` for Windows PowerShell Desktop 5.1 and `rtk pwsh` for
+PowerShell 7.x (7.4, 7.5, or 7.6). A single expression argument is passed as
+exact PowerShell source; additional positional arguments are reconstructed as
+independently quoted PowerShell arguments, so values such as `a & b` remain
+data. Host flags (`-NoProfile`, `-NonInteractive`, `-Command`, and their
+documented abbreviations) are preserved.
+
+```powershell
+rtk powershell -NoProfile -NonInteractive "Get-Process"
+rtk pwsh -NoProfile -NonInteractive "Get-ChildItem C:\Windows"
+rtk pwsh -NoProfile -Command "Get-Service"
+```
+
+Only a confident, terminal-facing success display is compacted. Comments,
+strings, script blocks, pipelines with native tails, control flow, jobs,
+redirection, `Format-*`/`Out-*`/`Export-*`/`ConvertTo-*`, remoting, XML or other
+machine output, `-File`, `-EncodedCommand`, `-CommandWithArgs`, `-NoExit`, and
+interactive/no-argument sessions stay native. Profiles and custom modules run
+in the selected host; unknown commands receive only generic structural
+filtering and applications/scripts are never rewritten. If parsing, runtime
+inspection, tee publication, or filtering is uncertain, RTK executes the
+original source unchanged. When tee capture is enabled and the output is within
+the configured lossless-artifact bounds, filtered successes keep the complete
+native display in a recovery artifact; otherwise RTK fails open to the native
+display.
+
+PowerShell capability metadata is a checked-in offline snapshot at
+`src/cmds/powershell/manifest_snapshot.json`; maintainers regenerate it with
+`scripts/generate_powershell_manifest.ps1`. Runtime and builds perform no
+network fetch.
+
+For interactive or exact output, use the native escape hatch:
+
+```powershell
+powershell.exe -NoProfile -Command "Get-Process"
+rtk proxy pwsh -NoProfile -Command "Get-Process"
+```
 
 Interactive CMD sessions are intentionally unfiltered: `rtk cmd` with no
 arguments and `rtk cmd /K ...` pass through to `cmd.exe`; prompt-driven built-ins
