@@ -145,6 +145,7 @@ pub fn classify_expression(
         matches!(
             value.as_str(),
             "-noexit"
+                | "-noe"
                 | "-login"
                 | "-interactive"
                 | "-sshservermode"
@@ -516,23 +517,27 @@ fn runtime_probe_expression(
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
     let identifier = format!("__rtk_probe_{timestamp:x}_{sequence:x}");
+    let probe_variable = format!("${identifier}");
+    let mode_variable = format!("${identifier}_mode");
+    let saved_error_variable = format!("${identifier}_saved_error");
+    let error_item_variable = format!("${identifier}_error_item");
     let quoted_name = command_name.replace('\'', "''");
     let mode_path = quote_argument(&mode_path.to_string_lossy());
     let metadata_condition = catalog::lookup(command_name)
         .map(|metadata| {
             format!(
-                "${identifier}.CommandType -eq 'Cmdlet' -and ${identifier}.Name -ieq '{}' -and ${identifier}.ModuleName -ieq '{}'",
+                "{probe_variable}.CommandType -eq 'Cmdlet' -and {probe_variable}.Name -ieq '{}' -and {probe_variable}.ModuleName -ieq '{}'",
                 metadata.canonical_name.replace('\'', "''"),
                 metadata.module.replace('\'', "''")
             )
         })
         .unwrap_or_else(|| {
             format!(
-                "${identifier}.CommandType -in @('Cmdlet','Function','Filter')"
+                "{probe_variable}.CommandType -in @('Cmdlet','Function','Filter')"
             )
         });
     format!(
-        "${identifier}=Microsoft.PowerShell.Core\\Get-Command -Name '{quoted_name}' -ErrorAction SilentlyContinue; while (${identifier} -and ${identifier}.CommandType -eq 'Alias') {{ ${identifier}=Microsoft.PowerShell.Core\\Get-Command -Name ${identifier}.Definition -ErrorAction SilentlyContinue }}; ${{{identifier}_mode}} = if ({metadata_condition}) {{ 'filter' }} else {{ 'raw' }}; [IO.File]::WriteAllText({mode_path}, ${{{identifier}_mode}}, [Text.UTF8Encoding]::new($false)); {expression}"
+        "{saved_error_variable}=@($Error); {probe_variable}=Microsoft.PowerShell.Core\\Get-Command -Name '{quoted_name}' -ErrorAction SilentlyContinue; while ({probe_variable} -and {probe_variable}.CommandType -eq 'Alias') {{ {probe_variable}=Microsoft.PowerShell.Core\\Get-Command -Name {probe_variable}.Definition -ErrorAction SilentlyContinue }}; {mode_variable} = if ({metadata_condition}) {{ 'filter' }} else {{ 'raw' }}; $Error.Clear(); foreach ({error_item_variable} in {saved_error_variable}) {{ [void]$Error.Add({error_item_variable}) }}; [IO.File]::WriteAllText({mode_path}, {mode_variable}, [Text.UTF8Encoding]::new($false)); {expression}"
     )
 }
 
@@ -541,12 +546,12 @@ fn contains_long_running_parameter(source: &str) -> bool {
         .split(|character: char| character.is_whitespace() || character == ',' || character == ';')
         .map(|token| token.trim_matches(['(', ')', '{', '}', '[', ']']))
         .filter_map(|token| token.strip_prefix('-'))
+        .map(|token| token.split_once(':').map_or(token, |(name, _)| name))
         .map(str::to_ascii_lowercase)
         .any(|token| {
-            token.len() >= 2
-                && ["asjob", "wait", "follow", "watch", "continuous"]
-                    .iter()
-                    .any(|name| name.starts_with(&token))
+            ["asjob", "wait", "follow", "watch", "continuous"]
+                .iter()
+                .any(|name| name.starts_with(&token))
         })
 }
 
@@ -629,7 +634,9 @@ fn is_host_option(token: &str) -> bool {
     matches!(
         token,
         "-nologo"
+            | "-nol"
             | "-noexit"
+            | "-noe"
             | "-noprofile"
             | "-nop"
             | "-noninteractive"
@@ -749,13 +756,15 @@ mod tests {
             prepare_invocation(&args(&[
                 "-NoP",
                 "-NonI",
+                "-NoE",
+                "-NoL",
                 "-WD",
                 "C:\\work",
                 "-Command",
                 "Write-Output OK",
             ])),
             Invocation::Command {
-                host_args: args(&["-NoP", "-NonI", "-WD", "C:\\work"]),
+                host_args: args(&["-NoP", "-NonI", "-NoE", "-NoL", "-WD", "C:\\work"]),
                 expression: "Write-Output OK".to_string(),
             }
         );
@@ -763,7 +772,17 @@ mod tests {
 
     #[test]
     fn abbreviated_long_running_parameters_fail_open() {
-        for parameter in ["-Wa", "-Wai", "-Fo", "-Fol", "-Wat", "-Cont"] {
+        for parameter in [
+            "-W",
+            "-Wa",
+            "-Wai",
+            "-Fo",
+            "-Fol",
+            "-Wat",
+            "-Wat:$true",
+            "-Cont",
+            "-AsJob:$true",
+        ] {
             let source = format!("Get-Process {parameter}");
             let parsed = parse_expression(&source);
             assert!(
@@ -841,11 +860,8 @@ mod tests {
         assert!(wrapped.contains("__rtk_probe_"));
         assert!(wrapped.contains("Microsoft.PowerShell.Management"));
         assert!(wrapped.contains("WriteAllText"));
-        let probe_variable = wrapped
-            .split_once('=')
-            .map(|(prefix, _)| prefix)
-            .expect("probe assignment");
-        assert!(wrapped.contains(&format!("{probe_variable}.Name -ieq")));
+        assert!(wrapped.contains("$Error.Clear"));
+        assert!(wrapped.contains(" -and $__rtk_probe_"));
     }
 
     #[test]
