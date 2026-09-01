@@ -190,14 +190,16 @@ rtk git worktree        # Compact worktree
 
 Note: Git passthrough works for ALL subcommands, even those not explicitly listed.
 
-### GitHub (26-87% savings)
+### GitHub (universal routing, up to 87% savings)
 ```bash
 rtk gh pr view <num>    # Compact PR view (87%)
 rtk gh pr checks        # Compact PR checks (79%)
 rtk gh run list         # Compact workflow runs (82%)
 rtk gh issue list       # Compact issue list (80%)
-rtk gh api              # Compact API responses (26%)
+rtk gh api              # Exact internal passthrough (0%)
 ```
+
+Always use `rtk gh ...`, never `rtk proxy gh ...`. RTK filters known-safe human-readable queries and internally preserves every other GitHub CLI invocation.
 
 ### JavaScript/TypeScript Tooling (70-90% savings)
 ```bash
@@ -261,7 +263,7 @@ rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
 | Tests | vitest, playwright, cargo test | 90-99% |
 | Build | next, tsc, lint, prettier | 70-87% |
 | Git | status, log, diff, add, commit | 59-80% |
-| GitHub | gh pr, gh run, gh issue | 26-87% |
+| GitHub | all gh commands; safe reads filtered | 0-87% |
 | Package Managers | pnpm, npm, npx | 70-90% |
 | Files | ls, read, grep, find | 60-75% |
 | Infrastructure | docker, kubectl | 85% |

@@ -204,6 +204,8 @@ rtk gh issue list               # Compact issue listing
 rtk gh run list                 # Workflow run status
 ```
 
+`rtk gh` is the universal GitHub CLI entry point. Known-safe human-readable queries are compacted; JSON/templates, writes, interactive flows, extensions, and unknown or future commands pass through internally with native behavior. Always use `rtk gh ...`, never `rtk proxy gh ...`.
+
 ### Test Runners
 ```bash
 rtk jest                        # Jest compact (failures only)

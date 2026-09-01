@@ -451,16 +451,16 @@ rtk git tag v1.0.0         # Execute git tag v1.0.0
 
 ## Commandes GitHub CLI
 
-### `rtk gh` -- GitHub CLI compact
+### `rtk gh` -- Routeur universel GitHub CLI
 
-**Objectif :** Remplace `gh` avec une sortie optimisee.
+**Objectif :** Remplace toutes les invocations `gh`. Les lectures textuelles sures sont optimisees; les sorties structurees, mutations, commandes interactives, extensions et commandes futures sont transmises exactement en interne.
 
 **Syntaxe :**
 ```bash
 rtk gh <sous-commande> [args...]
 ```
 
-**Sous-commandes supportees :**
+**Routes de lecture optimisees :**
 
 | Commande | Description | Reduction sortie bash |
 |----------|-------------|-----------|
@@ -469,7 +469,9 @@ rtk gh <sous-commande> [args...]
 | `rtk gh pr checks` | Status des checks CI | ~79% |
 | `rtk gh issue list` | Liste des issues compacte | ~80% |
 | `rtk gh run list` | Status des workflow runs | ~82% |
-| `rtk gh api <endpoint>` | Reponse API compacte | ~26% |
+| `rtk gh api <endpoint>` | Passthrough exact, sans filtrage | 0% |
+
+Utilisez toujours `rtk gh ...`, jamais `rtk proxy gh ...`. RTK choisit automatiquement entre le filtrage et le passthrough natif en preservant les arguments, la sortie et le code de sortie.
 
 **Avant / Apres :**
 ```

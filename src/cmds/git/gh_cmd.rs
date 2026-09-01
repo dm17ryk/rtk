@@ -5,11 +5,13 @@
 
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_LIST;
-use crate::core::utils::{ok_confirmation, resolved_command, truncate};
+use crate::cmds::git::gh_route::{self, FilteredGhCommand, GhRoute};
+use crate::core::utils::{resolved_command, truncate};
 use crate::git;
 use anyhow::Result;
 use regex::Regex;
 use serde_json::Value;
+use std::ffi::OsString;
 use std::process::Command;
 use std::sync::LazyLock;
 
@@ -107,11 +109,6 @@ fn filter_markdown_segment(text: &str) -> String {
     s
 }
 
-/// Check if args contain --json flag (user wants specific JSON fields, not RTK filtering)
-fn has_json_flag(args: &[String]) -> bool {
-    args.iter().any(|a| a == "--json")
-}
-
 /// Extract a positional identifier (PR/issue number) from args, returning it
 /// separately from the remaining extra flags (like -R, --repo, etc.).
 /// Handles both `view 123 -R owner/repo` and `view -R owner/repo 123`.
@@ -129,6 +126,7 @@ fn extract_identifier_and_extra_args(args: &[String]) -> Option<(String, Vec<Str
         "-t",
         "--template",
         "--job",
+        "-a",
         "--attempt",
     ];
     let mut identifier = None;
@@ -189,41 +187,31 @@ where
     )
 }
 
-pub fn run(subcommand: &str, args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
-    // When user explicitly passes --json, they want raw gh JSON output, not RTK filtering
-    if has_json_flag(args) {
-        return run_passthrough("gh", subcommand, args);
-    }
+pub fn run(args: &[OsString], verbose: u8, ultra_compact: bool) -> Result<i32> {
+    let GhRoute::Filtered {
+        command,
+        args_start,
+    } = gh_route::classify(args)
+    else {
+        return runner::run_passthrough("gh", args, verbose);
+    };
 
-    match subcommand {
-        "pr" => run_pr(args, verbose, ultra_compact),
-        "issue" => run_issue(args, verbose, ultra_compact),
-        "run" => run_workflow(args, verbose, ultra_compact),
-        "repo" => run_repo(args, verbose, ultra_compact),
-        "api" => run_api(args, verbose),
-        _ => {
-            // Unknown subcommand, pass through
-            run_passthrough("gh", subcommand, args)
-        }
-    }
-}
+    let filtered_args: Vec<String> = args[args_start..]
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
 
-fn run_pr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
-    if args.is_empty() {
-        return run_passthrough("gh", "pr", args);
-    }
-
-    match args[0].as_str() {
-        "list" => list_prs(&args[1..], verbose, ultra_compact),
-        "view" => view_pr(&args[1..], verbose, ultra_compact),
-        "checks" => pr_checks(&args[1..], verbose, ultra_compact),
-        "status" => pr_status(&args[1..], verbose, ultra_compact),
-        "create" => pr_create(&args[1..], verbose),
-        "merge" => pr_merge(&args[1..], verbose),
-        "diff" => pr_diff(&args[1..], verbose),
-        "comment" => pr_action("commented", args, verbose),
-        "edit" => pr_action("edited", args, verbose),
-        _ => run_passthrough("gh", "pr", args),
+    match command {
+        FilteredGhCommand::PrList => list_prs(&filtered_args, verbose, ultra_compact),
+        FilteredGhCommand::PrView => view_pr(&filtered_args, verbose, ultra_compact),
+        FilteredGhCommand::PrChecks => pr_checks(&filtered_args, verbose, ultra_compact),
+        FilteredGhCommand::PrStatus => pr_status(&filtered_args, verbose, ultra_compact),
+        FilteredGhCommand::PrDiff => pr_diff(&filtered_args, verbose),
+        FilteredGhCommand::IssueList => list_issues(&filtered_args, verbose, ultra_compact),
+        FilteredGhCommand::IssueView => view_issue(&filtered_args, verbose),
+        FilteredGhCommand::RunList => list_runs(&filtered_args, verbose, ultra_compact),
+        FilteredGhCommand::RunView => view_run(&filtered_args, verbose),
+        FilteredGhCommand::RepoView => view_repo(&filtered_args, verbose, ultra_compact),
     }
 }
 
@@ -580,18 +568,6 @@ fn format_pr_status_entry(pr: &Value) -> String {
     out
 }
 
-fn run_issue(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
-    if args.is_empty() {
-        return run_passthrough("gh", "issue", args);
-    }
-
-    match args[0].as_str() {
-        "list" => list_issues(&args[1..], verbose, ultra_compact),
-        "view" => view_issue(&args[1..], verbose),
-        _ => run_passthrough("gh", "issue", args),
-    }
-}
-
 fn list_issues(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
     let mut cmd = resolved_command("gh");
     cmd.args(["issue", "list", "--json", "number,title,state,author"]);
@@ -703,19 +679,12 @@ fn format_issue_view(json: &Value) -> String {
     out
 }
 
-fn run_workflow(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
-    if args.is_empty() {
-        return run_passthrough("gh", "run", args);
-    }
-
-    match args[0].as_str() {
-        "list" => list_runs(&args[1..], verbose, ultra_compact),
-        "view" => view_run(&args[1..], verbose),
-        _ => run_passthrough("gh", "run", args),
-    }
+fn list_runs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+    let cmd = build_run_list_command(args);
+    run_gh_json(cmd, "run list", |json| format_run_list(json, ultra_compact))
 }
 
-fn list_runs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn build_run_list_command(args: &[String]) -> Command {
     let mut cmd = resolved_command("gh");
     cmd.args([
         "run",
@@ -723,11 +692,10 @@ fn list_runs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> 
         "--json",
         "databaseId,name,status,conclusion,createdAt",
     ]);
-    cmd.arg("--limit").arg("10");
     for arg in args {
         cmd.arg(arg);
     }
-    run_gh_json(cmd, "run list", |json| format_run_list(json, ultra_compact))
+    cmd
 }
 
 fn format_run_list(json: &Value, ultra_compact: bool) -> String {
@@ -838,18 +806,10 @@ fn format_run_view(stdout: &str, run_id: &str) -> String {
     out
 }
 
-fn run_repo(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32> {
-    let (subcommand, rest_args) = if args.is_empty() {
-        ("view", args)
-    } else {
-        (args[0].as_str(), &args[1..])
-    };
-    if subcommand != "view" {
-        return run_passthrough("gh", "repo", args);
-    }
+fn view_repo(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32> {
     let mut cmd = resolved_command("gh");
     cmd.arg("repo").arg("view");
-    for arg in rest_args {
+    for arg in args {
         cmd.arg(arg);
     }
     cmd.args([
@@ -880,65 +840,10 @@ fn format_repo_view(json: &Value) -> String {
     out
 }
 
-fn pr_create(args: &[String], _verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("gh");
-    cmd.args(["pr", "create"]);
-    for arg in args {
-        cmd.arg(arg);
-    }
-    runner::run_filtered(
-        cmd,
-        "gh",
-        "pr create",
-        |stdout| {
-            let url = stdout.trim();
-            let pr_num = url.rsplit('/').next().unwrap_or("");
-            let detail = if !pr_num.is_empty() && pr_num.chars().all(|c| c.is_ascii_digit()) {
-                format!("#{} {}", pr_num, url)
-            } else {
-                url.to_string()
-            };
-            ok_confirmation("created", &detail)
-        },
-        RunOptions::stdout_only().early_exit_on_failure(),
-    )
-}
-
-fn pr_merge(args: &[String], _verbose: u8) -> Result<i32> {
-    // gh pr merge is a destructive action — pass through the real output
-    // so the user (or AI agent) sees exactly what happened.
-    run_passthrough("gh", "pr", &{
-        let mut a = vec!["merge".to_string()];
-        a.extend_from_slice(args);
-        a
-    })
-}
-
-/// Flags that change `gh pr diff` output from unified diff to a different format.
-/// When present, compact_diff would produce empty output since it expects diff headers.
-fn has_non_diff_format_flag(args: &[String]) -> bool {
-    args.iter().any(|a| {
-        a == "--name-only"
-            || a == "--name-status"
-            || a == "--stat"
-            || a == "--numstat"
-            || a == "--shortstat"
-    })
-}
-
 fn pr_diff(args: &[String], _verbose: u8) -> Result<i32> {
-    let no_compact = args.iter().any(|a| a == "--no-compact");
-    let gh_args: Vec<String> = args
-        .iter()
-        .filter(|a| *a != "--no-compact")
-        .cloned()
-        .collect();
-    if no_compact || has_non_diff_format_flag(&gh_args) {
-        return run_passthrough_with_extra("gh", &["pr", "diff"], &gh_args);
-    }
     let mut cmd = resolved_command("gh");
     cmd.args(["pr", "diff"]);
-    for arg in gh_args.iter() {
+    for arg in args {
         cmd.arg(arg);
     }
     runner::run_filtered(
@@ -954,35 +859,6 @@ fn pr_diff(args: &[String], _verbose: u8) -> Result<i32> {
         },
         RunOptions::stdout_only().early_exit_on_failure(),
     )
-}
-
-fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<i32> {
-    let subcmd = &args[0];
-    let pr_num = args[1..]
-        .iter()
-        .find(|a| !a.starts_with('-'))
-        .map(|s| format!("#{}", s))
-        .unwrap_or_default();
-    let mut cmd = resolved_command("gh");
-    cmd.arg("pr");
-    for arg in args {
-        cmd.arg(arg);
-    }
-    let action = action.to_string();
-    runner::run_filtered(
-        cmd,
-        "gh",
-        &format!("pr {}", subcmd),
-        move |_stdout| ok_confirmation(&action, &pr_num),
-        RunOptions::stdout_only().early_exit_on_failure(),
-    )
-}
-
-fn run_api(args: &[String], _verbose: u8) -> Result<i32> {
-    // gh api is an explicit/advanced command — the user knows what they asked for.
-    // Converting JSON to a schema destroys all values and forces Claude to re-fetch.
-    // Passthrough preserves the full response and tracks metrics at 0% savings.
-    run_passthrough("gh", "api", args)
 }
 
 // Edge case: error context is now "Failed to run {cmd}" (loses subcommand detail)
@@ -1027,45 +903,6 @@ mod tests {
         assert_eq!(truncate("", 10), "");
         assert_eq!(truncate("ab", 10), "ab");
         assert_eq!(truncate("abc", 3), "abc"); // exact fit
-    }
-
-    #[test]
-    fn test_ok_confirmation_pr_create() {
-        let result = ok_confirmation("created", "#42 https://github.com/foo/bar/pull/42");
-        assert!(result.contains("ok created"));
-        assert!(result.contains("#42"));
-    }
-
-    #[test]
-    fn test_ok_confirmation_pr_merge() {
-        let result = ok_confirmation("merged", "#42");
-        assert_eq!(result, "ok merged #42");
-    }
-
-    #[test]
-    fn test_ok_confirmation_pr_comment() {
-        let result = ok_confirmation("commented", "#42");
-        assert_eq!(result, "ok commented #42");
-    }
-
-    #[test]
-    fn test_ok_confirmation_pr_edit() {
-        let result = ok_confirmation("edited", "#42");
-        assert_eq!(result, "ok edited #42");
-    }
-
-    #[test]
-    fn test_has_json_flag_present() {
-        assert!(has_json_flag(&[
-            "view".into(),
-            "--json".into(),
-            "number,url".into()
-        ]));
-    }
-
-    #[test]
-    fn test_has_json_flag_absent() {
-        assert!(!has_json_flag(&["view".into(), "42".into()]));
     }
 
     #[test]
@@ -1153,6 +990,42 @@ mod tests {
     }
 
     #[test]
+    fn test_run_list_command_does_not_inject_or_duplicate_limit() {
+        let no_limit = build_run_list_command(&[]);
+        let no_limit_args: Vec<_> = no_limit
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            no_limit_args,
+            vec![
+                "run",
+                "list",
+                "--json",
+                "databaseId,name,status,conclusion,createdAt",
+            ]
+        );
+
+        let requested = vec!["--limit".to_string(), "50".to_string()];
+        let with_limit = build_run_list_command(&requested);
+        let with_limit_args: Vec<_> = with_limit
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            with_limit_args,
+            vec![
+                "run",
+                "list",
+                "--json",
+                "databaseId,name,status,conclusion,createdAt",
+                "--limit",
+                "50",
+            ]
+        );
+    }
+
+    #[test]
     fn test_run_view_passthrough_log_failed() {
         assert!(should_passthrough_run_view(&["--log-failed".into()]));
     }
@@ -1234,6 +1107,14 @@ mod tests {
         let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
         assert_eq!(id, "12345");
         assert_eq!(extra, vec!["--attempt", "3"]);
+    }
+
+    #[test]
+    fn test_extract_identifier_with_short_attempt_flag_before_id() {
+        let args: Vec<String> = vec!["-a".into(), "2".into(), "12345".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "12345");
+        assert_eq!(extra, vec!["-a", "2"]);
     }
 
     // --- should_passthrough_pr_view tests ---
@@ -1358,46 +1239,6 @@ mod tests {
     #[test]
     fn test_should_passthrough_issue_view_default() {
         assert!(!should_passthrough_issue_view(&[]));
-    }
-
-    // --- has_non_diff_format_flag tests ---
-
-    #[test]
-    fn test_non_diff_format_flag_name_only() {
-        assert!(has_non_diff_format_flag(&["--name-only".into()]));
-    }
-
-    #[test]
-    fn test_non_diff_format_flag_stat() {
-        assert!(has_non_diff_format_flag(&["--stat".into()]));
-    }
-
-    #[test]
-    fn test_non_diff_format_flag_name_status() {
-        assert!(has_non_diff_format_flag(&["--name-status".into()]));
-    }
-
-    #[test]
-    fn test_non_diff_format_flag_numstat() {
-        assert!(has_non_diff_format_flag(&["--numstat".into()]));
-    }
-
-    #[test]
-    fn test_non_diff_format_flag_shortstat() {
-        assert!(has_non_diff_format_flag(&["--shortstat".into()]));
-    }
-
-    #[test]
-    fn test_non_diff_format_flag_absent() {
-        assert!(!has_non_diff_format_flag(&[]));
-    }
-
-    #[test]
-    fn test_non_diff_format_flag_regular_args() {
-        assert!(!has_non_diff_format_flag(&[
-            "123".into(),
-            "--color=always".into()
-        ]));
     }
 
     // --- filter_markdown_body tests ---

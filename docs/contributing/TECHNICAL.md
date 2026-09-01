@@ -94,6 +94,8 @@ When an LLM agent runs a command (e.g., `git status`):
 
 All rewrite logic lives in Rust (`src/discover/registry.rs`). Hooks are thin delegates that handle agent-specific JSON formats.
 
+GitHub CLI is a universal route: the registry rewrites bare `gh`, `gh.exe`, aliases, extensions, and every current or future top-level command to `rtk gh`. The pure `gh_route` classifier is shared by runtime routing and discovery analytics, so safe human-readable reads retain their savings estimate while exact internal passthrough routes report 0%.
+
 > **Details**: [`hooks/README.md`](../hooks/README.md) covers each agent's JSON format, the rewrite registry, compound command handling, and the `RTK_DISABLED` override.
 
 #### Rewrite Pipeline
@@ -178,7 +180,7 @@ rewrite_segment(seg, excluded)                     [src/discover/registry.rs]
   |  b. Extract env prefix (ENV_PREFIX regex, second pass — first was in classify)
   |     e.g. "GIT_SSH_COMMAND=\"ssh -o ...\" git push" → prefix="GIT_SSH_COMMAND=..."
   |  c. Guard: RTK_DISABLED=1 in prefix → None
-  |  d. Guard: gh with --json/--jq/--template → None
+  |  d. Universal gh route: every gh invocation → rtk gh; runtime chooses filtering or exact passthrough
   |  e. Apply rule's rewrite_prefixes: "cargo fmt" → "rtk cargo fmt"
   |  f. Reassemble: env_prefix + rtk_cmd + args + redirect_suffix
   |

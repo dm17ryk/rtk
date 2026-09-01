@@ -1,7 +1,9 @@
 //! Matches shell commands against known RTK rewrite rules to decide how to handle them.
 
+use crate::cmds::git::gh_route::{self, FilteredGhCommand, GhRoute};
 use crate::core::utils::composer_bin_dirs;
 use regex::{Regex, RegexSet};
+use std::ffi::OsString;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -174,8 +176,12 @@ pub fn classify_command(cmd: &str) -> Classification {
     if let Some(&idx) = matches.last() {
         let rule = &RULES[idx];
 
-        // Extract subcommand for savings override and status detection
-        let (savings, status) = if let Some(caps) = COMPILED[idx].captures(cmd_clean) {
+        // `rtk gh` is universal: the runtime router decides whether this exact
+        // argv is filtered or internally passed through. Discovery must report
+        // the same status rather than relying on a top-level subcommand guess.
+        let (savings, status) = if rule.rtk_cmd == "rtk gh" {
+            classify_gh_savings(cmd_clean)
+        } else if let Some(caps) = COMPILED[idx].captures(cmd_clean) {
             if let Some(sub) = caps.get(1) {
                 let subcmd = sub.as_str();
                 // Check if this subcommand has a special status
@@ -217,6 +223,33 @@ pub fn classify_command(cmd: &str) -> Classification {
             Classification::Unsupported {
                 base_command: base.to_string(),
             }
+        }
+    }
+}
+
+fn classify_gh_savings(cmd: &str) -> (f64, super::report::RtkStatus) {
+    let argv = shell_split(cmd);
+    let Some(executable) = argv.first() else {
+        return (0.0, super::report::RtkStatus::Passthrough);
+    };
+    if !executable.eq_ignore_ascii_case("gh") && !executable.eq_ignore_ascii_case("gh.exe") {
+        return (0.0, super::report::RtkStatus::Passthrough);
+    }
+
+    let gh_args: Vec<OsString> = argv[1..].iter().map(OsString::from).collect();
+    match gh_route::classify(&gh_args) {
+        GhRoute::Passthrough => (0.0, super::report::RtkStatus::Passthrough),
+        GhRoute::Filtered { command, .. } => {
+            let savings = match command {
+                FilteredGhCommand::PrList => 80.0,
+                FilteredGhCommand::PrView => 87.0,
+                FilteredGhCommand::PrChecks => 79.0,
+                FilteredGhCommand::PrStatus | FilteredGhCommand::PrDiff => 70.0,
+                FilteredGhCommand::IssueList | FilteredGhCommand::IssueView => 80.0,
+                FilteredGhCommand::RunList => 82.0,
+                FilteredGhCommand::RunView | FilteredGhCommand::RepoView => 70.0,
+            };
+            (savings, super::report::RtkStatus::Existing)
         }
     }
 }
@@ -1481,15 +1514,16 @@ fn rewrite_segment_inner(
         return Some(rewritten);
     }
 
-    // #196: gh with --json/--jq/--template produces structured output that
-    // rtk gh would corrupt — skip rewrite so the caller gets raw JSON.
     if rule.rtk_cmd == "rtk gh" {
-        let args_lower = cmd_part.to_lowercase();
-        if args_lower.contains("--json")
-            || args_lower.contains("--jq")
-            || args_lower.contains("--template")
-        {
-            return None;
+        let executable_end = cmd_part.find(char::is_whitespace).unwrap_or(cmd_part.len());
+        let executable = &cmd_part[..executable_end];
+        if executable.eq_ignore_ascii_case("gh") || executable.eq_ignore_ascii_case("gh.exe") {
+            let rest = cmd_part[executable_end..].trim_start();
+            return Some(if rest.is_empty() {
+                format!("rtk gh{}", redirect_suffix)
+            } else {
+                format!("rtk gh {}{}", rest, redirect_suffix)
+            });
         }
     }
 
@@ -3146,13 +3180,15 @@ mod tests {
 
     #[test]
     fn test_classify_gh_release() {
-        assert!(matches!(
+        assert_eq!(
             classify_command("gh release list"),
             Classification::Supported {
                 rtk_equivalent: "rtk gh",
-                ..
+                category: "GitHub",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
             }
-        ));
+        );
     }
 
     #[test]
@@ -3173,11 +3209,42 @@ mod tests {
     }
 
     #[test]
-    fn test_gh_auth_rule_requires_a_complete_subcommand_token() {
-        assert!(matches!(
+    fn test_gh_future_command_is_supported_passthrough() {
+        assert_eq!(
             classify_command("gh authority status"),
-            Classification::Unsupported { .. }
-        ));
+            Classification::Supported {
+                rtk_equivalent: "rtk gh",
+                category: "GitHub",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("gh authority status", &[]),
+            Some("rtk gh authority status".to_string())
+        );
+    }
+
+    #[test]
+    fn test_gh_discovery_uses_the_runtime_route_classification() {
+        assert_eq!(
+            classify_command("gh pr checks 42"),
+            Classification::Supported {
+                rtk_equivalent: "rtk gh",
+                category: "GitHub",
+                estimated_savings_pct: 79.0,
+                status: RtkStatus::Existing,
+            }
+        );
+        assert_eq!(
+            classify_command("gh pr create --title title"),
+            Classification::Supported {
+                rtk_equivalent: "rtk gh",
+                category: "GitHub",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
     }
 
     #[test]
@@ -4962,37 +5029,37 @@ mod tests {
         }
     }
 
-    // --- #196: gh --json/--jq/--template passthrough ---
+    // --- Universal gh routing; exact formats passthrough inside rtk gh ---
 
     #[test]
-    fn test_rewrite_gh_json_skipped() {
+    fn test_rewrite_gh_json_routes_through_rtk() {
         assert_eq!(
             rewrite_command_no_prefixes("gh pr list --json number,title", &[]),
-            None
+            Some("rtk gh pr list --json number,title".to_string())
         );
     }
 
     #[test]
-    fn test_rewrite_gh_jq_skipped() {
+    fn test_rewrite_gh_jq_routes_through_rtk() {
         assert_eq!(
             rewrite_command_no_prefixes("gh pr list --json number --jq '.[].number'", &[]),
-            None
+            Some("rtk gh pr list --json number --jq '.[].number'".to_string())
         );
     }
 
     #[test]
-    fn test_rewrite_gh_template_skipped() {
+    fn test_rewrite_gh_template_routes_through_rtk() {
         assert_eq!(
             rewrite_command_no_prefixes("gh pr view 42 --template '{{.title}}'", &[]),
-            None
+            Some("rtk gh pr view 42 --template '{{.title}}'".to_string())
         );
     }
 
     #[test]
-    fn test_rewrite_gh_api_json_skipped() {
+    fn test_rewrite_gh_api_json_routes_through_rtk() {
         assert_eq!(
             rewrite_command_no_prefixes("gh api repos/owner/repo --jq '.name'", &[]),
-            None
+            Some("rtk gh api repos/owner/repo --jq '.name'".to_string())
         );
     }
 
@@ -5001,6 +5068,72 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("gh pr list", &[]),
             Some("rtk gh pr list".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_every_gh_command_family_and_future_extensions() {
+        let families = [
+            "auth",
+            "browse",
+            "codespace",
+            "discussion",
+            "gist",
+            "issue",
+            "org",
+            "pr",
+            "project",
+            "release",
+            "repo",
+            "skill",
+            "cache",
+            "run",
+            "workflow",
+            "co",
+            "agent-task",
+            "alias",
+            "api",
+            "attestation",
+            "completion",
+            "config",
+            "copilot",
+            "extension",
+            "gpg-key",
+            "label",
+            "licenses",
+            "preview",
+            "ruleset",
+            "search",
+            "secret",
+            "ssh-key",
+            "status",
+            "variable",
+            "my-extension",
+        ];
+
+        for family in families {
+            let input = format!("gh {family} --future-flag");
+            assert_eq!(
+                rewrite_command_no_prefixes(&input, &[]),
+                Some(format!("rtk gh {family} --future-flag")),
+                "family: {family}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_bare_gh_windows_executable_and_mixed_case() {
+        assert_eq!(
+            rewrite_command_no_prefixes("gh", &[]),
+            Some("rtk gh".to_string())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("gh.exe pr list", &[]),
+            Some("rtk gh pr list".to_string())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("Gh.ExE pr list", &[]),
+            Some("rtk gh pr list".to_string())
         );
     }
 
