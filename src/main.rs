@@ -170,13 +170,12 @@ enum Commands {
         command: GitCommands,
     },
 
-    /// GitHub CLI (gh) commands with token-optimized output
+    /// GitHub CLI (gh) commands with safe token-optimized output and universal passthrough
+    #[command(disable_help_flag = true, disable_version_flag = true)]
     Gh {
-        /// Subcommand: pr, issue, run, repo
-        subcommand: String,
-        /// Additional arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        /// Complete gh argument vector; unsupported and exact-output modes pass through unchanged
+        #[arg(num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
     },
 
     /// GitLab CLI (glab) commands with token-optimized output
@@ -1926,9 +1925,7 @@ fn run_cli() -> Result<i32> {
             }
         }
 
-        Commands::Gh { subcommand, args } => {
-            gh_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?
-        }
+        Commands::Gh { args } => gh_cmd::run(&args, cli.verbose, cli.ultra_compact)?,
 
         Commands::Glab {
             repo,
@@ -3869,6 +3866,68 @@ mod tests {
             cli.ultra_compact,
             "--ultra-compact long form must still enable ultra-compact mode"
         );
+    }
+
+    #[test]
+    fn test_gh_accepts_bare_invocation() {
+        let cli = Cli::try_parse_from(["rtk", "gh"]).expect("bare rtk gh must parse");
+        match cli.command {
+            Commands::Gh { args } => assert!(args.is_empty()),
+            other => panic!("expected Commands::Gh, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_gh_forwards_help_version_and_extension_arguments() {
+        for expected in [
+            vec!["-h"],
+            vec!["--help"],
+            vec!["--version"],
+            vec!["my-extension", "--future-flag", "value"],
+            vec!["my-extension", "--", "-hyphenated-value"],
+        ] {
+            let mut argv = vec!["rtk", "gh"];
+            argv.extend(expected.iter().copied());
+            let cli = Cli::try_parse_from(argv).expect("rtk gh arguments must parse");
+            match cli.command {
+                Commands::Gh { args } => {
+                    let actual: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
+                    assert_eq!(actual, expected);
+                }
+                other => panic!("expected Commands::Gh, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_gh_preserves_rtk_global_flags_before_the_subcommand() {
+        let cli = Cli::try_parse_from(["rtk", "-vv", "--ultra-compact", "gh", "pr", "list"])
+            .expect("RTK global flags before gh must parse");
+        assert_eq!(cli.verbose, 2);
+        assert!(cli.ultra_compact);
+        match cli.command {
+            Commands::Gh { args } => assert_eq!(args, ["pr", "list"]),
+            other => panic!("expected Commands::Gh, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_gh_parser_preserves_non_utf8_arguments() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let opaque = OsString::from_vec(vec![0xff]);
+        let cli = Cli::try_parse_from([
+            OsString::from("rtk"),
+            OsString::from("gh"),
+            OsString::from("my-extension"),
+            opaque.clone(),
+        ])
+        .expect("non-UTF-8 gh arguments must parse");
+        match cli.command {
+            Commands::Gh { args } => assert_eq!(args, [OsString::from("my-extension"), opaque]),
+            other => panic!("expected Commands::Gh, got {other:?}"),
+        }
     }
 
     #[test]

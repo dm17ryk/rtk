@@ -34,6 +34,8 @@ Every percentage below measures **bash output bytes removed** — the only thing
 | `gh run list` | 82% | Compact workflow run summary |
 | `gh issue view` | 80% | Body only, no decoration |
 
+`rtk gh` supports the complete GitHub CLI namespace. Safe default-format reads are filtered as listed above; machine-readable output, mutations, interactive or streaming modes, aliases, extensions, and future commands use exact internal passthrough (0% reduction). Use `rtk gh ...` for every GitHub CLI command and never `rtk proxy gh ...`.
+
 ## Graphite (Stacked PRs)
 
 | Command | Bash output reduction | What changes |

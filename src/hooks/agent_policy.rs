@@ -72,4 +72,11 @@ mod tests {
         assert!(MARKDOWN.contains("rtk powershell"));
         assert!(MARKDOWN.contains("rtk pwsh"));
     }
+
+    #[test]
+    fn github_policy_uses_the_universal_internal_router() {
+        assert!(MARKDOWN.contains("always use `rtk gh"));
+        assert!(MARKDOWN.contains("never use `rtk proxy gh`"));
+        assert!(MARKDOWN.contains("internally"));
+    }
 }

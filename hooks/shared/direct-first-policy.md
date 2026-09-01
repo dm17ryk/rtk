@@ -8,3 +8,5 @@ Use the narrowest RTK route that can perform the task:
 4. **Native shell fallback last**: use raw `cmd.exe`, `powershell.exe`, or `pwsh.exe` (or `rtk proxy cmd.exe ...` / `rtk proxy pwsh ...`) only for interactive, exact-output, redirected, machine-consumed, batch, or opaque shell behavior.
 
 On Windows, prefer `rtk cmd`, `rtk powershell`, or `rtk pwsh` for optimizable shell expressions and never hide an RTK-supported command inside a native shell. Use `rtk git status`, not `rtk proxy pwsh -Command "git status"`; use a native host only when its semantics must remain exact.
+
+For GitHub CLI, always use `rtk gh ...`, including writes, structured output, interactive commands, extensions, and future subcommands. RTK filters only known-safe human-readable queries and internally passes every other invocation through with native arguments, output, and exit codes; never use `rtk proxy gh`.

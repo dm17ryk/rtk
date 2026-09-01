@@ -53,13 +53,11 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^gh\s+(pr|issue|run|repo|api|release|auth)(?:\s|$)",
+        pattern: r"(?i:^gh(?:\.exe)?(?:\s|$))",
         rtk_cmd: "rtk gh",
         rewrite_prefixes: &["gh"],
         category: "GitHub",
-        savings_pct: 82.0,
-        subcmd_savings: &[("pr", 87.0), ("run", 82.0), ("issue", 80.0), ("auth", 0.0)],
-        subcmd_status: &[("auth", RtkStatus::Passthrough)],
+        savings_pct: 0.0,
         ..RtkRule::DEFAULT
     },
     RtkRule {

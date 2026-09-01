@@ -32,7 +32,7 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 
 **Guards along the way:**
 - `RTK_DISABLED=1` in the env prefix → skip rewrite
-- `gh` with `--json`/`--jq`/`--template` → skip (structured output, rtk would corrupt it)
+- Every `gh` invocation → rewrite to `rtk gh`; the runtime classifier filters known-safe human-readable queries and internally passes all other modes through unchanged
 - `cat` with flags other than `-n` → skip (different semantics than `rtk read`)
 - `cat`/`head`/`tail` with `>` or `>>` → skip (write operation, not a read)
 - Command in `hooks.exclude_commands` config → skip
@@ -48,7 +48,7 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 3. Classifies each command against the same rules used for live rewriting
 4. Aggregates results: which commands could have been rewritten, estimated token savings, adoption rate
 
-The classification logic is shared between discover and rewrite — same patterns, same rules, different consumers.
+The classification logic is shared between discover and rewrite — same patterns, same rules, different consumers. GitHub commands additionally reuse the runtime `gh_route` classifier: filtered reads keep their documented savings, while internally passed-through commands remain supported and report 0%.
 
 ## Env Prefix Handling
 
