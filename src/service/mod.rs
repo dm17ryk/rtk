@@ -118,6 +118,14 @@ pub fn run_filtered(
         .args(rtk_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if matches!(
+        rtk_args.first().map(String::as_str),
+        Some("powershell" | "pwsh")
+    ) {
+        // MCP output is explicitly model-facing even though this child has
+        // captured pipes, so allow the PowerShell route to compact it.
+        command.env("RTK_POWERSHELL_FILTER", "1");
+    }
     if !tee_on_failure {
         command.env("RTK_TEE", "0");
     }
@@ -150,6 +158,10 @@ pub fn run_filtered(
                 .and_then(|value| value.strip_suffix(']'))
         })
         .map(str::to_string);
+    let powershell_route = matches!(
+        rtk_args.first().map(String::as_str),
+        Some("powershell" | "pwsh")
+    );
 
     Ok(RunResult {
         exit_code: output.status.code().unwrap_or(1),
@@ -157,10 +169,18 @@ pub fn run_filtered(
         stderr,
         truncated: stdout_truncated || stderr_truncated,
         rtk_args: rtk_args.iter().map(|arg| redact_sensitive(arg)).collect(),
-        rewritten_command: rewritten
-            .rewritten_command
-            .map(|command| redact_sensitive(&command)),
-        filtered: rewritten.matched,
+        rewritten_command: if powershell_route {
+            None
+        } else {
+            rewritten
+                .rewritten_command
+                .map(|command| redact_sensitive(&command))
+        },
+        filtered: if powershell_route {
+            tee_path.is_some()
+        } else {
+            rewritten.matched
+        },
         tee_path,
         metrics_available: false,
         // The raw producer output is intentionally not reconstructed from the

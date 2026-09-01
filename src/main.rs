@@ -18,6 +18,7 @@ use cmds::js::{
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpunit_cmd, pint_cmd};
+use cmds::powershell::orchestrator::PowerShellHost;
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
@@ -680,6 +681,29 @@ enum Commands {
         /// UTF-8 source bytes encoded as hexadecimal.
         #[arg(long = "hex")]
         encoded: String,
+    },
+
+    /// Execute a Windows PowerShell expression with safe terminal filtering.
+    Powershell {
+        /// PowerShell expression or native host arguments.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+
+    /// Execute a PowerShell Core expression with safe terminal filtering.
+    Pwsh {
+        /// PowerShell expression or native host arguments.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+
+    /// Execute a decoded PowerShell transport expression without RTK routing.
+    #[command(name = "__powershell-run", hide = true)]
+    PowershellRun {
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        expression: String,
     },
 
     /// Execute command without filtering but track usage
@@ -2654,6 +2678,23 @@ fn run_cli() -> Result<i32> {
 
         Commands::CmdRun { encoded } => cmds::windows::orchestrator::run_segment(&encoded)?,
 
+        Commands::Powershell { args } => {
+            cmds::powershell::orchestrator::run(PowerShellHost::WindowsPowerShell, &args)?
+        }
+
+        Commands::Pwsh { args } => {
+            cmds::powershell::orchestrator::run(PowerShellHost::Pwsh, &args)?
+        }
+
+        Commands::PowershellRun { host, expression } => {
+            let host = match host.as_str() {
+                "powershell" => PowerShellHost::WindowsPowerShell,
+                "pwsh" => PowerShellHost::Pwsh,
+                _ => anyhow::bail!("host must be either powershell or pwsh"),
+            };
+            cmds::powershell::orchestrator::run_raw(host, &expression)?
+        }
+
         Commands::Proxy { args } => {
             use std::io::{Read, Write};
             use std::process::Stdio;
@@ -3309,7 +3350,10 @@ mod tests {
         // RTK meta-commands should produce parse errors (not fall through to raw execution).
         // Skip "proxy" because it uses trailing_var_arg (accepts any args by design).
         for cmd in core::constants::RTK_META_COMMANDS {
-            if matches!(*cmd, "proxy" | "run" | "cmd" | "rewrite" | "session") {
+            if matches!(
+                *cmd,
+                "proxy" | "run" | "cmd" | "rewrite" | "session" | "powershell" | "pwsh"
+            ) {
                 continue; // these use trailing_var_arg (accept any args by design)
             }
             let result = Cli::try_parse_from(["rtk", cmd, "--nonexistent-flag-xyz"]);

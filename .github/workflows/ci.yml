@@ -80,8 +80,19 @@ jobs:
           cargo run -- --version
           cargo run -- rewrite dir
           cargo run -- cmd "echo rtk-cmd-smoke & dir /b"
+          cargo run -- powershell -NoProfile -NonInteractive -Command "Write-Output rtk-powershell-smoke"
+          cargo run -- pwsh -NoProfile -NonInteractive -Command "Write-Output rtk-pwsh-smoke"
           cargo test "cmds::windows::tests::" --bin rtk
+          cargo test "cmds::powershell::" --bin rtk
           cargo test --test windows_cmd_e2e
+          cargo test --test powershell_cli
+      - name: Regenerate offline PowerShell manifest
+        shell: pwsh
+        run: |
+          $before = git hash-object src/cmds/powershell/manifest_snapshot.json
+          pwsh -NoProfile -File scripts/generate_powershell_manifest.ps1 -Output src/cmds/powershell/manifest_snapshot.json
+          $after = git hash-object src/cmds/powershell/manifest_snapshot.json
+          if ($before -ne $after) { throw "PowerShell manifest snapshot drifted; regenerate and commit it." }
           cargo test service::mcp -- --nocapture
           cargo test --all
 
