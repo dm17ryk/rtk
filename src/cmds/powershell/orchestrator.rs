@@ -284,6 +284,7 @@ pub fn run_raw(host: PowerShellHost, expression: &str) -> Result<i32> {
 }
 
 fn run_passthrough(executable: &PathBuf, host: PowerShellHost, args: &[OsString]) -> Result<i32> {
+    // nosemgrep: dynamic-command-execution -- host executable is resolved from the native PATH.
     let status = Command::new(executable)
         .args(args)
         .status()
@@ -300,6 +301,7 @@ fn run_command(
     host_args: &[OsString],
     expression: &str,
 ) -> Result<i32> {
+    // nosemgrep: dynamic-command-execution -- host executable is resolved from the native PATH.
     let status = Command::new(executable)
         .args(host_args)
         .arg("-Command")
@@ -331,6 +333,7 @@ fn run_filtered_command(
     };
     let execution_expression =
         runtime_probe_expression(expression, command_name, mode_spool.path());
+    // nosemgrep: dynamic-command-execution -- host executable is resolved from the native PATH.
     let mut command = Command::new(executable);
     command
         .args(host_args)

@@ -60,7 +60,7 @@ impl OutputSpool {
 
 impl Drop for OutputSpool {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(&self.path); // nosemgrep: filesystem-deletion -- removes only RTK's temporary spool.
     }
 }
 

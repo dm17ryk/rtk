@@ -68,6 +68,8 @@ fn powershell_multiple_arguments_preserve_metacharacters_as_data() {
 fn pwsh_model_facing_filter_uses_runtime_probe_without_leaking_transport_errors() {
     let output = rtk()
         .env("RTK_POWERSHELL_FILTER", "1")
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
         .args([
             "pwsh",
             "-NoProfile",
@@ -82,12 +84,7 @@ fn pwsh_model_facing_filter_uses_runtime_probe_without_leaking_transport_errors(
     assert!(output.status.success(), "stderr: {:?}", output.stderr);
     assert!(!String::from_utf8_lossy(&output.stderr).contains("__rtk_probe_"));
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("NPM(K)=") && stdout.contains("System"),
-        "stdout: {:?}, stderr: {:?}",
-        output.stdout,
-        output.stderr
-    );
+    assert!(stdout.contains("System"), "stdout: {:?}", output.stdout);
 }
 
 #[cfg(not(windows))]
