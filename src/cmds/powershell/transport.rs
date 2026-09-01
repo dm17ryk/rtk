@@ -53,8 +53,7 @@ impl OutputSpool {
         String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
-    #[cfg(test)]
-    fn path(&self) -> &std::path::Path {
+    pub(crate) fn path(&self) -> &std::path::Path {
         &self.path
     }
 }

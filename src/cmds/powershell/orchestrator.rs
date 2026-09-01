@@ -2,10 +2,12 @@
 
 use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Sender};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::adapters;
@@ -163,17 +165,7 @@ pub fn classify_expression(
             reason: "host flags select a long-running or machine transport mode",
         };
     }
-    if source
-        .split(|character: char| character.is_whitespace() || character == ',' || character == ';')
-        .map(|token| token.trim_matches(['(', ')', '{', '}', '[', ']']))
-        .map(str::to_ascii_lowercase)
-        .any(|token| {
-            matches!(
-                token.as_str(),
-                "-asjob" | "-wait" | "-follow" | "-watch" | "-continuous"
-            )
-        })
-    {
+    if contains_long_running_parameter(source) {
         return RewriteDecision::Raw {
             reason: "long-running or background parameters are native-only",
         };
@@ -185,6 +177,11 @@ pub fn classify_expression(
     {
         return RewriteDecision::Raw {
             reason: "stdin and interactive reads remain native-only",
+        };
+    }
+    if contains_non_success_stream(source) {
+        return RewriteDecision::Raw {
+            reason: "auxiliary stream producers retain native ordering",
         };
     }
     let names = parsed.command_names();
@@ -323,20 +320,25 @@ fn run_filtered_command(
     command_name: &str,
     strategy: AdapterStrategy,
 ) -> Result<i32> {
-    let execution_expression = runtime_probe_expression(expression, command_name);
-    let spool = match OutputSpool::create() {
+    let output_spool = match OutputSpool::create() {
         Ok(spool) => spool,
         Err(_) => return run_command(executable, host, host_args, expression),
     };
-    let output = match Command::new(executable)
+    let mode_spool = match OutputSpool::create() {
+        Ok(spool) => spool,
+        Err(_) => return run_command(executable, host, host_args, expression),
+    };
+    let execution_expression =
+        runtime_probe_expression(expression, command_name, mode_spool.path());
+    let mut command = Command::new(executable);
+    command
         .args(host_args)
         .arg("-Command")
         .arg(&execution_expression)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env_remove("RTK_POWERSHELL_FILTER")
-        .output()
-    {
+        .env_remove("RTK_POWERSHELL_FILTER");
+    let (status, ordered_output) = match capture_ordered_output(&mut command) {
         Ok(output) => output,
         Err(error)
             if matches!(
@@ -346,7 +348,9 @@ fn run_filtered_command(
                     | io::ErrorKind::PermissionDenied
             ) =>
         {
-            return run_command(executable, host, host_args, expression)
+            // spawn() failed before a child existed, so the native fallback
+            // cannot rerun an already-started command.
+            return run_command(executable, host, host_args, expression);
         }
         Err(error) => {
             return Err(error).with_context(|| format!("Failed to execute {}", host.executable()))
@@ -355,28 +359,35 @@ fn run_filtered_command(
 
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
-    // A captured stderr stream may represent PowerShell streams 2-6. Keep the
-    // complete native display and ordering boundary instead of compacting only
-    // stream 1 when any auxiliary stream was emitted.
-    if !output.status.success() || !output.stderr.is_empty() {
-        stdout.write_all(&output.stdout).ok();
-        stderr.write_all(&output.stderr).ok();
+    let mut success_stream = Vec::new();
+    let mut auxiliary_stream_seen = false;
+    for chunk in &ordered_output {
+        match chunk.stream {
+            CapturedStream::Stdout => success_stream.extend_from_slice(&chunk.bytes),
+            CapturedStream::Stderr => auxiliary_stream_seen = true,
+        }
+    }
+    let probe_mode = mode_spool.read_utf8().ok();
+    // A raw probe result, an auxiliary stream, or a failed command is replayed
+    // chunk-by-chunk to preserve the observed native stream ordering.
+    if probe_mode.as_deref() != Some("filter") || !status.success() || auxiliary_stream_seen {
+        replay_ordered_output(&ordered_output, &mut stdout, &mut stderr);
         return Ok(crate::core::utils::exit_code_from_status(
-            &output.status,
+            &status,
             host.display_name(),
         ));
     }
 
-    if spool.write(&output.stdout).is_err() {
-        stdout.write_all(&output.stdout).ok();
+    if output_spool.write(&success_stream).is_err() {
+        replay_ordered_output(&ordered_output, &mut stdout, &mut stderr);
         return Ok(crate::core::utils::exit_code_from_status(
-            &output.status,
+            &status,
             host.display_name(),
         ));
     }
-    let raw_owned = spool
+    let raw_owned = output_spool
         .read_utf8()
-        .unwrap_or_else(|_| String::from_utf8_lossy(&output.stdout).into_owned());
+        .unwrap_or_else(|_| String::from_utf8_lossy(&success_stream).into_owned());
     let raw = raw_owned.as_str();
     let adapter_name = match strategy {
         AdapterStrategy::Specialized(name) => name,
@@ -384,25 +395,25 @@ fn run_filtered_command(
         AdapterStrategy::Identity => "identity",
     };
     let Some(filtered) = adapters::filter_output(adapter_name, raw) else {
-        stdout.write_all(&output.stdout).ok();
+        replay_ordered_output(&ordered_output, &mut stdout, &mut stderr);
         return Ok(crate::core::utils::exit_code_from_status(
-            &output.status,
+            &status,
             host.display_name(),
         ));
     };
     let Some(reservation) = crate::core::tee::reserve_lossless_tee(raw, host.display_name()) else {
-        stdout.write_all(&output.stdout).ok();
+        replay_ordered_output(&ordered_output, &mut stdout, &mut stderr);
         return Ok(crate::core::utils::exit_code_from_status(
-            &output.status,
+            &status,
             host.display_name(),
         ));
     };
     let Some(commit) =
         crate::core::tee::commit_lossless_if_better_for_powershell(raw, &filtered, reservation)
     else {
-        stdout.write_all(&output.stdout).ok();
+        replay_ordered_output(&ordered_output, &mut stdout, &mut stderr);
         return Ok(crate::core::utils::exit_code_from_status(
-            &output.status,
+            &status,
             host.display_name(),
         ));
     };
@@ -414,12 +425,91 @@ fn run_filtered_command(
         std::str::from_utf8(commit.as_bytes()).unwrap_or_default(),
     );
     Ok(crate::core::utils::exit_code_from_status(
-        &output.status,
+        &status,
         host.display_name(),
     ))
 }
 
-fn runtime_probe_expression(expression: &str, command_name: &str) -> String {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CapturedStream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug)]
+struct OutputChunk {
+    stream: CapturedStream,
+    bytes: Vec<u8>,
+}
+
+fn capture_ordered_output(
+    command: &mut Command,
+) -> io::Result<(std::process::ExitStatus, Vec<OutputChunk>)> {
+    let mut child = command.spawn()?;
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("PowerShell stdout pipe unavailable"))?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("PowerShell stderr pipe unavailable"))?;
+    let (sender, receiver) = mpsc::channel();
+    let _stdout_thread = spawn_capture_thread(stdout_pipe, CapturedStream::Stdout, sender.clone());
+    let _stderr_thread = spawn_capture_thread(stderr_pipe, CapturedStream::Stderr, sender);
+    let status = child.wait()?;
+    let output = receiver.into_iter().collect();
+    Ok((status, output))
+}
+
+fn spawn_capture_thread<R>(
+    mut reader: R,
+    stream: CapturedStream,
+    sender: Sender<OutputChunk>,
+) -> thread::JoinHandle<()>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(length) => {
+                    if sender
+                        .send(OutputChunk {
+                            stream,
+                            bytes: buffer[..length].to_vec(),
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+fn replay_ordered_output(chunks: &[OutputChunk], stdout: &mut impl Write, stderr: &mut impl Write) {
+    for chunk in chunks {
+        match chunk.stream {
+            CapturedStream::Stdout => {
+                stdout.write_all(&chunk.bytes).ok();
+            }
+            CapturedStream::Stderr => {
+                stderr.write_all(&chunk.bytes).ok();
+            }
+        }
+    }
+}
+
+fn runtime_probe_expression(
+    expression: &str,
+    command_name: &str,
+    mode_path: &std::path::Path,
+) -> String {
     let sequence = PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -427,9 +517,57 @@ fn runtime_probe_expression(expression: &str, command_name: &str) -> String {
         .unwrap_or_default();
     let identifier = format!("__rtk_probe_{timestamp:x}_{sequence:x}");
     let quoted_name = command_name.replace('\'', "''");
+    let mode_path = quote_argument(&mode_path.to_string_lossy());
+    let metadata_condition = catalog::lookup(command_name)
+        .map(|metadata| {
+            format!(
+                "${identifier}.CommandType -eq 'Cmdlet' -and ${identifier}.Name -ieq '{}' -and ${identifier}.ModuleName -ieq '{}'",
+                metadata.canonical_name.replace('\'', "''"),
+                metadata.module.replace('\'', "''")
+            )
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "${identifier}.CommandType -in @('Cmdlet','Function','Filter')"
+            )
+        });
     format!(
-        "${identifier}=Microsoft.PowerShell.Core\\Get-Command -Name '{quoted_name}' -ErrorAction SilentlyContinue; {expression}"
+        "${identifier}=Microsoft.PowerShell.Core\\Get-Command -Name '{quoted_name}' -ErrorAction SilentlyContinue; while (${identifier} -and ${identifier}.CommandType -eq 'Alias') {{ ${identifier}=Microsoft.PowerShell.Core\\Get-Command -Name ${identifier}.Definition -ErrorAction SilentlyContinue }}; ${{{identifier}_mode}} = if ({metadata_condition}) {{ 'filter' }} else {{ 'raw' }}; [IO.File]::WriteAllText({mode_path}, ${{{identifier}_mode}}, [Text.UTF8Encoding]::new($false)); {expression}"
     )
+}
+
+fn contains_long_running_parameter(source: &str) -> bool {
+    source
+        .split(|character: char| character.is_whitespace() || character == ',' || character == ';')
+        .map(|token| token.trim_matches(['(', ')', '{', '}', '[', ']']))
+        .filter_map(|token| token.strip_prefix('-'))
+        .map(str::to_ascii_lowercase)
+        .any(|token| {
+            token.len() >= 2
+                && ["asjob", "wait", "follow", "watch", "continuous"]
+                    .iter()
+                    .any(|name| name.starts_with(&token))
+        })
+}
+
+fn contains_non_success_stream(source: &str) -> bool {
+    let lowered = source.to_ascii_lowercase();
+    [
+        "write-error",
+        "write-warning",
+        "write-verbose",
+        "write-debug",
+        "write-information",
+        "write-progress",
+        "2>",
+        "3>",
+        "4>",
+        "5>",
+        "6>",
+        ">&",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
 }
 
 fn filtering_requested() -> bool {
@@ -493,46 +631,72 @@ fn is_host_option(token: &str) -> bool {
         "-nologo"
             | "-noexit"
             | "-noprofile"
+            | "-nop"
             | "-noninteractive"
+            | "-noni"
             | "-sta"
             | "-mta"
             | "-version"
+            | "-v"
             | "-inputformat"
+            | "-in"
             | "-outputformat"
+            | "-out"
             | "-windowstyle"
+            | "-w"
             | "-configurationname"
+            | "-config"
             | "-executionpolicy"
+            | "-ep"
             | "-psconsolefile"
             | "-login"
             | "-interactive"
             | "-noprofileloadtime"
             | "-sshservermode"
+            | "-settingsfile"
+            | "-configurationfile"
+            | "-custompipename"
+            | "-workingdirectory"
+            | "-wd"
             | "-help"
             | "-?"
             | "/?"
     ) || token.starts_with("-inputformat:")
+        || token.starts_with("-in:")
         || token.starts_with("-outputformat:")
+        || token.starts_with("-out:")
         || token.starts_with("-executionpolicy:")
+        || token.starts_with("-ep:")
         || token.starts_with("-configurationname:")
+        || token.starts_with("-config:")
         || token.starts_with("-windowstyle:")
+        || token.starts_with("-w:")
         || token.starts_with("-psconsolefile:")
         || token.starts_with("-workingdirectory:")
+        || token.starts_with("-wd:")
 }
 
 fn host_option_takes_value(token: &str) -> bool {
     matches!(
         token,
         "-version"
+            | "-v"
             | "-inputformat"
+            | "-in"
             | "-outputformat"
+            | "-out"
             | "-windowstyle"
+            | "-w"
             | "-configurationname"
+            | "-config"
             | "-executionpolicy"
+            | "-ep"
             | "-psconsolefile"
             | "-settingsfile"
             | "-configurationfile"
             | "-custompipename"
             | "-workingdirectory"
+            | "-wd"
     )
 }
 
@@ -577,6 +741,39 @@ mod tests {
                 expression: "Get-Process".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn native_startup_abbreviations_stay_with_the_host() {
+        assert_eq!(
+            prepare_invocation(&args(&[
+                "-NoP",
+                "-NonI",
+                "-WD",
+                "C:\\work",
+                "-Command",
+                "Write-Output OK",
+            ])),
+            Invocation::Command {
+                host_args: args(&["-NoP", "-NonI", "-WD", "C:\\work"]),
+                expression: "Write-Output OK".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn abbreviated_long_running_parameters_fail_open() {
+        for parameter in ["-Wa", "-Wai", "-Fo", "-Fol", "-Wat", "-Cont"] {
+            let source = format!("Get-Process {parameter}");
+            let parsed = parse_expression(&source);
+            assert!(
+                matches!(
+                    classify_expression(&parsed, &source, &[]),
+                    RewriteDecision::Raw { .. }
+                ),
+                "{parameter} should remain native-only"
+            );
+        }
     }
 
     #[test]
@@ -634,10 +831,21 @@ mod tests {
 
     #[test]
     fn runtime_probe_is_same_runspace_and_uses_a_randomized_identifier() {
-        let wrapped = runtime_probe_expression("Get-Process", "Get-Process");
+        let wrapped = runtime_probe_expression(
+            "Get-Process",
+            "Get-Process",
+            PathBuf::from("C:\\Temp\\rtk-mode.txt").as_path(),
+        );
         assert!(wrapped.contains("Microsoft.PowerShell.Core\\Get-Command"));
         assert!(wrapped.contains("Get-Process"));
         assert!(wrapped.contains("__rtk_probe_"));
+        assert!(wrapped.contains("Microsoft.PowerShell.Management"));
+        assert!(wrapped.contains("WriteAllText"));
+        let probe_variable = wrapped
+            .split_once('=')
+            .map(|(prefix, _)| prefix)
+            .expect("probe assignment");
+        assert!(wrapped.contains(&format!("{probe_variable}.Name -ieq")));
     }
 
     #[test]
@@ -670,5 +878,42 @@ mod tests {
             classify_expression(&parsed, "Read-Host Name", &[]),
             RewriteDecision::Raw { .. }
         ));
+    }
+
+    #[test]
+    fn auxiliary_stream_producers_fail_open() {
+        for source in ["Get-Process; Write-Warning warning", "Get-Process 2>&1"] {
+            let parsed = parse_expression(source);
+            assert!(
+                matches!(
+                    classify_expression(&parsed, source, &[]),
+                    RewriteDecision::Raw { .. }
+                ),
+                "{source} should preserve native stream behavior"
+            );
+        }
+    }
+
+    #[test]
+    fn ordered_replay_keeps_stdout_and_stderr_chunk_order() {
+        let chunks = vec![
+            OutputChunk {
+                stream: CapturedStream::Stdout,
+                bytes: b"out-1".to_vec(),
+            },
+            OutputChunk {
+                stream: CapturedStream::Stderr,
+                bytes: b"err-1".to_vec(),
+            },
+            OutputChunk {
+                stream: CapturedStream::Stdout,
+                bytes: b"out-2".to_vec(),
+            },
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        replay_ordered_output(&chunks, &mut stdout, &mut stderr);
+        assert_eq!(stdout, b"out-1out-2");
+        assert_eq!(stderr, b"err-1");
     }
 }
