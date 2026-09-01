@@ -77,6 +77,14 @@ pub fn prepare_invocation(args: &[OsString]) -> Invocation {
     // -Command/-c is filterable when it has exactly one source argument. The
     // other execution modes have semantics that cannot be reconstructed safely.
     if let Some(command_index) = find_command_mode(args) {
+        // `-Command -` consumes the script from stdin. Capturing the child
+        // would close that transport, so preserve the complete native argv.
+        if args
+            .get(command_index + 1)
+            .is_some_and(|expression| expression == "-")
+        {
+            return Invocation::Passthrough(args.to_vec());
+        }
         if command_index + 1 < args.len() && command_index + 2 == args.len() {
             return Invocation::Command {
                 host_args: args[..command_index].to_vec(),
@@ -186,6 +194,16 @@ pub fn classify_expression(
         };
     }
     let names = parsed.command_names();
+    if contains_remoting_command(&names) {
+        return RewriteDecision::Raw {
+            reason: "remoting commands retain native interactive transport",
+        };
+    }
+    if contains_dynamic_invocation(&names, source) {
+        return RewriteDecision::Raw {
+            reason: "dynamic and dot-sourced scripts remain opaque",
+        };
+    }
     if names.len() != 1 {
         return RewriteDecision::Raw {
             reason: "compound expressions retain native state and stream ordering",
@@ -342,7 +360,7 @@ fn run_filtered_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env_remove("RTK_POWERSHELL_FILTER");
-    let (status, ordered_output) = match capture_ordered_output(&mut command) {
+    let (status, captured) = match capture_ordered_output(&mut command) {
         Ok(output) => output,
         Err(error)
             if matches!(
@@ -363,9 +381,17 @@ fn run_filtered_command(
 
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
+    if captured.overflowed {
+        captured.replay(&mut stdout, &mut stderr);
+        return Ok(crate::core::utils::exit_code_from_status(
+            &status,
+            host.display_name(),
+        ));
+    }
+    let ordered_output = &captured.chunks;
     let mut success_stream = Vec::new();
     let mut auxiliary_stream_seen = false;
-    for chunk in &ordered_output {
+    for chunk in ordered_output {
         match chunk.stream {
             CapturedStream::Stdout => success_stream.extend_from_slice(&chunk.bytes),
             CapturedStream::Stderr => auxiliary_stream_seen = true,
@@ -375,7 +401,7 @@ fn run_filtered_command(
     // A raw probe result, an auxiliary stream, or a failed command is replayed
     // chunk-by-chunk to preserve the observed native stream ordering.
     if probe_mode.as_deref() != Some("filter") || !status.success() || auxiliary_stream_seen {
-        replay_ordered_output(&ordered_output, &mut stdout, &mut stderr);
+        captured.replay(&mut stdout, &mut stderr);
         return Ok(crate::core::utils::exit_code_from_status(
             &status,
             host.display_name(),
@@ -383,15 +409,21 @@ fn run_filtered_command(
     }
 
     if output_spool.write(&success_stream).is_err() {
-        replay_ordered_output(&ordered_output, &mut stdout, &mut stderr);
+        captured.replay(&mut stdout, &mut stderr);
         return Ok(crate::core::utils::exit_code_from_status(
             &status,
             host.display_name(),
         ));
     }
-    let raw_owned = output_spool
-        .read_utf8()
-        .unwrap_or_else(|_| String::from_utf8_lossy(&success_stream).into_owned());
+    let Ok(raw_owned) = output_spool.read_utf8() else {
+        // Never compact undecodable bytes. Replay the original captured bytes
+        // so Desktop PowerShell's native code-page output remains intact.
+        captured.replay(&mut stdout, &mut stderr);
+        return Ok(crate::core::utils::exit_code_from_status(
+            &status,
+            host.display_name(),
+        ));
+    };
     let raw = raw_owned.as_str();
     let adapter_name = match strategy {
         AdapterStrategy::Specialized(name) => name,
@@ -399,14 +431,14 @@ fn run_filtered_command(
         AdapterStrategy::Identity => "identity",
     };
     let Some(filtered) = adapters::filter_output(adapter_name, raw) else {
-        replay_ordered_output(&ordered_output, &mut stdout, &mut stderr);
+        captured.replay(&mut stdout, &mut stderr);
         return Ok(crate::core::utils::exit_code_from_status(
             &status,
             host.display_name(),
         ));
     };
     let Some(reservation) = crate::core::tee::reserve_lossless_tee(raw, host.display_name()) else {
-        replay_ordered_output(&ordered_output, &mut stdout, &mut stderr);
+        captured.replay(&mut stdout, &mut stderr);
         return Ok(crate::core::utils::exit_code_from_status(
             &status,
             host.display_name(),
@@ -415,7 +447,7 @@ fn run_filtered_command(
     let Some(commit) =
         crate::core::tee::commit_lossless_if_better_for_powershell(raw, &filtered, reservation)
     else {
-        replay_ordered_output(&ordered_output, &mut stdout, &mut stderr);
+        captured.replay(&mut stdout, &mut stderr);
         return Ok(crate::core::utils::exit_code_from_status(
             &status,
             host.display_name(),
@@ -446,9 +478,84 @@ struct OutputChunk {
     bytes: Vec<u8>,
 }
 
+const MAX_CAPTURED_BYTES: usize = 64 * 1024;
+
+struct OrderedCaptureSpool {
+    spool: OutputSpool,
+}
+
+impl OrderedCaptureSpool {
+    fn create() -> io::Result<Self> {
+        Ok(Self {
+            spool: OutputSpool::create()?,
+        })
+    }
+
+    fn append(&self, stream: CapturedStream, bytes: &[u8]) -> io::Result<()> {
+        let tag = match stream {
+            CapturedStream::Stdout => 0_u8,
+            CapturedStream::Stderr => 1_u8,
+        };
+        let length = u64::try_from(bytes.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "capture chunk too large"))?;
+        let mut record = Vec::with_capacity(1 + 8 + bytes.len());
+        record.push(tag);
+        record.extend_from_slice(&length.to_le_bytes());
+        record.extend_from_slice(bytes);
+        self.spool.append(&record)
+    }
+
+    fn replay(&self, stdout: &mut impl Write, stderr: &mut impl Write) -> io::Result<()> {
+        let mut file = std::fs::File::open(self.spool.path())?;
+        loop {
+            let mut tag = [0_u8; 1];
+            match file.read_exact(&mut tag) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(error) => return Err(error),
+            }
+            let mut length_bytes = [0_u8; 8];
+            file.read_exact(&mut length_bytes)?;
+            let length = usize::try_from(u64::from_le_bytes(length_bytes)).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "capture chunk too large")
+            })?;
+            let mut bytes = vec![0_u8; length];
+            file.read_exact(&mut bytes)?;
+            match tag[0] {
+                0 => stdout.write_all(&bytes)?,
+                1 => stderr.write_all(&bytes)?,
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unknown capture stream",
+                    ))
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+struct CapturedOutput {
+    chunks: Vec<OutputChunk>,
+    spool: OrderedCaptureSpool,
+    overflowed: bool,
+}
+
+impl CapturedOutput {
+    fn replay(&self, stdout: &mut impl Write, stderr: &mut impl Write) {
+        if self.overflowed {
+            let _ = self.spool.replay(stdout, stderr);
+        } else {
+            replay_ordered_output(&self.chunks, stdout, stderr);
+        }
+    }
+}
+
 fn capture_ordered_output(
     command: &mut Command,
-) -> io::Result<(std::process::ExitStatus, Vec<OutputChunk>)> {
+) -> io::Result<(std::process::ExitStatus, CapturedOutput)> {
+    let spool = OrderedCaptureSpool::create()?;
     let mut child = command.spawn()?;
     let stdout_pipe = child
         .stdout
@@ -461,9 +568,32 @@ fn capture_ordered_output(
     let (sender, receiver) = mpsc::channel();
     let _stdout_thread = spawn_capture_thread(stdout_pipe, CapturedStream::Stdout, sender.clone());
     let _stderr_thread = spawn_capture_thread(stderr_pipe, CapturedStream::Stderr, sender);
+    let mut chunks = Vec::new();
+    let mut captured_bytes = 0usize;
+    let mut overflowed = false;
+    for chunk in receiver {
+        spool.append(chunk.stream, &chunk.bytes)?;
+        if !overflowed {
+            if let Some(total) = captured_bytes.checked_add(chunk.bytes.len()) {
+                if total <= MAX_CAPTURED_BYTES {
+                    captured_bytes = total;
+                    chunks.push(chunk);
+                    continue;
+                }
+            }
+            overflowed = true;
+            chunks.clear();
+        }
+    }
     let status = child.wait()?;
-    let output = receiver.into_iter().collect();
-    Ok((status, output))
+    Ok((
+        status,
+        CapturedOutput {
+            chunks,
+            spool,
+            overflowed,
+        },
+    ))
 }
 
 fn spawn_capture_thread<R>(
@@ -576,6 +706,33 @@ fn contains_non_success_stream(source: &str) -> bool {
     ]
     .iter()
     .any(|marker| lowered.contains(marker))
+}
+
+fn contains_remoting_command(names: &[String]) -> bool {
+    names.iter().any(|name| {
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "connect-pssession"
+                | "debug-job"
+                | "enter-pshostprocess"
+                | "enter-pssession"
+                | "exit-pssession"
+                | "invoke-command"
+                | "new-pssession"
+                | "receive-pssession"
+        )
+    })
+}
+
+fn contains_dynamic_invocation(names: &[String], source: &str) -> bool {
+    let first = names
+        .first()
+        .map(|name| name.to_ascii_lowercase())
+        .unwrap_or_default();
+    first == "."
+        || matches!(first.as_str(), "iex" | "invoke-expression")
+        || source.trim_start().starts_with(". ")
+        || source.trim_start().starts_with(".\t")
 }
 
 fn filtering_requested() -> bool {
@@ -754,6 +911,13 @@ mod tests {
     }
 
     #[test]
+    fn command_stdin_sentinel_stays_native_passthrough() {
+        let input = args(&["-Command", "-"]);
+
+        assert_eq!(prepare_invocation(&input), Invocation::Passthrough(input));
+    }
+
+    #[test]
     fn native_startup_abbreviations_stay_with_the_host() {
         assert_eq!(
             prepare_invocation(&args(&[
@@ -900,6 +1064,41 @@ mod tests {
     }
 
     #[test]
+    fn interactive_remoting_commands_fail_open() {
+        for source in [
+            "Enter-PSSession -ComputerName server",
+            "Invoke-Command -ComputerName server -ScriptBlock { Get-Process }",
+        ] {
+            let parsed = parse_expression(source);
+            assert!(
+                matches!(
+                    classify_expression(&parsed, source, &[]),
+                    RewriteDecision::Raw { .. }
+                ),
+                "{source} should preserve native remoting behavior"
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_invocation_and_dot_sourcing_fail_open() {
+        for source in [
+            ". .\\profile-script.ps1",
+            "Invoke-Expression $source",
+            "iex $source",
+        ] {
+            let parsed = parse_expression(source);
+            assert!(
+                matches!(
+                    classify_expression(&parsed, source, &[]),
+                    RewriteDecision::Raw { .. }
+                ),
+                "{source} should remain opaque"
+            );
+        }
+    }
+
+    #[test]
     fn auxiliary_stream_producers_fail_open() {
         for source in ["Get-Process; Write-Warning warning", "Get-Process 2>&1"] {
             let parsed = parse_expression(source);
@@ -934,5 +1133,31 @@ mod tests {
         replay_ordered_output(&chunks, &mut stdout, &mut stderr);
         assert_eq!(stdout, b"out-1out-2");
         assert_eq!(stderr, b"err-1");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn large_capture_does_not_retain_the_entire_success_stream_in_memory() {
+        let mut command = Command::new("powershell.exe");
+        command.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::Out.Write(('x' * 131072))",
+        ]);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let (_status, captured) = capture_ordered_output(&mut command).expect("capture output");
+        let captured_bytes: usize = captured.chunks.iter().map(|chunk| chunk.bytes.len()).sum();
+
+        assert!(
+            captured_bytes <= 64 * 1024,
+            "captured {captured_bytes} bytes instead of switching to disk-backed replay"
+        );
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        captured.replay(&mut stdout, &mut stderr);
+        assert_eq!(stdout.len(), 131072);
+        assert!(stderr.is_empty());
     }
 }

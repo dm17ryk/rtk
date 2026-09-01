@@ -22,6 +22,24 @@ mod adapter_tests {
     }
 
     #[test]
+    fn filesystem_table_preserves_directory_context() {
+        let raw = "Directory: C:\\work\\reports\n\nMode        LastWriteTime        Length        Name\n----        -------------        ------        ----\n-a--        2026-09-01 10:00     42             report.txt\n";
+
+        let filtered = adapters::filter_output("filesystem", raw).expect("table is filterable");
+
+        assert!(filtered.contains("Directory: C:\\work\\reports"));
+        assert!(filtered.contains("Name=report.txt"));
+        assert!(filtered.len() < raw.len());
+    }
+
+    #[test]
+    fn lossy_utf8_replacement_is_never_compacted() {
+        let raw = "Name        Status\n----        ------\nalpha       \u{fffd}\n";
+
+        assert!(adapters::filter_output("generic", raw).is_none());
+    }
+
+    #[test]
     fn list_filter_preserves_unicode_values() {
         let raw = "Name : \u{041f}\u{0440}\u{043e}\u{0434}\nStatus : Running\n\n";
         let filtered = adapters::filter_output("generic", raw).expect("list is filterable");

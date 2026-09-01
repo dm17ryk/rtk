@@ -438,8 +438,10 @@ interactive/no-argument sessions stay native. Profiles and custom modules run
 in the selected host; unknown commands receive only generic structural
 filtering and applications/scripts are never rewritten. If parsing, runtime
 inspection, tee publication, or filtering is uncertain, RTK executes the
-original source unchanged. Every filtered success keeps the complete native
-display in a lossless recovery artifact.
+original source unchanged. When tee capture is enabled and the output is within
+the configured lossless-artifact bounds, filtered successes keep the complete
+native display in a recovery artifact; otherwise RTK fails open to the native
+display.
 
 PowerShell capability metadata is a checked-in offline snapshot at
 `src/cmds/powershell/manifest_snapshot.json`; maintainers regenerate it with

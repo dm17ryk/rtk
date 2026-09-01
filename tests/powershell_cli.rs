@@ -47,6 +47,34 @@ fn pwsh_route_executes_a_raw_expression() {
 
 #[cfg(windows)]
 #[test]
+fn pwsh_command_dash_preserves_stdin_transport() {
+    use std::io::Write;
+
+    let mut child = rtk()
+        .args(["pwsh", "-NoProfile", "-NonInteractive", "-Command", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("rtk pwsh should launch");
+    child
+        .stdin
+        .take()
+        .expect("stdin pipe")
+        .write_all(b"Write-Output rtk-stdin-smoke")
+        .expect("write PowerShell source");
+
+    let output = child.wait_with_output().expect("wait for rtk pwsh");
+
+    assert!(output.status.success(), "stderr: {:?}", output.stderr);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "rtk-stdin-smoke"
+    );
+}
+
+#[cfg(windows)]
+#[test]
 fn powershell_multiple_arguments_preserve_metacharacters_as_data() {
     let output = rtk()
         .args([

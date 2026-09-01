@@ -46,6 +46,11 @@ impl OutputSpool {
         file.write_all(bytes)
     }
 
+    pub(crate) fn append(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut file = std::fs::OpenOptions::new().append(true).open(&self.path)?;
+        file.write_all(bytes)
+    }
+
     pub fn read_utf8(&self) -> io::Result<String> {
         let mut file = std::fs::File::open(&self.path)?;
         let mut bytes = Vec::new();

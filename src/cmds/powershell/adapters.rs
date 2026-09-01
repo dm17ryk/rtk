@@ -3,7 +3,7 @@
 /// Compact a known PowerShell display layout while retaining every displayed
 /// value. `None` means that the layout was not recognized confidently.
 pub fn filter_output(adapter: &str, source: &str) -> Option<String> {
-    if source.is_empty() || contains_ansi(source) {
+    if source.is_empty() || contains_ansi(source) || source.contains('\u{fffd}') {
         return None;
     }
     match adapter.to_ascii_lowercase().as_str() {
@@ -29,7 +29,16 @@ fn filter_table(source: &str) -> Option<String> {
         return None;
     }
 
+    let prefix = lines[..separator - 1]
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .copied()
+        .collect::<Vec<_>>();
     let mut output = String::new();
+    if !prefix.is_empty() {
+        output.push_str(&prefix.join("\n"));
+        output.push('\n');
+    }
     let mut rows = 0;
     for line in &lines[separator + 1..] {
         if line.trim().is_empty() {
