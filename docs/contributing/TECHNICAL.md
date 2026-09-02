@@ -42,17 +42,19 @@ User / LLM Agent
 |                    +---------+---------+         |
 |                    v         v         v         |
 |             +----------+ +--------+ +----------+|
-|             |Rust Filter| |TOML DSL| |Passthru  ||
-|             |(cmds/**)  | |Filter  | |(fallback)||
+|             |Semantic  | |Legacy  | |Exact     ||
+|             |parser    | |filter  | |passthru  ||
 |             +-----+----+ +----+---+ +----+-----+|
 |                   |           |           |      |
-|                   +-----+-----+-----------+      |
+|                   +-----+-----+           |      |
+|                         v                 |      |
+|              +---------------------+      |      |
+|              |AiDocument + budget  |      |      |
+|              |render + recovery    |      |      |
+|              +----------+----------+      |      |
+|                         +-----------------+      |
 |                         v                        |
-|              +---------------------+             |
-|              |   Token Tracking    |             |
-|              |   (core/tracking)   |             |
-|              |   SQLite DB         |             |
-|              +---------------------+             |
+|              stdout + output tracking           |
 +--------------------------------------------------+
 ```
 
@@ -61,6 +63,7 @@ User / LLM Agent
 - Graceful degradation: filter failure falls back to raw output
 - Exit code propagation: RTK never swallows non-zero exits
 - Transparent proxy: unknown commands pass through unchanged
+- AI-first output: semantic facts are budgeted centrally; exact routes preserve native bytes
 
 ---
 
@@ -228,19 +231,21 @@ If Clap parsing fails (command not in the enum), the fallback path runs instead.
 
 ### 3.4 Filter Execution
 
-RTK has two filter systems:
+RTK has two filter systems and three output contracts:
 
-**Rust Filters**: Compiled modules in `src/cmds/` that execute the command, parse its output, and apply specialized transformations (regex, JSON, state machines).
+**Rust Filters**: Compiled modules in `src/cmds/` that execute the command and parse safe human-readable text into an `AiDocument`. New filtered routes call `run_ai_filtered(..., BudgetClass, parser, options)`. The shared renderer deterministically enforces acknowledgement (128 estimated tokens), state (512), collection (1,024), diagnostic (2,048), or source (4,096) budgets.
 
-**TOML DSL Filters**: Declarative filters in `src/filters/*.toml` that apply regex-based line filtering, truncation, and section extraction. Applied in `run_fallback()` when no Rust filter matches.
+**TOML DSL Filters**: Declarative, line-oriented filters in `src/filters/*.toml` that preserve the existing string output while reporting exact loss metadata. Applied in `run_fallback()` when no Rust filter matches.
 
-Each filter module follows the same pattern:
-1. Start a timer (`TimedExecution::start()`)
-2. Execute the underlying command (`std::process::Command`)
-3. Apply filtering (strip boilerplate, group errors, truncate)
-4. On filter error, fall back to raw output
-5. Track token savings to SQLite
-6. Propagate exit code
+Choose the runner from the output contract:
+
+| Output | Runner |
+|--------|--------|
+| Safe semantic text | `run_ai_filtered(..., BudgetClass, parser, options)` |
+| Existing migration-only string filter | `run_filtered(...)` |
+| Structured, interactive, binary, streaming, sensitive, or unknown | `run_passthrough_with_reason(..., ExactReason)` |
+
+New filtered routes must not use the legacy API. Direct stdout is migration debt because it bypasses shared rendering, recovery, and contract metadata. Parser failures become bounded recoverable documents. Lossy output is made public only after a private, complete recovery artifact has been prepared, and the final never-worse guard selects raw output if the compact representation plus recovery is larger. The child command's native exit behavior remains authoritative on every path.
 
 > **Details**: [`src/cmds/README.md`](../src/cmds/README.md) covers the common pattern, ecosystem organization, cross-command dependencies, and how to add new filters.
 
@@ -250,8 +255,8 @@ When Clap parsing fails (unknown command):
 
 1. Guard: check if the command is an RTK meta-command (`gain`, `init`, etc.) -- if so, show Clap error
 2. Look up TOML DSL filters via `toml_filter::find_matching_filter()`
-3. If TOML match: capture stdout, apply filter pipeline, track savings
-4. If no match: pure passthrough with `Stdio::inherit`, track as 0% output reduction
+3. If TOML match: capture stdout, apply the line filter, attach exact omission counts to an `AiDocument`, render under the collection budget, and use the shared lossless emitter
+4. If no match: exact passthrough with inherited native I/O and an `ExactReason`
 
 ```
 Command received
@@ -259,8 +264,10 @@ Command received
      -> Yes: Route to Rust filter module
      -> No:  run_fallback()
               -> TOML filter match?
-                 -> Yes: Capture stdout, apply filter, track savings
-                 -> No:  Passthrough (inherit stdio, track 0% reduction)
+                 -> Yes: Filter + exact loss metadata
+                         -> AiDocument -> budget render
+                         -> shared lossless emitter -> stdout + tracking
+                 -> No:  Exact passthrough (inherit stdio, record reason)
 ```
 
 > **Details**: [`src/core/README.md`](../src/core/README.md) covers the TOML filter engine, filter pipeline stages, and trust-gated project filters.
@@ -271,8 +278,11 @@ Every command execution records metrics to SQLite (`~/.local/share/rtk/tracking.
 
 - Input tokens (raw output size) and output tokens (filtered size)
 - Savings percentage, execution time, project path
+- Output contract, exact reason, omitted item/group counts, parser failure, and recovery creation
 - 90-day automatic retention cleanup
 - Token estimation: `ceil(chars / 4.0)` approximation
+
+Residual queries rank captured commands by `residual_tokens = sum(output_tokens)` and compute `weighted_savings_pct = 100 * (1 - sum(output_tokens) / sum(input_tokens))`. The ratio is computed from aggregate token sums, not by averaging per-run percentages. Exact routes have no captured residual size, so analytics report their counts separately by reason and do not let them dilute filtered-route efficiency. Because the token estimator is bytes divided by four, all token counts are approximate even though the same estimator makes reduction ratios useful.
 
 Analytics commands (`rtk gain`, `rtk cc-economics`, `rtk session`) query this database to produce dashboards and ROI reports.
 

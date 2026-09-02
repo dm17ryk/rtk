@@ -37,28 +37,42 @@ Each subdirectory has its own README with file descriptions, parsing strategies,
 
 ## Execution Flow
 
-The shared wrappers in [`core/runner.rs`](../core/runner.rs) encapsulate the execution skeleton. Modules build the `Command` (custom arg logic), then delegate to a runner entry point. All runners handle tracking, tee recovery, and exit code propagation automatically.
+The shared wrappers in [`core/runner.rs`](../core/runner.rs) encapsulate the execution skeleton. Modules build the `Command` (custom arg logic), then choose one of three output contracts. All runners handle tracking, lossless recovery, and native exit-code propagation automatically.
 
 ```
- run_streaming()       Filter applied              tee_and_hint()
-      |                (per-line or post-hoc)            |
-      v                       |                          v
- +---------+  stdout  +-------+-------+  filtered  +-------+
- | Spawn   |--------->| filter        |----------->| Print |
- +---------+  stderr  +---------------+            +-------+
-      |        (live)                                    |
-      v                                                  v
- +----------+                                    +---------+
- | raw =    |                                    | Track   |
- | stdout + |                                    | savings |
- | stderr   |                                    +---------+
- +----------+                                          |
-                                                       v
-                                                 +-----------+
-                                                 | Ok(code)  |
-                                                 | returned  |
-                                                 +-----------+
+ capture native output       parse semantic facts         render to budget
+          |                           |                           |
+          v                           v                           v
+     +---------+  stdout/stderr  +------------+  AiDocument  +----------+
+     | Spawn   |---------------->| AI parser  |------------->| Renderer |
+     +---------+                 +------------+              +----+-----+
+          |                                                        |
+          | native status                         bounded output   v
+          |                                                 +-------------+
+          +------------------------------------------------>| Lossless    |
+                                                            | emitter     |
+                                                            +------+------+
+                                                                   |
+                                                        +----------+----------+
+                                                        v                     v
+                                                     stdout                tracking
 ```
+
+### Choose the output contract first
+
+Use this decision table for every new or migrated command route:
+
+| Command output | Runner contract |
+|----------------|-----------------|
+| Safe semantic text | `run_ai_filtered(..., BudgetClass, parser, options)` |
+| Existing migration-only string filter | `run_filtered(...)` |
+| Structured, interactive, binary, streaming, sensitive, or unknown | `run_passthrough_with_reason(..., ExactReason)` |
+
+New filtered routes **must not** use `run_filtered()`. That API preserves existing string filters while they are migrated; it is not the authoring interface for new work. Printing command output directly is also migration debt because it bypasses the shared output contract, recovery, and tracking metadata.
+
+An AI parser returns an `AiDocument` containing status, facts, records, and any declared omissions. The shared renderer deterministically applies one of five budgets: `Acknowledgement` (128 estimated tokens), `State` (512), `Collection` (1,024), `Diagnostic` (2,048), or `Source` (4,096). If the parser fails, the runner converts the failure into a bounded, recoverable document instead of exposing an unbounded parser error or losing the native output.
+
+Exact routes retain native I/O and record why semantic capture is unsafe through `ExactReason::{Structured, Interactive, Binary, Streaming, Sensitive, Unknown}`. In every contract, the child process's native exit behavior remains authoritative: filtering, fallback, and recovery never turn command failure into success or command success into failure.
 
 ### Filter modes
 
@@ -75,18 +89,20 @@ All execution goes through `core::stream::run_streaming()` with one of four `Fil
 
 | Scenario | Runner | FilterMode | Why |
 |----------|--------|------------|-----|
-| Parse structured output (JSON, tables) | `run_filtered()` | CaptureOnly/Buffered | Filter needs full text to parse structure |
+| Parse safe semantic text into facts/records | `run_ai_filtered()` | CaptureOnly | Parser produces an `AiDocument`; shared rendering enforces its budget |
+| Preserve an existing string filter during migration | `run_filtered()` | CaptureOnly/Buffered | Compatibility only; do not use for new routes |
 | Long-running, line-parseable output | `run_streamed()` | Streaming | Low memory, real-time output |
-| No filtering, just track usage | `run_passthrough()` | Passthrough | Zero overhead, inherits TTY |
-| Custom logic (multi-command, file I/O) | Manual with `exec_capture()` | CaptureOnly | Full control over execution |
+| Output must remain exact | `run_passthrough_with_reason()` | Passthrough | Preserves native I/O and records the exact-route reason |
+| Custom direct output logic | Manual with `exec_capture()` | CaptureOnly | Migration debt; move it behind a shared runner when that command family is migrated |
 
 ### Phases
 
 1. **Spawn** — `run_streaming()` starts the child process with piped stdout/stderr (or inherited TTY for Passthrough)
-2. **Filter** — stdout is processed per the FilterMode; stderr is forwarded to the terminal in real time via a dedicated reader thread
-3. **Print** — filtered output is written to stdout (live for Streaming, post-hoc for CaptureOnly/Buffered); if tee enabled, appends recovery hint on failure
-4. **Track** — `timer.track()` records raw vs filtered for token savings
-5. **Exit code** — returns `Ok(exit_code)` to caller; `main.rs` calls `process::exit(code)` once
+2. **Parse** — semantic routes produce an `AiDocument`; legacy routes wrap their string result; parser errors become bounded recoverable documents
+3. **Render** — semantic documents are rendered deterministically under their `BudgetClass`
+4. **Emit** — the shared emitter either prints the bounded result or creates a private, complete recovery artifact; its final never-worse guard falls back to raw output if the compact form plus recovery would be larger
+5. **Track** — output contract, exact reason, residual size, omissions, parser failure, and recovery metadata are recorded with the emitted text
+6. **Exit code** — returns the native `exit_code` to the caller; `main.rs` calls `process::exit(code)` once
 
 **`RunOptions` builder:**
 
@@ -97,7 +113,27 @@ All execution goes through `core::stream::run_streaming()` with one of four `Fil
 | `RunOptions::stdout_only()` | Stdout-only to filter, stderr passthrough, no tee |
 | `RunOptions::stdout_only().tee("label")` | Stdout-only + tee recovery |
 
-**Example — filtered command (recommended):**
+**Example — semantic filtered command (required for new routes):**
+
+```rust
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    let mut cmd = resolved_command("mycmd");
+    cmd.args(args);
+
+    runner::run_ai_filtered(
+        cmd,
+        "mycmd",
+        &args.join(" "),
+        BudgetClass::Collection,
+        parse_mycmd_document,
+        runner::RunOptions::stdout_only().tee("mycmd"),
+    )
+}
+```
+
+`parse_mycmd_document` returns `Result<AiDocument>`. Choose the narrowest budget that represents the command's semantic output; do not pre-render a string inside the parser.
+
+**Example — legacy string filter (migration only):**
 
 ```rust
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
@@ -113,7 +149,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 }
 ```
 
-Exit code handling is **fully automatic** when using `run_filtered()` — the wrapper extracts the exit code (including Unix signal handling via 128+signal), tracks savings, and returns `Ok(exit_code)`. Module authors just return the result.
+Exit code handling is **fully automatic** for both shared captured runners — the wrapper extracts the native exit code (including Unix signal handling via 128+signal), tracks output, and returns `Ok(exit_code)`. Module authors just return the result.
 
 **Streaming filters (line-by-line):**
 
@@ -193,7 +229,12 @@ See `cmds/rust/runner.rs::ErrorStreamFilter` for a complete reference implementa
 
 ```rust
 pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
-    runner::run_passthrough("mycmd", args, verbose)
+    runner::run_passthrough_with_reason(
+        "mycmd",
+        args,
+        verbose,
+        ExactReason::Structured,
+    )
 }
 ```
 
@@ -209,7 +250,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 }
 ```
 
-Modules with deviations (subcommand dispatch, parser trait systems, two-command fallback, synthetic output).
+Manual execution and direct stdout are existing migration debt. Do not copy those patterns into new routes; preserve them only until the owning command family moves to the semantic or exact shared runner.
 
 
 ## Cross-Command Dependencies
