@@ -193,6 +193,7 @@ pub struct OutputTracking {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // Used by the pending residual-output reporting surface.
 pub struct ResidualCommandStats {
     pub rtk_cmd: String,
     pub count: usize,
@@ -998,6 +999,7 @@ impl Tracker {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    #[allow(dead_code)] // Used by the pending residual-output reporting surface.
     pub fn get_residual_by_command(
         &self,
         project_path: Option<&str>,
