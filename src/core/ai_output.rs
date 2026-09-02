@@ -181,6 +181,120 @@ pub struct RenderedOutput {
     pub parser_failed: bool,
 }
 
+pub enum PreparedEmission {
+    Plain {
+        output: String,
+        meta: EmissionMeta,
+    },
+    Recovered {
+        commit: crate::core::tee::LosslessTeeCommit,
+        meta: EmissionMeta,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EmissionMeta {
+    pub omitted_items: usize,
+    pub omitted_groups: usize,
+    pub recovery_created: bool,
+    pub parser_failed: bool,
+    pub used_raw_fallback: bool,
+}
+
+impl PreparedEmission {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Plain { output, .. } => output,
+            Self::Recovered { commit, .. } => std::str::from_utf8(commit.as_bytes())
+                .expect("lossless tee commit output is owned UTF-8"),
+        }
+    }
+
+    pub fn meta(&self) -> EmissionMeta {
+        match self {
+            Self::Plain { meta, .. } | Self::Recovered { meta, .. } => *meta,
+        }
+    }
+
+    pub fn recovery_created(&self) -> bool {
+        self.meta().recovery_created
+    }
+}
+
+pub fn prepare_emission(
+    raw: &str,
+    command_slug: &str,
+    rendered: RenderedOutput,
+) -> PreparedEmission {
+    prepare_emission_with(
+        raw,
+        command_slug,
+        rendered,
+        crate::core::tee::reserve_lossless_tee,
+    )
+}
+
+fn prepare_emission_with<F>(
+    raw: &str,
+    command_slug: &str,
+    rendered: RenderedOutput,
+    reserve: F,
+) -> PreparedEmission
+where
+    F: FnOnce(&str, &str) -> Option<crate::core::tee::LosslessTeeReservation>,
+{
+    let parser_failed = rendered.parser_failed;
+    let Some(omission) = rendered.omission else {
+        let output = crate::core::guard::never_worse(raw, &rendered.text).to_string();
+        let used_raw_fallback = output == raw && rendered.text != raw;
+        return PreparedEmission::Plain {
+            output,
+            meta: EmissionMeta {
+                parser_failed,
+                used_raw_fallback,
+                ..EmissionMeta::default()
+            },
+        };
+    };
+
+    let Some(reservation) = reserve(raw, command_slug) else {
+        return PreparedEmission::Plain {
+            output: raw.to_string(),
+            meta: EmissionMeta {
+                parser_failed,
+                used_raw_fallback: true,
+                ..EmissionMeta::default()
+            },
+        };
+    };
+    let recovery = reservation.recovery_command();
+    let body = rendered
+        .text
+        .trim_end_matches(|ch| ch == '\r' || ch == '\n');
+    let candidate = format!(
+        "{body}\nomitted items={} groups={} recover={recovery}",
+        omission.items, omission.groups
+    );
+    let meta = EmissionMeta {
+        omitted_items: omission.items,
+        omitted_groups: omission.groups,
+        recovery_created: true,
+        parser_failed,
+        used_raw_fallback: false,
+    };
+    match reservation.commit_output_if_better(raw, candidate) {
+        Some(commit) => PreparedEmission::Recovered { commit, meta },
+        None => PreparedEmission::Plain {
+            output: raw.to_string(),
+            meta: EmissionMeta {
+                parser_failed,
+                used_raw_fallback: true,
+                ..EmissionMeta::default()
+            },
+        },
+    }
+}
+
 #[derive(Debug)]
 struct CollapsedRecord {
     group: Option<String>,
@@ -557,6 +671,42 @@ mod tests {
                 groups: 3
             })
         );
+    }
+
+    #[test]
+    fn lossy_emission_contains_exact_counts_and_recovery_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let rendered = RenderedOutput {
+            text: "status=fail\nsrc/a.rs:1 E failure".to_string(),
+            omission: Some(Omission {
+                items: 14,
+                groups: 3,
+            }),
+            parser_failed: false,
+        };
+        let raw = "native line\n".repeat(400);
+        let prepared = prepare_emission_with(&raw, "cargo test", rendered, |raw, slug| {
+            crate::core::tee::reserve_lossless_tee_file(raw, slug, temp.path(), 64_000, 20)
+        });
+        let shown = prepared.as_str();
+        assert!(shown.contains("omitted items=14 groups=3 recover=rtk read -l none "));
+        assert!(prepared.recovery_created());
+    }
+
+    #[test]
+    fn lossy_emission_falls_back_to_raw_when_tee_is_disabled() {
+        let raw = "full native output\n".repeat(100);
+        let rendered = RenderedOutput {
+            text: "short".to_string(),
+            omission: Some(Omission {
+                items: 99,
+                groups: 1,
+            }),
+            parser_failed: false,
+        };
+        let prepared = prepare_emission_with(&raw, "test", rendered, |_, _| None);
+        assert_eq!(prepared.as_str(), raw);
+        assert!(!prepared.recovery_created());
     }
 
     fn long_record(path: &str) -> String {

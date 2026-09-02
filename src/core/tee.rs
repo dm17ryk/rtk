@@ -324,6 +324,13 @@ impl LosslessTeeReservation {
         format_hint(&self.committed_path)
     }
 
+    pub fn recovery_command(&self) -> String {
+        format!(
+            "rtk read -l none {}",
+            display_shell_path(&self.committed_path)
+        )
+    }
+
     fn cmd_hint(&self) -> String {
         format_cmd_hint(&self.committed_path)
     }
@@ -376,10 +383,11 @@ impl LosslessTeeReservation {
         self.commit_with_lock(hint).map(|commit| commit.output)
     }
 
-    #[cfg(test)]
-    fn commit_display(self, filtered: &str) -> Option<LosslessTeeCommit> {
-        let hint = self.hint();
-        self.commit_with_lock(format!("{filtered}\r\n{hint}\r\n"))
+    pub fn commit_output_if_better(self, raw: &str, output: String) -> Option<LosslessTeeCommit> {
+        if crate::core::guard::never_worse(raw, &output) == raw {
+            return None;
+        }
+        self.commit_with_lock(output)
     }
 }
 
@@ -390,22 +398,6 @@ impl Drop for LosslessTeeReservation {
             let _ = std::fs::remove_file(&self.pending_path);
         }
     }
-}
-
-/// Commit a recovery artifact only when the compact display, its exact hint,
-/// and its final CRLF are still cheaper than native output. Returning `None`
-/// drops the reservation and removes its unselected artifact.
-#[cfg(test)]
-pub fn commit_lossless_if_better(
-    raw: &str,
-    filtered: &str,
-    reservation: LosslessTeeReservation,
-) -> Option<LosslessTeeCommit> {
-    let shown = format!("{filtered}\r\n{}\r\n", reservation.hint());
-    if crate::core::guard::never_worse(raw, &shown) == raw {
-        return None;
-    }
-    reservation.commit_display(filtered)
 }
 
 /// Commit a complete recovery artifact with a hint that can be pasted into
@@ -441,7 +433,7 @@ pub fn commit_lossless_if_better_for_powershell(
 
 /// Reserve a complete recovery artifact. Unlike the normal tee path, this
 /// refuses oversized output rather than truncating a file advertised as full.
-fn reserve_lossless_tee_file(
+pub(crate) fn reserve_lossless_tee_file(
     raw: &str,
     command_slug: &str,
     tee_dir: &std::path::Path,
@@ -974,6 +966,27 @@ mod tests {
     }
 
     #[test]
+    fn recovery_command_uses_rtk_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let reservation =
+            reserve_lossless_tee_file("complete raw output", "cargo test", temp.path(), 1_024, 20)
+                .unwrap();
+        let command = reservation.recovery_command();
+        assert!(command.starts_with("rtk read -l none "));
+    }
+
+    #[test]
+    fn rejected_candidate_removes_pending_artifact() {
+        let temp = tempfile::tempdir().unwrap();
+        let raw = "small";
+        let reservation = reserve_lossless_tee_file(raw, "test", temp.path(), 1_024, 20).unwrap();
+        assert!(reservation
+            .commit_output_if_better(raw, "a much larger rendered candidate".to_string())
+            .is_none());
+        assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
+    }
+
+    #[test]
     fn lossless_reservation_is_not_a_retained_log_until_commit() {
         let tmpdir = tempfile::tempdir().expect("tempdir");
         let reservation = reserve_lossless_tee_file("raw", "cmd-dir", tmpdir.path(), 1024, 1)
@@ -999,8 +1012,11 @@ mod tests {
         let tmpdir = tempfile::tempdir().expect("tempdir");
         let reservation = reserve_lossless_tee_file("raw", "cmd-dir", tmpdir.path(), 1024, 2)
             .expect("reservation");
+        let candidate = format!("summary\r\n{}\r\n", reservation.recovery_command());
         assert!(
-            commit_lossless_if_better("raw", "summary", reservation).is_none(),
+            reservation
+                .commit_output_if_better("raw", candidate)
+                .is_none(),
             "the recovery hint makes this compact output worse than native raw output"
         );
         assert!(fs::read_dir(tmpdir.path()).unwrap().next().is_none());

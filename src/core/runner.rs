@@ -9,6 +9,14 @@ use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
 use crate::core::tracking;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 
+pub fn emit_prepared(prepared: &crate::core::ai_output::PreparedEmission, trailing_newline: bool) {
+    if trailing_newline {
+        println!("{}", prepared.as_str());
+    } else {
+        print!("{}", prepared.as_str());
+    }
+}
+
 /// Compose `filtered` with an optional recovery `hint`, cap the total at `raw`
 /// (never emit more tokens than the command), print it, and return what was
 /// emitted so the caller tracks exactly that.
@@ -18,7 +26,11 @@ pub fn emit_guarded(filtered: &str, hint: Option<&str>, raw: &str) -> String {
         None => filtered.to_string(),
     };
     let shown = crate::core::guard::never_worse(raw, &body).to_string();
-    println!("{}", shown);
+    let prepared = crate::core::ai_output::PreparedEmission::Plain {
+        output: shown.clone(),
+        meta: crate::core::ai_output::EmissionMeta::default(),
+    };
+    emit_prepared(&prepared, true);
     shown
 }
 
