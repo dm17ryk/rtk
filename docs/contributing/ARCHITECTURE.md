@@ -680,8 +680,9 @@ Flow:
    residual_tokens      = sum(output_tokens)
    weighted_savings_pct = 100 × (1 - sum(output_tokens) / sum(input_tokens))
 
-   Exact routes do not have a captured residual size. They are counted
-   separately by ExactReason and do not dilute filtered-route efficiency.
+   Exact routes do not have a captured residual size and do not dilute
+   filtered-route efficiency. ExactReason is persisted for future surfaced
+   aggregation; current gain views do not show a per-reason breakdown.
 
          ↓
 

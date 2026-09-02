@@ -76,14 +76,14 @@ Exact routes retain native I/O and record why semantic capture is unsafe through
 
 ### Filter modes
 
-All execution goes through `core::stream::run_streaming()` with one of four `FilterMode` variants. The runner entry points (`run_filtered`, `run_streamed`, `run_passthrough`) select the appropriate mode automatically — module authors don't interact with `FilterMode` directly.
+Captured and passthrough execution is implemented by `core::stream::run_streaming()` with one of four `FilterMode` variants. These modes explain existing internals; they are not an authoring menu. New routes select the semantic or exact contract above, while `run_filtered()` and `run_streamed()` remain only for migration compatibility.
 
 | FilterMode | How it works | Used by |
 |------------|-------------|---------|
-| **`CaptureOnly`** | Buffers all stdout silently, then passes the full string to `filter_fn` post-hoc. Stderr streams to terminal in real time. | `run_filtered()` (default path) |
-| **`Buffered`** | Buffers all stdout, applies filter, then prints the result. Stderr streams live. Chosen automatically by `run_filtered()` when `filter_stdout_only` is set. | `run_filtered()` (stdout-only path) |
-| **`Streaming`** | Feeds each stdout line to a `StreamFilter::feed_line()` as it arrives. Emitted lines print immediately. Calls `flush()` after process exits for final output. | `run_streamed()` |
-| **`Passthrough`** | Inherits the parent TTY directly — no piping, no buffering. `raw`/`filtered` are empty. | `run_passthrough()` |
+| **`CaptureOnly`** | Buffers stdout, then produces an `AiDocument` or a legacy string post-hoc. Stderr streams to the terminal in real time. | `run_ai_filtered()`; legacy `run_filtered()` |
+| **`Buffered`** | Buffers stdout, applies a legacy string filter, then prints the result. Stderr streams live. | Legacy `run_filtered()` compatibility paths |
+| **`Streaming`** | Feeds each stdout line to a legacy `StreamFilter`, emitting strings immediately and flushing after process exit. | Legacy `run_streamed()` compatibility paths |
+| **`Passthrough`** | Inherits the parent TTY directly — no piping, buffering, or captured residual size. | `run_passthrough_with_reason()` |
 
 ### When to use which
 
@@ -91,7 +91,9 @@ All execution goes through `core::stream::run_streaming()` with one of four `Fil
 |----------|--------|------------|-----|
 | Parse safe semantic text into facts/records | `run_ai_filtered()` | CaptureOnly | Parser produces an `AiDocument`; shared rendering enforces its budget |
 | Preserve an existing string filter during migration | `run_filtered()` | CaptureOnly/Buffered | Compatibility only; do not use for new routes |
-| Long-running, line-parseable output | `run_streamed()` | Streaming | Low memory, real-time output |
+| Preserve an existing streamed string filter during migration | `run_streamed()` | Streaming | Compatibility only; do not use for new routes |
+| New long-running or streaming output | `run_passthrough_with_reason(..., ExactReason::Streaming)` | Passthrough | Preserves timing, ordering, and native stream semantics |
+| New interactive output | `run_passthrough_with_reason(..., ExactReason::Interactive)` | Passthrough | Preserves the native TTY and user interaction |
 | Output must remain exact | `run_passthrough_with_reason()` | Passthrough | Preserves native I/O and records the exact-route reason |
 | Custom direct output logic | Manual with `exec_capture()` | CaptureOnly | Migration debt; move it behind a shared runner when that command family is migrated |
 
@@ -151,9 +153,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
 Exit code handling is **fully automatic** for both shared captured runners — the wrapper extracts the native exit code (including Unix signal handling via 128+signal), tracks output, and returns `Ok(exit_code)`. Module authors just return the result.
 
-**Streaming filters (line-by-line):**
+**Legacy streaming filters (migration compatibility only):**
 
-Use `runner::run_streamed()` when the command is long-running or produces unbounded output that should be filtered line-by-line. Three levels of abstraction, from simplest to most flexible:
+The existing `runner::run_streamed()` API emits filtered strings directly and does not implement the new semantic document contract. Keep it only while migrating existing line-by-line filters. Do not use it for a new command: new long-running or streaming behavior must call `run_passthrough_with_reason(..., ExactReason::Streaming)`, and interactive behavior must use `ExactReason::Interactive`.
+
+The three legacy streaming abstractions are documented here only to maintain current routes until their command families are migrated:
 
 **Level 1: `RegexBlockFilter`** — regex start pattern + indent continuation (3-5 lines)
 
@@ -279,9 +283,11 @@ All module `run()` functions return `Result<i32>` where the `i32` is the underly
 |----------------|--------|-----------------|
 | `cmd.output()` (filtered) | `exit_code_from_output(&output, "tool")` | 128+signal on Unix |
 | `cmd.status()` (passthrough) | `exit_code_from_status(&status, "tool")` | 128+signal on Unix |
-| `run_filtered()` (wrapper) | Automatic — no manual code needed | Built-in |
+| `run_ai_filtered()` (semantic wrapper) | Automatic — no manual code needed | Built-in |
+| `run_filtered()` / `run_streamed()` (legacy wrappers) | Automatic during migration | Built-in |
+| `run_passthrough_with_reason()` (exact wrapper) | Automatic from native status | Built-in |
 
-**When using `run_filtered()`**: exit code handling is fully automatic. The wrapper extracts the exit code, handles signals, and returns `Ok(exit_code)`. Module authors just return the wrapper's result — no exit code logic needed.
+**When using a shared semantic or exact runner**: exit code handling is fully automatic. The wrapper extracts the native exit code, handles signals, and returns `Ok(exit_code)`. Module authors just return the wrapper's result — no exit code logic needed. The same remains true for retained legacy wrappers during migration.
 
 **When doing manual execution**: use `exit_code_from_output()` or `exit_code_from_status()` and return `Ok(exit_code)`. Never call `process::exit()`, never use `.code().unwrap_or(1)` (loses signal info).
 
@@ -291,7 +297,7 @@ When filtering fails, fall back to raw output and warn on stderr. Never block th
 
 ### Tee Recovery
 
-Modules that parse structured output (JSON, NDJSON, state machines) must call `tee::tee_and_hint()` so users can recover full output on failure.
+Existing legacy modules that already parse structured output use `tee::tee_and_hint()` so users can recover full output on failure. Do not copy that pattern into a new route: new structured output stays exact via `run_passthrough_with_reason(..., ExactReason::Structured)`, while safe semantic text uses the shared `AiDocument` emitter and its recovery contract.
 
 ### Internal Truncation Recovery
 
@@ -314,7 +320,7 @@ Modules must capture stderr and include it in the raw string passed to `timer.tr
 
 ### Tracking Completeness
 
-All modules must call `timer.track()` on every path — success, failure, and fallback. Since modules return `Ok(exit_code)` instead of calling `process::exit()`, tracking always runs before the program exits.
+Shared semantic and exact runners record tracking on every path — success, failure, and fallback. Retained manual or legacy modules must still call `timer.track()` before returning. Since modules return `Ok(exit_code)` instead of calling `process::exit()`, tracking always runs before the program exits.
 
 ### Verbose Flag
 
@@ -325,16 +331,17 @@ All modules accept `verbose: u8`. Use it to print debug info (command being run,
 
 Adding a new filter or command requires changes in multiple places. For TOML-vs-Rust decision criteria, see [CONTRIBUTING.md](../../CONTRIBUTING.md#toml-vs-rust-which-one).
 
-### Rust module (structured output, flag injection, state machines)
+### Rust module (semantic text or exact native output)
 
 1. **Create module** in `src/cmds/<ecosystem>/mycmd_cmd.rs`:
-   - Write the `filter_mycmd()` function (pure: `&str -> String`, no side effects)
-   - Write `pub fn run(...) -> Result<i32>` using `runner::run_filtered()` — build the `Command`, choose `RunOptions`, delegate
-   - Use `RunOptions::stdout_only()` when the filter parses structured stdout (JSON, NDJSON) — stderr would corrupt parsing
-   - Use `RunOptions::default()` when filtering combined text output
-   - Add `.tee("label")` when the filter parses structured output (enables raw output recovery on failure)
-   - **Exit codes**: handled automatically by `run_filtered()` — just return its result
-   - **Truncation**: if the filter caps any list at N items, emit `force_tee_tail_hint` (flat lists) or `force_tee_hint` (multi-line blocks) so the agent can recover hidden items — see [Internal Truncation Recovery](#internal-truncation-recovery). Use a named constant for the cap; derive the offset from it (`MAX_XXX + 1`)
+   - Classify the route before writing a parser. Safe semantic text uses `run_ai_filtered(...)`; structured, interactive, binary, streaming, sensitive, or unknown output uses `run_passthrough_with_reason(..., ExactReason)`.
+   - For safe semantic text, write a pure parser that returns `Result<AiDocument>` with status, facts, records, and any declared omissions. Do not render a string in the parser.
+   - Write `pub fn run(...) -> Result<i32>` using `runner::run_ai_filtered()` — build the `Command`, choose the narrowest `BudgetClass`, choose `RunOptions`, and delegate.
+   - Use `RunOptions::stdout_only()` only when stderr must stay outside the safe semantic parser; use `RunOptions::default()` when combined human-readable text is the semantic input.
+   - Populate the complete semantic document and let the shared renderer and lossless emitter enforce the budget, exact omission counts, recovery, and never-worse guard.
+   - For a new streaming route, use `run_passthrough_with_reason(..., ExactReason::Streaming)`. For an interactive route, use `ExactReason::Interactive`; select the corresponding reason for other exact categories.
+   - **Exit codes**: handled automatically by `run_ai_filtered()` and `run_passthrough_with_reason()` — just return the result.
+   - **Migration rule**: do not introduce `run_filtered()`, `run_streamed()`, direct stdout, or a new string-returning filter. Those patterns are retained only for existing routes awaiting migration.
 2. **Register module**:
    - Ecosystem `mod.rs` files use `automod::dir!()` — any `.rs` file in the directory becomes a public module automatically. No manual `pub mod` needed, but be aware: WIP or helper files will also be exposed. Only commit command-ready modules.
    - Add variant to `Commands` enum in `main.rs` with `#[arg(trailing_var_arg = true, allow_hyphen_values = true)]`

@@ -280,9 +280,9 @@ Every command execution records metrics to SQLite (`~/.local/share/rtk/tracking.
 - Savings percentage, execution time, project path
 - Output contract, exact reason, omitted item/group counts, parser failure, and recovery creation
 - 90-day automatic retention cleanup
-- Token estimation: `ceil(chars / 4.0)` approximation
+- Token estimation: `ceil(bytes / 4.0)` approximation
 
-Residual queries rank captured commands by `residual_tokens = sum(output_tokens)` and compute `weighted_savings_pct = 100 * (1 - sum(output_tokens) / sum(input_tokens))`. The ratio is computed from aggregate token sums, not by averaging per-run percentages. Exact routes have no captured residual size, so analytics report their counts separately by reason and do not let them dilute filtered-route efficiency. Because the token estimator is bytes divided by four, all token counts are approximate even though the same estimator makes reduction ratios useful.
+Residual queries rank captured commands by `residual_tokens = sum(output_tokens)` and compute `weighted_savings_pct = 100 * (1 - sum(output_tokens) / sum(input_tokens))`. The ratio is computed from aggregate token sums, not by averaging per-run percentages. Exact routes have no captured residual size, so they do not dilute weighted filtered-route efficiency. Tracking persists `exact_reason` for a future surfaced aggregation, but the current `rtk gain` views do not yet expose a per-reason breakdown. Because the token estimator is bytes divided by four, all token counts are approximate even though the same estimator makes reduction ratios useful.
 
 Analytics commands (`rtk gain`, `rtk cc-economics`, `rtk session`) query this database to produce dashboards and ROI reports.
 
