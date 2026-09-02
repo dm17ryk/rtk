@@ -7,7 +7,6 @@ src/cmds/git/git.rs
 src/cmds/go/go_cmd.rs
 src/cmds/js/pnpm_cmd.rs
 src/cmds/js/prisma_cmd.rs
-src/cmds/jvm/mvn_cmd.rs
 src/cmds/python/pip_cmd.rs
 src/cmds/system/deps.rs
 src/cmds/system/env_cmd.rs

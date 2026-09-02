@@ -13,13 +13,29 @@ fn visit_rs(dir: &Path, files: &mut Vec<PathBuf>) {
 }
 
 fn has_production_stdout(text: &str) -> bool {
-    let production = text
+    let normalized = text.replace("\r\n", "\n");
+    let production = normalized
         .split_once("\n#[cfg(test)]\n")
-        .map_or(text, |(before_tests, _)| before_tests);
+        .map_or(normalized.as_str(), |(before_tests, _)| before_tests);
     production.lines().any(|line| {
         let without_stderr = line.replace("eprintln!(", "").replace("eprint!(", "");
         without_stderr.contains("println!(") || without_stderr.contains("print!(")
     })
+}
+
+#[test]
+fn crlf_test_only_stdout_is_not_production_stdout() {
+    let source = "pub fn run() {}\r\n#[cfg(test)]\r\nmod tests {\r\n    #[test]\r\n    fn prints() {\r\n        println!(\"test only\");\r\n    }\r\n}\r\n";
+
+    assert!(!has_production_stdout(source));
+}
+
+#[test]
+fn crlf_production_stdout_is_production_stdout() {
+    let source =
+        "pub fn run() {\r\n    println!(\"production\");\r\n}\r\n#[cfg(test)]\r\nmod tests {}\r\n";
+
+    assert!(has_production_stdout(source));
 }
 
 #[test]
