@@ -5,6 +5,9 @@ use regex::Regex;
 use std::process::Command;
 use std::sync::LazyLock;
 
+use crate::core::ai_output::{
+    prepare_emission, render, AiDocument, BudgetClass, EmissionMeta, ExactReason,
+};
 use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
 use crate::core::tracking;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
@@ -95,24 +98,72 @@ impl<'a> RunOptions<'a> {
 
 pub type CaptureFilter<'a> = Box<dyn Fn(&str) -> String + 'a>;
 pub type ExitAwareCaptureFilter<'a> = Box<dyn Fn(&str, i32) -> String + 'a>;
+#[allow(dead_code)] // Semantic adapters are added in later foundation tasks.
+pub type AiFilterResult = Result<AiDocument>;
+#[allow(dead_code)] // Semantic adapters are added in later foundation tasks.
+pub type AiCaptureFilter<'a> = Box<dyn Fn(&str) -> AiFilterResult + 'a>;
+#[allow(dead_code)] // Semantic adapters are added in later foundation tasks.
+pub type ExitAwareAiCaptureFilter<'a> = Box<dyn Fn(&str, i32) -> AiFilterResult + 'a>;
 
+#[allow(dead_code)] // Semantic variants are consumed by later foundation tasks.
 pub enum RunMode<'a> {
     Filtered(CaptureFilter<'a>),
     FilteredWithExit(ExitAwareCaptureFilter<'a>),
+    AiFiltered {
+        budget: BudgetClass,
+        filter: AiCaptureFilter<'a>,
+    },
+    AiFilteredWithExit {
+        budget: BudgetClass,
+        filter: ExitAwareAiCaptureFilter<'a>,
+    },
     Streamed(Box<dyn StreamFilter + 'a>),
-    Passthrough,
+    Passthrough(ExactReason),
+}
+
+#[derive(Clone, Copy)]
+enum CapturedContract {
+    Legacy,
+    Ai(BudgetClass),
+}
+
+fn produce_document<F>(text: &str, exit_code: i32, filter_fn: F) -> AiDocument
+where
+    F: Fn(&str, i32) -> AiFilterResult,
+{
+    filter_fn(text, exit_code)
+        .unwrap_or_else(|error| AiDocument::parse_failure(text, &error.to_string()))
+}
+
+fn track_captured_emission(
+    timer: tracking::TimedExecution,
+    cmd_label: &str,
+    raw: &str,
+    shown: &str,
+    meta: EmissionMeta,
+) {
+    // Task 5 extends this seam to persist semantic emission metadata.
+    let _ = meta;
+    timer.track(cmd_label, &format!("rtk {}", cmd_label), raw, shown);
+}
+
+fn track_exact_execution(timer: tracking::TimedExecution, cmd_label: &str, reason: ExactReason) {
+    // Task 5 extends this seam to persist the explicit exact-output reason.
+    let _ = reason;
+    timer.track_passthrough(cmd_label, &format!("rtk {} (passthrough)", cmd_label));
 }
 
 fn run_captured_filter<F>(
     mut cmd: Command,
     tool_name: &str,
     cmd_label: &str,
+    contract: CapturedContract,
     filter_fn: F,
     opts: RunOptions<'_>,
     timer: tracking::TimedExecution,
 ) -> Result<i32>
 where
-    F: Fn(&str, i32) -> String,
+    F: Fn(&str, i32) -> AiFilterResult,
 {
     let stdin_mode = if opts.inherit_stdin {
         StdinMode::Inherit
@@ -142,7 +193,7 @@ where
     } else {
         raw
     };
-    let filtered = filter_fn(text_to_filter, exit_code);
+    let document = produce_document(text_to_filter, exit_code, filter_fn);
 
     let raw_for_tracking = if opts.filter_stdout_only {
         raw_stdout
@@ -150,24 +201,35 @@ where
         raw
     };
 
-    let shown = if let Some(label) = opts.tee_label {
-        print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
-    } else {
-        let guarded = crate::core::guard::never_worse(raw_for_tracking, &filtered).to_string();
-        if opts.no_trailing_newline {
-            print!("{}", guarded);
-        } else {
-            println!("{}", guarded);
+    let (shown, meta) = match contract {
+        CapturedContract::Legacy => {
+            let filtered = render(&document, BudgetClass::Source).text;
+            let shown = if let Some(label) = opts.tee_label {
+                print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
+            } else {
+                let guarded =
+                    crate::core::guard::never_worse(raw_for_tracking, &filtered).to_string();
+                if opts.no_trailing_newline {
+                    print!("{}", guarded);
+                } else {
+                    println!("{}", guarded);
+                }
+                guarded
+            };
+            (shown, EmissionMeta::default())
         }
-        guarded
+        CapturedContract::Ai(budget) => {
+            let rendered = render(&document, budget);
+            let command_slug = opts.tee_label.unwrap_or(cmd_label);
+            let prepared = prepare_emission(raw_for_tracking, command_slug, rendered);
+            let shown = prepared.as_str().to_string();
+            let meta = prepared.meta();
+            emit_prepared(&prepared, !opts.no_trailing_newline);
+            (shown, meta)
+        }
     };
 
-    timer.track(
-        cmd_label,
-        &format!("rtk {}", cmd_label),
-        raw_for_tracking,
-        &shown,
-    );
+    track_captured_emission(timer, cmd_label, raw_for_tracking, &shown, meta);
     Ok(exit_code)
 }
 
@@ -186,7 +248,8 @@ pub fn run(
             cmd,
             tool_name,
             &cmd_label,
-            move |text, _| filter_fn(text),
+            CapturedContract::Legacy,
+            move |text, _| Ok(AiDocument::legacy(filter_fn(text))),
             opts,
             timer,
         ),
@@ -194,7 +257,26 @@ pub fn run(
             cmd,
             tool_name,
             &cmd_label,
-            move |text, exit_code| filter_fn(text, exit_code),
+            CapturedContract::Legacy,
+            move |text, exit_code| Ok(AiDocument::legacy(filter_fn(text, exit_code))),
+            opts,
+            timer,
+        ),
+        RunMode::AiFiltered { budget, filter } => run_captured_filter(
+            cmd,
+            tool_name,
+            &cmd_label,
+            CapturedContract::Ai(budget),
+            move |text, _| filter(text),
+            opts,
+            timer,
+        ),
+        RunMode::AiFilteredWithExit { budget, filter } => run_captured_filter(
+            cmd,
+            tool_name,
+            &cmd_label,
+            CapturedContract::Ai(budget),
+            move |text, exit_code| filter(text, exit_code),
             opts,
             timer,
         ),
@@ -219,12 +301,12 @@ pub fn run(
             );
             Ok(result.exit_code)
         }
-        RunMode::Passthrough => {
+        RunMode::Passthrough(reason) => {
             let result =
                 stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
                     .with_context(|| format!("Failed to run {}", tool_name))?;
 
-            timer.track_passthrough(&cmd_label, &format!("rtk {} (passthrough)", cmd_label));
+            track_exact_execution(timer, &cmd_label, reason);
             Ok(result.exit_code)
         }
     }
@@ -268,7 +350,64 @@ where
     )
 }
 
+#[allow(dead_code)] // Semantic adapters are added in later foundation tasks.
+pub fn run_ai_filtered<F>(
+    cmd: Command,
+    tool_name: &str,
+    args_display: &str,
+    budget: BudgetClass,
+    filter_fn: F,
+    opts: RunOptions<'_>,
+) -> Result<i32>
+where
+    F: Fn(&str) -> AiFilterResult,
+{
+    run(
+        cmd,
+        tool_name,
+        args_display,
+        RunMode::AiFiltered {
+            budget,
+            filter: Box::new(filter_fn),
+        },
+        opts,
+    )
+}
+
+#[allow(dead_code)] // Semantic adapters are added in later foundation tasks.
+pub fn run_ai_filtered_with_exit<F>(
+    cmd: Command,
+    tool_name: &str,
+    args_display: &str,
+    budget: BudgetClass,
+    filter_fn: F,
+    opts: RunOptions<'_>,
+) -> Result<i32>
+where
+    F: Fn(&str, i32) -> AiFilterResult,
+{
+    run(
+        cmd,
+        tool_name,
+        args_display,
+        RunMode::AiFilteredWithExit {
+            budget,
+            filter: Box::new(filter_fn),
+        },
+        opts,
+    )
+}
+
 pub fn run_passthrough(tool: &str, args: &[std::ffi::OsString], verbose: u8) -> Result<i32> {
+    run_passthrough_with_reason(tool, args, verbose, ExactReason::Unknown)
+}
+
+pub fn run_passthrough_with_reason(
+    tool: &str,
+    args: &[std::ffi::OsString],
+    verbose: u8,
+    reason: ExactReason,
+) -> Result<i32> {
     if verbose > 0 {
         eprintln!("{} passthrough: {:?}", tool, args);
     }
@@ -279,7 +418,7 @@ pub fn run_passthrough(tool: &str, args: &[std::ffi::OsString], verbose: u8) -> 
         cmd,
         tool,
         &args_str,
-        RunMode::Passthrough,
+        RunMode::Passthrough(reason),
         RunOptions::default(),
     )
 }
@@ -903,6 +1042,7 @@ fn is_bun_count_line(trimmed: &str) -> bool {
 #[cfg(test)]
 mod err_test_runner_tests {
     use super::*;
+    use crate::core::ai_output::{render, AiDocument, BudgetClass, ExactReason};
 
     #[test]
     fn test_filter_errors() {
@@ -1212,5 +1352,56 @@ mod err_test_runner_tests {
         assert!(!is_bun_count_line("6 passing"));
         assert!(!is_bun_count_line("x fail"));
         assert!(!is_bun_count_line("10 expect() calls"));
+    }
+
+    #[test]
+    fn run_mode_accepts_semantic_filter() {
+        let mode = RunMode::AiFiltered {
+            budget: BudgetClass::State,
+            filter: Box::new(|text| {
+                let mut doc = AiDocument::new(Some("ok"));
+                doc.fact("bytes", text.len().to_string());
+                Ok(doc)
+            }),
+        };
+        assert!(matches!(mode, RunMode::AiFiltered { .. }));
+    }
+
+    #[test]
+    fn passthrough_reason_is_exposed_for_tracking() {
+        assert_eq!(ExactReason::Structured.as_str(), "structured");
+    }
+
+    #[test]
+    fn parse_failure_document_is_bounded_and_recoverable() {
+        let raw = (0..500)
+            .map(|n| format!("line-{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let doc = AiDocument::parse_failure(&raw, "unexpected table");
+        let rendered = render(&doc, BudgetClass::Diagnostic);
+        assert!(rendered
+            .text
+            .starts_with("status=error filter=parse-failed"));
+        assert!(rendered.parser_failed);
+        assert!(rendered.omission.as_ref().is_some_and(|o| o.items >= 480));
+        assert!(!rendered.text.contains("line-250"));
+    }
+
+    #[test]
+    fn semantic_filter_error_becomes_parse_failure_document() {
+        let raw = "head\nmiddle\ntail";
+        let doc = produce_document(raw, 7, |text, exit_code| {
+            assert_eq!(text, raw);
+            assert_eq!(exit_code, 7);
+            Err(anyhow::anyhow!("unexpected table"))
+        });
+
+        let rendered = render(&doc, BudgetClass::Diagnostic);
+        assert!(rendered
+            .text
+            .starts_with("status=error filter=parse-failed"));
+        assert!(rendered.text.contains("detail=unexpected_table"));
+        assert!(rendered.parser_failed);
     }
 }

@@ -159,6 +159,35 @@ impl AiDocument {
         }
     }
 
+    pub fn parse_failure(raw: &str, error: &str) -> Self {
+        const EDGE_LINES: usize = 10;
+        let lines: Vec<&str> = raw.lines().collect();
+        let mut doc = Self::new(Some("error"));
+        doc.fact("filter", "parse-failed");
+        doc.fact(
+            "detail",
+            error.split_whitespace().collect::<Vec<_>>().join("_"),
+        );
+        doc.parser_failed = true;
+
+        if lines.len() <= EDGE_LINES * 2 {
+            for line in lines {
+                doc.push(AiRecord::new(Severity::Error, line));
+            }
+            return doc;
+        }
+        for line in &lines[..EDGE_LINES] {
+            doc.push(AiRecord::new(Severity::Error, *line));
+        }
+        for line in &lines[lines.len() - EDGE_LINES..] {
+            doc.push(AiRecord::new(Severity::Error, *line));
+        }
+        doc.with_omission(Omission {
+            items: lines.len() - EDGE_LINES * 2,
+            groups: 0,
+        })
+    }
+
     pub fn fact(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.facts.push((key.into(), value.into()));
     }
