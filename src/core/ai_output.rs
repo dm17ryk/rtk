@@ -297,9 +297,7 @@ where
         };
     };
     let recovery = reservation.recovery_command();
-    let body = rendered
-        .text
-        .trim_end_matches(|ch| ch == '\r' || ch == '\n');
+    let body = rendered.text.trim_end_matches(['\r', '\n']);
     let candidate = format!(
         "{body}\nomitted items={} groups={} recover={recovery}",
         omission.items, omission.groups
