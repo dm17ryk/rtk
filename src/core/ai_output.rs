@@ -201,11 +201,7 @@ pub fn render(document: &AiDocument, budget: BudgetClass) -> RenderedOutput {
 
 fn render_semantic(document: &AiDocument, budget: BudgetClass) -> RenderedOutput {
     let records = collapsed_records(document);
-    let mut lines = summary_lines(document);
-
-    if estimate_joined_tokens(&lines) > budget.max_tokens() {
-        lines.clear();
-    }
+    let (mut lines, omitted_summary_items) = summary_lines(document, budget);
 
     let mut emitted = 0;
     for record in &records {
@@ -223,7 +219,22 @@ fn render_semantic(document: &AiDocument, budget: BudgetClass) -> RenderedOutput
         emitted += 1;
     }
 
-    let omission = omission_from(document.declared_omission.clone(), &records[emitted..]);
+    let omission = omission_from(
+        document.declared_omission.clone(),
+        omitted_summary_items,
+        &records[emitted..],
+    );
+    if lines.is_empty() {
+        if let Some(omission) = &omission {
+            let line = format!(
+                "omitted items={} groups={}",
+                omission.items, omission.groups
+            );
+            if crate::core::tracking::estimate_tokens(&line) <= budget.max_tokens() {
+                lines.push(line);
+            }
+        }
+    }
 
     RenderedOutput {
         text: lines.join("\n"),
@@ -232,7 +243,7 @@ fn render_semantic(document: &AiDocument, budget: BudgetClass) -> RenderedOutput
     }
 }
 
-fn summary_lines(document: &AiDocument) -> Vec<String> {
+fn summary_lines(document: &AiDocument, budget: BudgetClass) -> (Vec<String>, usize) {
     let mut fields = Vec::new();
     if let Some(status) = &document.status {
         fields.push(format!("status={status}"));
@@ -245,10 +256,27 @@ fn summary_lines(document: &AiDocument) -> Vec<String> {
     );
 
     if fields.is_empty() {
+        return (Vec::new(), 0);
+    }
+
+    let mut emitted_fields: Vec<String> = Vec::new();
+    let mut omitted_items = 0;
+    for field in fields {
+        let mut candidate = emitted_fields.clone();
+        candidate.push(field.clone());
+        if crate::core::tracking::estimate_tokens(&candidate.join(" ")) <= budget.max_tokens() {
+            emitted_fields.push(field);
+        } else {
+            omitted_items += 1;
+        }
+    }
+
+    let lines = if emitted_fields.is_empty() {
         Vec::new()
     } else {
-        vec![fields.join(" ")]
-    }
+        vec![emitted_fields.join(" ")]
+    };
+    (lines, omitted_items)
 }
 
 fn collapsed_records(document: &AiDocument) -> Vec<CollapsedRecord> {
@@ -277,12 +305,19 @@ fn collapsed_records(document: &AiDocument) -> Vec<CollapsedRecord> {
 
 fn omission_from(
     declared_omission: Option<Omission>,
+    omitted_summary_items: usize,
     omitted_records: &[CollapsedRecord],
 ) -> Option<Omission> {
-    let mut omitted = declared_omission.unwrap_or(Omission {
-        items: 0,
-        groups: 0,
-    });
+    let mut omitted = match declared_omission {
+        Some(mut declared) => {
+            declared.items += omitted_summary_items;
+            declared
+        }
+        None => Omission {
+            items: omitted_summary_items,
+            groups: 0,
+        },
+    };
     let mut omitted_groups = std::collections::BTreeSet::new();
 
     for record in omitted_records {
@@ -323,6 +358,61 @@ mod tests {
     }
 
     #[test]
+    fn stable_labels_cover_the_output_contract_vocabulary() {
+        assert_eq!(
+            [
+                BudgetClass::Acknowledgement.as_str(),
+                BudgetClass::State.as_str(),
+                BudgetClass::Collection.as_str(),
+                BudgetClass::Diagnostic.as_str(),
+                BudgetClass::Source.as_str(),
+            ],
+            [
+                "acknowledgement",
+                "state",
+                "collection",
+                "diagnostic",
+                "source"
+            ]
+        );
+        assert_eq!(
+            [
+                ExactReason::Structured.as_str(),
+                ExactReason::Interactive.as_str(),
+                ExactReason::Binary.as_str(),
+                ExactReason::Streaming.as_str(),
+                ExactReason::Unknown.as_str(),
+                ExactReason::Sensitive.as_str(),
+            ],
+            [
+                "structured",
+                "interactive",
+                "binary",
+                "streaming",
+                "unknown",
+                "sensitive"
+            ]
+        );
+        assert_eq!(
+            [
+                OutputContract::AiOwned(BudgetClass::State).as_str(),
+                OutputContract::Exact(ExactReason::Unknown).as_str(),
+                OutputContract::Legacy.as_str(),
+            ],
+            ["ai_owned", "exact", "legacy"]
+        );
+        assert_eq!(
+            [
+                Severity::Error.as_str(),
+                Severity::Warning.as_str(),
+                Severity::Info.as_str(),
+                Severity::Success.as_str(),
+            ],
+            ["error", "warning", "info", "success"]
+        );
+    }
+
+    #[test]
     fn semantic_render_orders_failures_and_counts_duplicates() {
         let mut doc = AiDocument::new(Some("fail"));
         doc.fact("passed", "12");
@@ -346,6 +436,45 @@ mod tests {
     }
 
     #[test]
+    fn semantic_render_keeps_source_order_for_distinct_same_severity_records() {
+        let mut doc = AiDocument::new(None::<String>);
+        doc.push(AiRecord::new(Severity::Warning, "src/z.rs:9 W later_path"));
+        doc.push(AiRecord::new(
+            Severity::Warning,
+            "src/a.rs:1 W earlier_path",
+        ));
+
+        let rendered = render(&doc, BudgetClass::Diagnostic);
+
+        assert_eq!(
+            rendered.text,
+            "src/z.rs:9 W later_path\nsrc/a.rs:1 W earlier_path"
+        );
+        assert_eq!(rendered.omission, None);
+    }
+
+    #[test]
+    fn semantic_render_reports_over_budget_summary_omission() {
+        let mut doc = AiDocument::new(Some("x".repeat(600)));
+        doc.fact("detail", "y".repeat(600));
+
+        let rendered = render(&doc, BudgetClass::Acknowledgement);
+
+        assert_eq!(rendered.text, "omitted items=2 groups=0");
+        assert_eq!(
+            rendered.omission,
+            Some(Omission {
+                items: 2,
+                groups: 0
+            })
+        );
+        assert!(
+            crate::core::tracking::estimate_tokens(&rendered.text)
+                <= BudgetClass::Acknowledgement.max_tokens()
+        );
+    }
+
+    #[test]
     fn semantic_render_stops_before_collection_budget() {
         let mut doc = AiDocument::new(Some("ok"));
         for index in 0..300 {
@@ -362,10 +491,75 @@ mod tests {
     }
 
     #[test]
+    fn semantic_render_counts_omitted_items_and_distinct_groups() {
+        let mut doc = AiDocument::new(None::<String>);
+        doc.push(AiRecord::new(Severity::Info, long_record("src/a.rs")).grouped("alpha"));
+        doc.push(AiRecord::new(Severity::Info, long_record("src/b.rs")).grouped("alpha"));
+        doc.push(AiRecord::new(Severity::Info, long_record("src/c.rs")).grouped("beta"));
+
+        let rendered = render(&doc, BudgetClass::Acknowledgement);
+
+        assert_eq!(rendered.text, long_record("src/a.rs"));
+        assert_eq!(
+            rendered.omission,
+            Some(Omission {
+                items: 2,
+                groups: 2
+            })
+        );
+    }
+
+    #[test]
+    fn semantic_render_adds_declared_omission_to_budget_omission() {
+        let mut doc = AiDocument::new(None::<String>).with_omission(Omission {
+            items: 5,
+            groups: 1,
+        });
+        doc.push(AiRecord::new(Severity::Info, long_record("src/a.rs")).grouped("alpha"));
+        doc.push(AiRecord::new(Severity::Info, long_record("src/b.rs")).grouped("beta"));
+
+        let rendered = render(&doc, BudgetClass::Acknowledgement);
+
+        assert_eq!(rendered.text, long_record("src/a.rs"));
+        assert_eq!(
+            rendered.omission,
+            Some(Omission {
+                items: 6,
+                groups: 2
+            })
+        );
+    }
+
+    #[test]
     fn legacy_render_is_byte_compatible() {
         let raw = "native heading\n  native spacing\n";
         let rendered = render(&AiDocument::legacy(raw), BudgetClass::State);
         assert_eq!(rendered.text, raw);
         assert_eq!(rendered.omission, None);
+    }
+
+    #[test]
+    fn legacy_render_carries_declared_omission_without_changing_text() {
+        let raw = "native heading\n  native spacing\n";
+        let rendered = render(
+            &AiDocument::legacy(raw).with_omission(Omission {
+                items: 7,
+                groups: 3,
+            }),
+            BudgetClass::Acknowledgement,
+        );
+
+        assert_eq!(rendered.text, raw);
+        assert_eq!(
+            rendered.omission,
+            Some(Omission {
+                items: 7,
+                groups: 3
+            })
+        );
+    }
+
+    fn long_record(path: &str) -> String {
+        format!("{path}:1 match={}", "v".repeat(260))
     }
 }
