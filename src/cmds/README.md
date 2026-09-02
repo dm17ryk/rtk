@@ -76,12 +76,12 @@ Exact routes retain native I/O and record why semantic capture is unsafe through
 
 ### Filter modes
 
-Captured and passthrough execution is implemented by `core::stream::run_streaming()` with one of four `FilterMode` variants. These modes explain existing internals; they are not an authoring menu. New routes select the semantic or exact contract above, while `run_filtered()` and `run_streamed()` remain only for migration compatibility.
+Captured and passthrough execution is implemented by `core::stream::run_streaming()` with one of four `FilterMode` variants. Production command-module wrappers currently select `CaptureOnly`, `Streaming`, or `Passthrough`; `Buffered` remains internal/test support and has no current wrapper call site. These modes explain existing internals, not an authoring menu. New routes select the semantic or exact contract above, while `run_filtered()` and `run_streamed()` remain only for migration compatibility.
 
 | FilterMode | How it works | Used by |
 |------------|-------------|---------|
 | **`CaptureOnly`** | Buffers stdout, then produces an `AiDocument` or a legacy string post-hoc. Stderr streams to the terminal in real time. | `run_ai_filtered()`; legacy `run_filtered()` |
-| **`Buffered`** | Buffers stdout, applies a legacy string filter, then prints the result. Stderr streams live. | Legacy `run_filtered()` compatibility paths |
+| **`Buffered`** | Buffers stdout, applies a string filter, then prints the result. Stderr streams live. | Retained internal/test support; no current command-module runner selects it |
 | **`Streaming`** | Feeds each stdout line to a legacy `StreamFilter`, emitting strings immediately and flushing after process exit. | Legacy `run_streamed()` compatibility paths |
 | **`Passthrough`** | Inherits the parent TTY directly — no piping, buffering, or captured residual size. | `run_passthrough_with_reason()` |
 
@@ -90,7 +90,7 @@ Captured and passthrough execution is implemented by `core::stream::run_streamin
 | Scenario | Runner | FilterMode | Why |
 |----------|--------|------------|-----|
 | Parse safe semantic text into facts/records | `run_ai_filtered()` | CaptureOnly | Parser produces an `AiDocument`; shared rendering enforces its budget |
-| Preserve an existing string filter during migration | `run_filtered()` | CaptureOnly/Buffered | Compatibility only; do not use for new routes |
+| Preserve an existing string filter during migration | `run_filtered()` | CaptureOnly | Compatibility only; current wrapper does not select Buffered; do not use for new routes |
 | Preserve an existing streamed string filter during migration | `run_streamed()` | Streaming | Compatibility only; do not use for new routes |
 | New long-running or streaming output | `run_passthrough_with_reason(..., ExactReason::Streaming)` | Passthrough | Preserves timing, ordering, and native stream semantics |
 | New interactive output | `run_passthrough_with_reason(..., ExactReason::Interactive)` | Passthrough | Preserves the native TTY and user interaction |
