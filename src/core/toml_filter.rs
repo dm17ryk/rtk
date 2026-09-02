@@ -25,7 +25,7 @@
 use super::constants::RTK_META_COMMANDS;
 use regex::{Regex, RegexSet};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::LazyLock;
 
 // Built-in filters: concatenated from src/filters/*.toml by build.rs at compile time.
@@ -572,18 +572,39 @@ pub enum Lossiness {
     Tail {
         tee_payload: String,
         tail_offset: usize,
+        omitted_items: usize,
+        omitted_groups: usize,
     },
-    Whole,
+    Whole {
+        omitted_items: usize,
+        omitted_groups: usize,
+    },
 }
 
 pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String, Lossiness) {
-    let mut lines: Vec<String> = stdout.lines().map(String::from).collect();
+    struct TrackedLine {
+        source_index: Option<usize>,
+        text: String,
+    }
+
+    let mut lines: Vec<TrackedLine> = stdout
+        .lines()
+        .enumerate()
+        .map(|(source_index, text)| TrackedLine {
+            source_index: Some(source_index),
+            text: text.to_string(),
+        })
+        .collect();
+    let mut lossy_sources = HashSet::new();
 
     // 1. strip_ansi
     if filter.strip_ansi {
         lines = lines
             .into_iter()
-            .map(|l| crate::core::utils::strip_ansi(&l))
+            .map(|mut line| {
+                line.text = crate::core::utils::strip_ansi(&line.text);
+                line
+            })
             .collect();
     }
 
@@ -593,10 +614,16 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
             .into_iter()
             .map(|mut line| {
                 for rule in &filter.replace {
-                    line = rule
+                    let replaced = rule
                         .pattern
-                        .replace_all(&line, rule.replacement.as_str())
+                        .replace_all(&line.text, rule.replacement.as_str())
                         .into_owned();
+                    if replaced != line.text {
+                        if let Some(source_index) = line.source_index {
+                            lossy_sources.insert(source_index);
+                        }
+                        line.text = replaced;
+                    }
                 }
                 line
             })
@@ -606,7 +633,11 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
     // 3. match_output — short-circuit on full blob match (first rule wins)
     //    If `unless` is set and also matches the blob, the rule is skipped.
     if !filter.match_output.is_empty() {
-        let blob = lines.join("\n");
+        let blob = lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         for rule in &filter.match_output {
             if rule.pattern.is_match(&blob) {
                 if let Some(ref unless_re) = rule.unless {
@@ -614,62 +645,108 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
                         continue; // errors/warnings present — skip this rule
                     }
                 }
-                return (rule.message.clone(), Lossiness::Whole);
+                lossy_sources.extend(lines.iter().filter_map(|line| line.source_index));
+                return (
+                    rule.message.clone(),
+                    Lossiness::Whole {
+                        omitted_items: lossy_sources.len(),
+                        omitted_groups: 0,
+                    },
+                );
             }
         }
     }
 
     // 4. strip OR keep (mutually exclusive)
     match &filter.line_filter {
-        LineFilter::Strip(set) => lines.retain(|l| !set.is_match(l)),
-        LineFilter::Keep(set) => lines.retain(|l| set.is_match(l)),
+        LineFilter::Strip(set) => lines.retain(|line| {
+            let keep = !set.is_match(&line.text);
+            if !keep {
+                if let Some(source_index) = line.source_index {
+                    lossy_sources.insert(source_index);
+                }
+            }
+            keep
+        }),
+        LineFilter::Keep(set) => lines.retain(|line| {
+            let keep = set.is_match(&line.text);
+            if !keep {
+                if let Some(source_index) = line.source_index {
+                    lossy_sources.insert(source_index);
+                }
+            }
+            keep
+        }),
         LineFilter::None => {}
     }
 
     // 5. truncate_lines_at — uses utils::truncate (unicode-safe)
-    let mut intra_line_loss = false;
     if let Some(max_chars) = filter.truncate_lines_at {
         lines = lines
             .into_iter()
-            .map(|line| {
-                let truncated = crate::core::utils::truncate(&line, max_chars);
-                if truncated != line {
-                    intra_line_loss = true;
+            .map(|mut line| {
+                let truncated = crate::core::utils::truncate(&line.text, max_chars);
+                if truncated != line.text {
+                    if let Some(source_index) = line.source_index {
+                        lossy_sources.insert(source_index);
+                    }
+                    line.text = truncated;
                 }
-                truncated
+                line
             })
             .collect();
     }
 
-    let snapshot_for_tail = !intra_line_loss
-        && filter.tail_lines.is_none()
-        && (filter.head_lines.is_some() || filter.max_lines.is_some());
-    let pre_cut = snapshot_for_tail.then(|| lines.clone());
+    let snapshot_for_tail =
+        lossy_sources.is_empty() && filter.tail_lines.is_none() && filter.head_lines.is_some();
+    let pre_cut = snapshot_for_tail.then(|| {
+        lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
 
     // 6. head + tail
     let total = lines.len();
-    let mut noncontiguous_drop = false;
     let mut head_cut: Option<usize> = None;
     if let (Some(head), Some(tail)) = (filter.head_lines, filter.tail_lines) {
         if total > head + tail {
-            let mut result = lines[..head].to_vec();
-            result.push(format!("... ({} lines omitted)", total - head - tail));
-            result.extend_from_slice(&lines[total - tail..]);
+            lossy_sources.extend(
+                lines[head..total - tail]
+                    .iter()
+                    .filter_map(|line| line.source_index),
+            );
+            let mut result: Vec<TrackedLine> = lines.drain(..head).collect();
+            result.push(TrackedLine {
+                source_index: None,
+                text: format!("... ({} lines omitted)", total - head - tail),
+            });
+            result.extend(lines.drain(total - head - tail..));
             lines = result;
-            noncontiguous_drop = true;
         }
     } else if let Some(head) = filter.head_lines {
         if total > head {
+            lossy_sources.extend(lines[head..].iter().filter_map(|line| line.source_index));
             lines.truncate(head);
-            lines.push(format!("... ({} lines omitted)", total - head));
+            lines.push(TrackedLine {
+                source_index: None,
+                text: format!("... ({} lines omitted)", total - head),
+            });
             head_cut = Some(head);
         }
     } else if let Some(tail) = filter.tail_lines {
         if total > tail {
             let omitted = total - tail;
-            lines = lines[omitted..].to_vec();
-            lines.insert(0, format!("... ({} lines omitted)", omitted));
-            noncontiguous_drop = true;
+            lossy_sources.extend(lines[..omitted].iter().filter_map(|line| line.source_index));
+            lines.drain(..omitted);
+            lines.insert(
+                0,
+                TrackedLine {
+                    source_index: None,
+                    text: format!("... ({} lines omitted)", omitted),
+                },
+            );
         }
     }
 
@@ -678,37 +755,54 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
     if let Some(max) = filter.max_lines {
         if lines.len() > max {
             let dropped = lines.len() - max;
+            lossy_sources.extend(lines[max..].iter().filter_map(|line| line.source_index));
             lines.truncate(max);
-            lines.push(format!("... ({} lines truncated)", dropped));
+            lines.push(TrackedLine {
+                source_index: None,
+                text: format!("... ({} lines truncated)", dropped),
+            });
             max_cut = Some(max);
         }
     }
 
     // 8. on_empty
-    let result = lines.join("\n");
+    let mut result = lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     if result.trim().is_empty() {
         if let Some(ref msg) = filter.on_empty {
-            return (msg.clone(), Lossiness::None);
+            result = msg.clone();
         }
     }
 
-    let loss = if let Some(snapshot) = pre_cut {
+    let omitted_items = lossy_sources.len();
+    let loss = if omitted_items == 0 {
+        Lossiness::None
+    } else if let Some(tee_payload) = pre_cut {
         match (head_cut, max_cut) {
-            (Some(_), Some(_)) => Lossiness::Whole,
-            (Some(head), None) => Lossiness::Tail {
-                tee_payload: snapshot.join("\n"),
-                tail_offset: head + 1,
+            (Some(_), Some(_)) => Lossiness::Whole {
+                omitted_items,
+                omitted_groups: 0,
             },
-            (None, Some(max)) => Lossiness::Tail {
-                tee_payload: snapshot.join("\n"),
-                tail_offset: max + 1,
+            (Some(head), None) => Lossiness::Tail {
+                tee_payload,
+                tail_offset: head + 1,
+                omitted_items,
+                omitted_groups: 0,
+            },
+            (None, Some(_)) => Lossiness::Whole {
+                omitted_items,
+                omitted_groups: 0,
             },
             (None, None) => Lossiness::None,
         }
-    } else if noncontiguous_drop || intra_line_loss || head_cut.is_some() || max_cut.is_some() {
-        Lossiness::Whole
     } else {
-        Lossiness::None
+        Lossiness::Whole {
+            omitted_items,
+            omitted_groups: 0,
+        }
     };
 
     (result, loss)
@@ -898,11 +992,17 @@ mod tests {
     }
 
     #[test]
-    fn test_loss_tail_configured_unfired_max_fires_is_whole() {
+    fn tail_configured_unfired_max_reports_exact_omitted_lines() {
         let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\ntail_lines = 100\nmax_lines = 2\n";
         let (out, loss) = apply_filter_with_info(&first_filter(toml), "a\nb\nc\nd\ne");
         assert!(out.contains("lines truncated"));
-        assert_ne!(loss, Lossiness::None);
+        assert_eq!(
+            loss,
+            Lossiness::Whole {
+                omitted_items: 3,
+                omitted_groups: 0,
+            }
+        );
     }
 
     #[test]
@@ -954,90 +1054,162 @@ mod tests {
     }
 
     #[test]
-    fn test_loss_head_lines_is_tail() {
+    fn head_lines_reports_exact_omitted_lines() {
         let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nhead_lines = 2\n";
         let (out, loss) = apply_filter_with_info(&first_filter(toml), "a\nb\nc\nd\ne");
         assert!(out.starts_with("a\nb\n"));
-        match loss {
+        assert_eq!(
+            loss,
             Lossiness::Tail {
-                tee_payload,
-                tail_offset,
-            } => {
-                assert_eq!(tail_offset, 3);
-                let recovered: Vec<&str> = tee_payload.lines().skip(tail_offset - 1).collect();
-                assert_eq!(recovered, vec!["c", "d", "e"]);
+                tee_payload: "a\nb\nc\nd\ne".to_string(),
+                tail_offset: 3,
+                omitted_items: 3,
+                omitted_groups: 0,
             }
-            other => panic!("expected Tail, got {:?}", other),
-        }
+        );
     }
 
     #[test]
-    fn test_loss_max_lines_is_tail() {
-        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nmax_lines = 2\n";
-        match loss_of(toml, "a\nb\nc\nd\ne") {
-            Lossiness::Tail {
-                tee_payload,
-                tail_offset,
-            } => {
-                assert_eq!(tail_offset, 3);
-                let recovered: Vec<&str> = tee_payload.lines().skip(tail_offset - 1).collect();
-                assert_eq!(recovered, vec!["c", "d", "e"]);
+    fn max_lines_reports_exact_omitted_lines() {
+        let filter = first_filter(
+            r#"
+schema_version = 1
+[filters.sample]
+match_command = "^sample"
+max_lines = 2
+"#,
+        );
+        let (text, loss) = apply_filter_with_info(&filter, "a\nb\nc\nd\ne");
+        assert_eq!(text, "a\nb\n... (3 lines truncated)");
+        assert_eq!(
+            loss,
+            Lossiness::Whole {
+                omitted_items: 3,
+                omitted_groups: 0,
             }
-            other => panic!("expected Tail, got {:?}", other),
-        }
+        );
     }
 
     #[test]
-    fn test_loss_tail_lines_is_whole() {
+    fn tail_lines_reports_exact_omitted_lines() {
         let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\ntail_lines = 2\n";
-        assert_eq!(loss_of(toml, "a\nb\nc\nd\ne"), Lossiness::Whole);
+        assert_eq!(
+            loss_of(toml, "a\nb\nc\nd\ne"),
+            Lossiness::Whole {
+                omitted_items: 3,
+                omitted_groups: 0,
+            }
+        );
     }
 
     #[test]
-    fn test_loss_head_then_max_is_whole() {
+    fn head_then_max_counts_each_omitted_line_once() {
         let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nhead_lines = 2\nmax_lines = 2\n";
-        assert_eq!(loss_of(toml, "a\nb\nc\nd\ne"), Lossiness::Whole);
+        assert_eq!(
+            loss_of(toml, "a\nb\nc\nd\ne"),
+            Lossiness::Whole {
+                omitted_items: 3,
+                omitted_groups: 0,
+            }
+        );
     }
 
     #[test]
-    fn test_loss_head_plus_tail_is_whole() {
+    fn head_plus_tail_reports_exact_omitted_lines() {
         let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nhead_lines = 1\ntail_lines = 1\n";
-        assert_eq!(loss_of(toml, "a\nb\nc\nd\ne"), Lossiness::Whole);
+        assert_eq!(
+            loss_of(toml, "a\nb\nc\nd\ne"),
+            Lossiness::Whole {
+                omitted_items: 3,
+                omitted_groups: 0,
+            }
+        );
     }
 
     #[test]
-    fn test_loss_truncate_lines_at_is_whole() {
+    fn per_line_truncation_reports_exact_changed_lines() {
         let toml =
             "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\ntruncate_lines_at = 3\n";
-        assert_eq!(loss_of(toml, "abcdefgh\nshort"), Lossiness::Whole);
+        assert_eq!(
+            loss_of(toml, "abcdefgh\nshort"),
+            Lossiness::Whole {
+                omitted_items: 2,
+                omitted_groups: 0,
+            }
+        );
     }
 
     #[test]
-    fn test_loss_match_output_is_whole() {
+    fn match_output_reports_exact_replaced_lines() {
         let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\n[[filters.f.match_output]]\npattern = \"ok\"\nmessage = \"all good\"\n";
         let (out, loss) = apply_filter_with_info(&first_filter(toml), "everything ok here\nmore");
         assert_eq!(out, "all good");
-        assert_eq!(loss, Lossiness::Whole);
+        assert_eq!(
+            loss,
+            Lossiness::Whole {
+                omitted_items: 2,
+                omitted_groups: 0,
+            }
+        );
     }
 
     #[test]
-    fn test_loss_strip_only_is_none() {
+    fn stripped_lines_report_exact_omitted_lines() {
         let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nstrip_lines_matching = [\"^noise\"]\n";
         let (out, loss) = apply_filter_with_info(&first_filter(toml), "keep\nnoise line\nkeep2");
         assert_eq!(out, "keep\nkeep2");
-        assert_eq!(loss, Lossiness::None);
+        assert_eq!(
+            loss,
+            Lossiness::Whole {
+                omitted_items: 1,
+                omitted_groups: 0,
+            }
+        );
     }
 
     #[test]
-    fn test_loss_on_empty_is_none() {
+    fn replacement_only_reports_exact_changed_lines() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nreplace = [{ pattern = \"secret\", replacement = \"[redacted]\" }]\n";
+        let (out, loss) =
+            apply_filter_with_info(&first_filter(toml), "keep\nsecret one\nsecret two\nkeep2");
+        assert_eq!(out, "keep\n[redacted] one\n[redacted] two\nkeep2");
+        assert_eq!(
+            loss,
+            Lossiness::Whole {
+                omitted_items: 2,
+                omitted_groups: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn replacement_then_strip_counts_changed_line_once() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nreplace = [{ pattern = \"secret\", replacement = \"noise\" }]\nstrip_lines_matching = [\"^noise\"]\n";
+        assert_eq!(
+            loss_of(toml, "keep\nsecret\nkeep2"),
+            Lossiness::Whole {
+                omitted_items: 1,
+                omitted_groups: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn on_empty_after_stripping_reports_exact_omitted_lines() {
         let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nstrip_lines_matching = [\".\"]\non_empty = \"nothing\"\n";
         let (out, loss) = apply_filter_with_info(&first_filter(toml), "a\nb\nc");
         assert_eq!(out, "nothing");
-        assert_eq!(loss, Lossiness::None);
+        assert_eq!(
+            loss,
+            Lossiness::Whole {
+                omitted_items: 3,
+                omitted_groups: 0,
+            }
+        );
     }
 
     #[test]
-    fn test_loss_no_truncation_is_none() {
+    fn unchanged_output_reports_no_loss() {
         let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nhead_lines = 10\n";
         assert_eq!(loss_of(toml, "a\nb\nc"), Lossiness::None);
     }

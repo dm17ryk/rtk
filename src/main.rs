@@ -1511,6 +1511,28 @@ fn run_bunx_tool(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
     }
 }
 
+fn toml_document(
+    filtered: &str,
+    loss: &core::toml_filter::Lossiness,
+) -> core::ai_output::AiDocument {
+    let document = core::ai_output::AiDocument::legacy(filtered);
+    match loss {
+        core::toml_filter::Lossiness::None => document,
+        core::toml_filter::Lossiness::Tail {
+            omitted_items,
+            omitted_groups,
+            ..
+        }
+        | core::toml_filter::Lossiness::Whole {
+            omitted_items,
+            omitted_groups,
+        } => document.with_omission(core::ai_output::Omission {
+            items: *omitted_items,
+            groups: *omitted_groups,
+        }),
+    }
+}
+
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -1588,34 +1610,20 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                 } else {
                     stdout_raw.to_string()
                 };
-                let success = output.status.success();
                 let (filtered, loss) =
                     core::toml_filter::apply_filter_with_info(filter, &combined_raw);
-                let lossy = !matches!(loss, core::toml_filter::Lossiness::None);
+                let rendered = core::ai_output::render(
+                    &toml_document(&filtered, &loss),
+                    core::ai_output::BudgetClass::Collection,
+                );
+                let prepared =
+                    core::ai_output::prepare_emission(&combined_raw, &raw_command, rendered);
+                let shown = prepared.as_str().to_string();
+                let emission_meta = prepared.meta();
+                core::runner::emit_prepared(&prepared, true);
 
-                let hint = if !success {
-                    core::tee::tee_and_hint(&combined_raw, &raw_command, exit_code)
-                } else {
-                    match &loss {
-                        core::toml_filter::Lossiness::None => None,
-                        core::toml_filter::Lossiness::Tail {
-                            tee_payload,
-                            tail_offset,
-                        } => {
-                            core::tee::force_tee_tail_hint(tee_payload, &raw_command, *tail_offset)
-                        }
-                        core::toml_filter::Lossiness::Whole => {
-                            core::tee::force_tee_hint(&combined_raw, &raw_command)
-                        }
-                    }
-                };
-
-                // Never emit an unrecoverable truncation marker: fall back to full raw.
-                let shown = if lossy && hint.is_none() {
-                    core::runner::emit_guarded(&combined_raw, None, &combined_raw)
-                } else {
-                    core::runner::emit_guarded(&filtered, hint.as_deref(), &combined_raw)
-                };
+                // Task 5 extends this seam to persist semantic emission metadata.
+                let _ = emission_meta;
 
                 timer.track(
                     &raw_command,
@@ -3178,6 +3186,26 @@ mod tests {
     use super::*;
     use clap::Parser;
     use std::cell::Cell;
+
+    #[test]
+    fn lossy_toml_document_preserves_text_and_exact_counts() {
+        let loss = core::toml_filter::Lossiness::Whole {
+            omitted_items: 299,
+            omitted_groups: 0,
+        };
+        let rendered = core::ai_output::render(
+            &toml_document("line", &loss),
+            core::ai_output::BudgetClass::Collection,
+        );
+        assert_eq!(rendered.text, "line");
+        assert_eq!(
+            rendered.omission,
+            Some(core::ai_output::Omission {
+                items: 299,
+                groups: 0,
+            })
+        );
+    }
 
     #[test]
     fn test_git_commit_single_message() {
