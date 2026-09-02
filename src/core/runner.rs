@@ -6,7 +6,7 @@ use std::process::Command;
 use std::sync::LazyLock;
 
 use crate::core::ai_output::{
-    prepare_emission, render, AiDocument, BudgetClass, EmissionMeta, ExactReason,
+    prepare_emission, render, AiDocument, BudgetClass, EmissionMeta, ExactReason, OutputContract,
 };
 use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
 use crate::core::tracking;
@@ -140,17 +140,41 @@ fn track_captured_emission(
     cmd_label: &str,
     raw: &str,
     shown: &str,
+    contract: OutputContract,
     meta: EmissionMeta,
 ) {
-    // Task 5 extends this seam to persist semantic emission metadata.
-    let _ = meta;
-    timer.track(cmd_label, &format!("rtk {}", cmd_label), raw, shown);
+    timer.track_output(
+        cmd_label,
+        &format!("rtk {}", cmd_label),
+        raw,
+        shown,
+        output_tracking_from_emission(contract, meta),
+    );
 }
 
 fn track_exact_execution(timer: tracking::TimedExecution, cmd_label: &str, reason: ExactReason) {
-    // Task 5 extends this seam to persist the explicit exact-output reason.
-    let _ = reason;
-    timer.track_passthrough(cmd_label, &format!("rtk {} (passthrough)", cmd_label));
+    timer.track_exact(
+        cmd_label,
+        &format!("rtk {} (passthrough)", cmd_label),
+        reason.as_str(),
+    );
+}
+
+fn output_tracking_from_emission(
+    contract: OutputContract,
+    meta: EmissionMeta,
+) -> tracking::OutputTracking {
+    tracking::OutputTracking {
+        contract: contract.as_str().into(),
+        exact_reason: match contract {
+            OutputContract::Exact(reason) => Some(reason.as_str().into()),
+            OutputContract::AiOwned(_) | OutputContract::Legacy => None,
+        },
+        omitted_items: meta.omitted_items,
+        omitted_groups: meta.omitted_groups,
+        recovery_created: meta.recovery_created,
+        filter_failed: meta.parser_failed,
+    }
 }
 
 fn run_captured_filter<F>(
@@ -165,6 +189,10 @@ fn run_captured_filter<F>(
 where
     F: Fn(&str, i32) -> AiFilterResult,
 {
+    let output_contract = match contract {
+        CapturedContract::Legacy => OutputContract::Legacy,
+        CapturedContract::Ai(budget) => OutputContract::AiOwned(budget),
+    };
     let stdin_mode = if opts.inherit_stdin {
         StdinMode::Inherit
     } else {
@@ -229,7 +257,14 @@ where
         }
     };
 
-    track_captured_emission(timer, cmd_label, raw_for_tracking, &shown, meta);
+    track_captured_emission(
+        timer,
+        cmd_label,
+        raw_for_tracking,
+        &shown,
+        output_contract,
+        meta,
+    );
     Ok(exit_code)
 }
 
@@ -1370,6 +1405,27 @@ mod err_test_runner_tests {
     #[test]
     fn passthrough_reason_is_exposed_for_tracking() {
         assert_eq!(ExactReason::Structured.as_str(), "structured");
+    }
+
+    #[test]
+    fn emission_metadata_maps_to_output_tracking() {
+        let tracking = output_tracking_from_emission(
+            crate::core::ai_output::OutputContract::AiOwned(BudgetClass::Diagnostic),
+            EmissionMeta {
+                omitted_items: 11,
+                omitted_groups: 2,
+                recovery_created: true,
+                parser_failed: true,
+                used_raw_fallback: false,
+            },
+        );
+
+        assert_eq!(tracking.contract, "ai_owned");
+        assert_eq!(tracking.exact_reason, None);
+        assert_eq!(tracking.omitted_items, 11);
+        assert_eq!(tracking.omitted_groups, 2);
+        assert!(tracking.recovery_created);
+        assert!(tracking.filter_failed);
     }
 
     #[test]
