@@ -384,7 +384,9 @@ impl LosslessTeeReservation {
     }
 
     pub fn commit_output_if_better(self, raw: &str, output: String) -> Option<LosslessTeeCommit> {
-        if crate::core::guard::never_worse(raw, &output) == raw {
+        if crate::core::tracking::estimate_tokens(&output)
+            >= crate::core::tracking::estimate_tokens(raw)
+        {
             return None;
         }
         self.commit_with_lock(output)
@@ -982,6 +984,17 @@ mod tests {
         let reservation = reserve_lossless_tee_file(raw, "test", temp.path(), 1_024, 20).unwrap();
         assert!(reservation
             .commit_output_if_better(raw, "a much larger rendered candidate".to_string())
+            .is_none());
+        assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn equal_token_candidate_is_rejected_and_removes_pending_artifact() {
+        let temp = tempfile::tempdir().unwrap();
+        let raw = "abcd";
+        let reservation = reserve_lossless_tee_file(raw, "test", temp.path(), 1_024, 20).unwrap();
+        assert!(reservation
+            .commit_output_if_better(raw, "wxyz".to_string())
             .is_none());
         assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
     }
