@@ -16,6 +16,35 @@ pub fn emit_prepared(prepared: &crate::core::ai_output::PreparedEmission) {
     print!("{}", prepared.as_str());
 }
 
+pub(crate) fn emit_ai_document(
+    timer: tracking::TimedExecution,
+    original_cmd: &str,
+    rtk_cmd: &str,
+    raw: &str,
+    command_slug: &str,
+    budget: BudgetClass,
+    document: AiDocument,
+    trailing_newline: bool,
+) -> String {
+    let prepared = prepare_emission(
+        raw,
+        command_slug,
+        render(&document, budget),
+        trailing_newline,
+    );
+    let shown = prepared.as_str().to_string();
+    let meta = prepared.meta();
+    emit_prepared(&prepared);
+    timer.track_output(
+        original_cmd,
+        rtk_cmd,
+        raw,
+        &shown,
+        output_tracking_from_emission(OutputContract::AiOwned(budget), meta),
+    );
+    shown
+}
+
 fn guard_framed_payload(raw: &str, candidate: &str, trailing_newline: bool) -> String {
     let framed_raw = crate::core::ai_output::frame_payload(raw, trailing_newline);
     let framed_candidate = crate::core::ai_output::frame_payload(candidate, trailing_newline);
@@ -1141,7 +1170,9 @@ fn is_bun_count_line(trimmed: &str) -> bool {
 #[cfg(test)]
 mod err_test_runner_tests {
     use super::*;
-    use crate::core::ai_output::{render, AiDocument, BudgetClass, ExactReason};
+    use crate::core::ai_output::{
+        render, AiDocument, AiRecord, BudgetClass, ExactReason, Severity,
+    };
     use std::io::Write;
 
     const SEMANTIC_WRAPPER_HELPER: &str =
@@ -1152,6 +1183,34 @@ mod err_test_runner_tests {
         let shown = guard_framed_payload("12345", "abcdefgh", true);
 
         assert_eq!(shown, "12345\n");
+    }
+
+    #[test]
+    fn semantic_adapter_emits_prepared_source_document() {
+        let raw = "original source that is intentionally much longer than the compact record\n"
+            .repeat(32);
+        let mut document = AiDocument::new(Some("source"));
+        document.fact("file", "sample.rs");
+        document.push(AiRecord::new(Severity::Info, "3: fn kept() {}"));
+
+        let shown = emit_ai_document(
+            tracking::TimedExecution::start(),
+            "cat sample.rs",
+            "rtk read sample.rs",
+            &raw,
+            "read",
+            BudgetClass::Source,
+            document,
+            true,
+        );
+
+        assert!(shown.contains("status=source"));
+        assert!(shown.contains("file=sample.rs"));
+        assert!(shown.contains("3: fn kept() {}"));
+        assert!(
+            crate::core::tracking::estimate_tokens(&shown)
+                < crate::core::tracking::estimate_tokens(&raw)
+        );
     }
 
     #[test]
