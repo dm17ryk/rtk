@@ -13,12 +13,7 @@ fn run_with_stdin(command: &mut Command, input: &[u8]) -> Output {
     // Commands that reject their arguments can exit before consuming stdin.
     // In that case the producer observes a broken pipe; the child's exit
     // status is still the signal this helper is intended to assert.
-    if let Err(error) = child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(input)
-    {
+    if let Err(error) = child.stdin.take().expect("piped stdin").write_all(input) {
         assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
     }
     child.wait_with_output().expect("wait for command")
