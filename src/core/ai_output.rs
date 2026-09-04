@@ -141,6 +141,7 @@ pub struct AiDocument {
     body: DocumentBody,
     declared_omission: Option<Omission>,
     parser_failed: bool,
+    lossless_baseline: Option<String>,
 }
 
 impl AiDocument {
@@ -152,6 +153,7 @@ impl AiDocument {
             body: DocumentBody::Semantic,
             declared_omission: None,
             parser_failed: false,
+            lossless_baseline: None,
         }
     }
 
@@ -163,6 +165,7 @@ impl AiDocument {
             body: DocumentBody::Legacy(raw.into()),
             declared_omission: None,
             parser_failed: false,
+            lossless_baseline: None,
         }
     }
 
@@ -207,6 +210,17 @@ impl AiDocument {
     pub fn with_omission(mut self, omission: Omission) -> Self {
         self.declared_omission = Some(omission);
         self
+    }
+
+    /// Supplies the native-equivalent stdout used for no-worse fallback,
+    /// tracking, and lossless recovery when an adapter needed parse aids.
+    pub fn with_lossless_baseline(mut self, baseline: impl Into<String>) -> Self {
+        self.lossless_baseline = Some(baseline.into());
+        self
+    }
+
+    pub(crate) fn lossless_baseline(&self) -> Option<&str> {
+        self.lossless_baseline.as_deref()
     }
 }
 
@@ -369,7 +383,7 @@ where
 
 pub(crate) fn frame_payload(output: &str, trailing_newline: bool) -> String {
     let mut framed = output.to_string();
-    if trailing_newline {
+    if trailing_newline && !framed.ends_with('\n') {
         framed.push('\n');
     }
     framed

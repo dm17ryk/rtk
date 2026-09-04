@@ -21,7 +21,7 @@ pub mod utils;
 #[cfg(test)]
 mod path_inventory_tests {
     use super::ai_output::{render, BudgetClass, Omission};
-    use super::path_inventory::{canonical_groups, document};
+    use super::path_inventory::{canonical_groups, common_root, document};
 
     #[test]
     fn canonical_groups_elides_a_shared_root_and_sorts_leaves() {
@@ -53,9 +53,44 @@ mod path_inventory_tests {
         assert_eq!(
             canonical_groups(&paths),
             vec![(
-                "core".to_string(),
+                ".".to_string(),
                 vec!["runner.rs".to_string(), "tracking.rs".to_string()],
             )]
+        );
+    }
+
+    #[test]
+    fn common_root_elides_the_deepest_shared_directory() {
+        let paths = vec![
+            "C:\\Temp\\project\\inventory\\one.txt".to_string(),
+            "C:\\Temp\\project\\inventory\\two.txt".to_string(),
+        ];
+
+        assert_eq!(
+            common_root(&paths),
+            Some("C:/Temp/project/inventory".to_string())
+        );
+        assert_eq!(
+            canonical_groups(&paths),
+            vec![(
+                ".".to_string(),
+                vec!["one.txt".to_string(), "two.txt".to_string()],
+            )]
+        );
+    }
+
+    #[test]
+    fn shared_directory_inventory_is_smaller_than_native_paths() {
+        let paths = (0..80)
+            .map(|index| format!("D:/Temp/project/inventory/item-{index:03}.txt"))
+            .collect::<Vec<_>>();
+        let native = format!("{}\n", paths.join("\n"));
+        let rendered = render(&document(&paths), BudgetClass::Collection).text;
+
+        assert!(
+            crate::core::tracking::estimate_tokens(&rendered)
+                < crate::core::tracking::estimate_tokens(&native),
+            "native={native:?}\nrendered={rendered:?}"
         );
     }
 

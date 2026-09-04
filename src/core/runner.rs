@@ -6,8 +6,8 @@ use std::process::Command;
 use std::sync::LazyLock;
 
 use crate::core::ai_output::{
-    prepare_emission, prepare_emission_with_baseline, render, AiDocument, BudgetClass,
-    EmissionMeta, ExactReason, OutputContract,
+    prepare_emission_with_baseline, render, AiDocument, BudgetClass, EmissionMeta, ExactReason,
+    OutputContract,
 };
 use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
 use crate::core::tracking;
@@ -15,29 +15,6 @@ use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 
 pub fn emit_prepared(prepared: &crate::core::ai_output::PreparedEmission) {
     print!("{}", prepared.as_str());
-}
-
-pub(crate) fn emit_ai_document(
-    timer: &tracking::TimedExecution,
-    original_cmd: &str,
-    rtk_cmd: &str,
-    raw: &str,
-    command_slug: &str,
-    budget: BudgetClass,
-    document: AiDocument,
-    trailing_newline: bool,
-) -> String {
-    emit_ai_document_with_baseline(
-        timer,
-        original_cmd,
-        rtk_cmd,
-        raw,
-        raw,
-        command_slug,
-        budget,
-        document,
-        trailing_newline,
-    )
 }
 
 pub(crate) fn emit_ai_document_with_baseline(
@@ -336,6 +313,7 @@ where
         raw
     };
 
+    let lossless_baseline = document.lossless_baseline().unwrap_or(raw_for_tracking);
     let (shown, meta) = match contract {
         CapturedContract::Legacy => {
             let filtered = render(&document, BudgetClass::Source).text;
@@ -358,8 +336,9 @@ where
         CapturedContract::Ai(budget) => {
             let rendered = render(&document, budget);
             let command_slug = opts.tee_label.unwrap_or(cmd_label);
-            let prepared = prepare_emission(
-                raw_for_tracking,
+            let prepared = prepare_emission_with_baseline(
+                lossless_baseline,
+                lossless_baseline,
                 command_slug,
                 rendered,
                 !opts.no_trailing_newline,
@@ -372,14 +351,17 @@ where
     };
 
     let (tracking_raw, tracking_shown) = if opts.filter_stdout_only {
-        (raw.as_str(), format!("{}{}", result.raw_stderr, shown))
+        (
+            format!("{}{}", lossless_baseline, result.raw_stderr),
+            format!("{}{}", result.raw_stderr, shown),
+        )
     } else {
-        (raw_for_tracking.as_str(), shown)
+        (lossless_baseline.to_string(), shown)
     };
     track_captured_emission(
         timer,
         cmd_label,
-        tracking_raw,
+        &tracking_raw,
         &tracking_shown,
         output_contract,
         meta,
@@ -1220,10 +1202,11 @@ mod err_test_runner_tests {
         document.push(AiRecord::new(Severity::Info, "3: fn kept() {}"));
 
         let timer = tracking::TimedExecution::start();
-        let shown = emit_ai_document(
+        let shown = emit_ai_document_with_baseline(
             &timer,
             "cat sample.rs",
             "rtk read sample.rs",
+            &raw,
             &raw,
             "read",
             BudgetClass::Source,

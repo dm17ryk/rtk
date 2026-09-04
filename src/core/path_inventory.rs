@@ -10,16 +10,33 @@ fn normalized(path: &str) -> String {
 }
 
 pub(crate) fn common_root(paths: &[String]) -> Option<String> {
-    let first = paths.first()?;
-    let root = normalized(first).split('/').next()?.to_string();
-    (!root.is_empty()
-        && paths.iter().all(|path| {
-            let normalized = normalized(path);
-            normalized
-                .strip_prefix(&root)
-                .is_some_and(|rest| rest.starts_with('/'))
-        }))
-    .then_some(root)
+    fn parent_components(path: &str) -> Vec<&str> {
+        path.rsplit_once('/')
+            .map(|(parent, _)| parent.split('/').filter(|part| !part.is_empty()).collect())
+            .unwrap_or_default()
+    }
+
+    let first = normalized(paths.first()?);
+    let mut common = parent_components(&first);
+    if common.is_empty() {
+        return None;
+    }
+
+    for path in paths.iter().skip(1) {
+        let normalized = normalized(path);
+        let components = parent_components(&normalized);
+        let shared = common
+            .iter()
+            .zip(&components)
+            .take_while(|(left, right)| left == right)
+            .count();
+        common.truncate(shared);
+        if common.is_empty() {
+            return None;
+        }
+    }
+
+    Some(common.join("/"))
 }
 
 pub fn canonical_groups(paths: &[String]) -> Vec<(String, Vec<String>)> {
