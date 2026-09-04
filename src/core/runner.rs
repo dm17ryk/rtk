@@ -154,6 +154,28 @@ fn track_captured_emission(
     );
 }
 
+fn track_captured_replay(
+    timer: tracking::TimedExecution,
+    cmd_label: &str,
+    native_byte_count: usize,
+    contract: OutputContract,
+) {
+    let native_tokens = tracking::estimate_tokens_from_bytes(native_byte_count);
+    timer.track_output_tokens(
+        cmd_label,
+        &format!("rtk {}", cmd_label),
+        native_tokens,
+        native_tokens,
+        output_tracking_from_emission(
+            contract,
+            EmissionMeta {
+                used_raw_fallback: true,
+                ..EmissionMeta::default()
+            },
+        ),
+    );
+}
+
 fn track_exact_execution(timer: tracking::TimedExecution, cmd_label: &str, reason: ExactReason) {
     timer.track_exact(
         cmd_label,
@@ -208,16 +230,11 @@ where
     let raw_stdout = &result.raw_stdout;
 
     if !result.capture_complete {
-        track_captured_emission(
+        track_captured_replay(
             timer,
             cmd_label,
-            raw,
-            raw,
+            result.observed_output_bytes(),
             output_contract,
-            EmissionMeta {
-                used_raw_fallback: true,
-                ..EmissionMeta::default()
-            },
         );
         return Ok(exit_code);
     }
@@ -1211,11 +1228,12 @@ mod err_test_runner_tests {
     fn semantic_wrapper_does_not_parse_or_append_to_overflow_replay() {
         let temp = tempfile::tempdir().unwrap();
         let marker = temp.path().join("filter-called");
+        let database = temp.path().join("tracking.db");
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", SEMANTIC_WRAPPER_HELPER, "--nocapture"])
             .env("RTK_TEST_SEMANTIC_WRAPPER", "stdout-overflow")
             .env("RTK_TEST_SEMANTIC_FILTER_MARKER", &marker)
-            .env("RTK_DB_PATH", temp.path().join("tracking.db"))
+            .env("RTK_DB_PATH", &database)
             .output()
             .unwrap();
 
@@ -1234,6 +1252,35 @@ mod err_test_runner_tests {
         expected.extend(std::iter::repeat_n(b'x', crate::core::stream::RAW_CAP + 1));
         expected.extend_from_slice(b"\nEND\n");
         assert_eq!(replay, expected, "overflow replay must be byte-complete");
+
+        let connection = rusqlite::Connection::open(database).unwrap();
+        let stored: (String, Option<String>, i64, i64, i64, i64, bool, bool) = connection
+            .query_row(
+                "SELECT output_contract, exact_reason, input_tokens, output_tokens,
+                        omitted_items, omitted_groups, recovery_created, filter_failed
+                 FROM commands ORDER BY id DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(stored.0, "ai_owned");
+        assert_eq!(stored.1, None);
+        assert!(stored.2 > 0, "overflow replay must retain token accounting");
+        assert_eq!(stored.2, stored.3, "native replay is exact");
+        assert_eq!((stored.4, stored.5), (0, 0));
+        assert!(!stored.6);
+        assert!(!stored.7);
     }
 
     #[test]

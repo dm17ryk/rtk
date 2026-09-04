@@ -264,6 +264,7 @@ pub struct StreamResult {
     pub capture_complete: bool,
     raw_stdout_bytes: Vec<u8>,
     raw_stderr_bytes: Vec<u8>,
+    observed_output_bytes: usize,
 }
 
 impl StreamResult {
@@ -282,6 +283,11 @@ impl StreamResult {
         let mut stderr = io::stderr().lock();
         stderr.write_all(&self.raw_stderr_bytes)?;
         stderr.flush()
+    }
+
+    /// Native stdout and stderr bytes observed before a capture failed open.
+    pub fn observed_output_bytes(&self) -> usize {
+        self.observed_output_bytes
     }
 }
 
@@ -326,6 +332,7 @@ struct CaptureAccumulator {
     per_stream_cap: usize,
     stdout_len: usize,
     stderr_len: usize,
+    observed_bytes: usize,
     chunks: Vec<CaptureChunk>,
     replaying: bool,
 }
@@ -336,6 +343,7 @@ impl CaptureAccumulator {
             per_stream_cap,
             stdout_len: 0,
             stderr_len: 0,
+            observed_bytes: 0,
             chunks: Vec::new(),
             replaying: false,
         }
@@ -345,6 +353,7 @@ impl CaptureAccumulator {
     where
         F: FnMut(CapturedStream, &[u8]) -> io::Result<()>,
     {
+        self.observed_bytes = self.observed_bytes.saturating_add(bytes.len());
         if self.replaying {
             return replay(stream, &bytes);
         }
@@ -386,6 +395,10 @@ impl CaptureAccumulator {
 
     fn is_complete(&self) -> bool {
         !self.replaying
+    }
+
+    fn observed_bytes(&self) -> usize {
+        self.observed_bytes
     }
 
     fn into_complete(self) -> Option<CompleteCapture> {
@@ -481,6 +494,7 @@ pub fn run_streaming(
             capture_complete: true,
             raw_stdout_bytes: Vec::new(),
             raw_stderr_bytes: Vec::new(),
+            observed_output_bytes: 0,
         });
     }
 
@@ -539,6 +553,7 @@ pub fn run_streaming(
     let mut raw_stderr = String::new();
     let mut raw_stdout_bytes = Vec::new();
     let mut raw_stderr_bytes = Vec::new();
+    let mut observed_output_bytes = 0;
     let mut filtered = String::new();
     let mut capped_out = false;
     let mut capped_err = false;
@@ -665,6 +680,7 @@ pub fn run_streaming(
         }
 
         capture_complete = capture.is_complete();
+        observed_output_bytes = capture.observed_bytes();
         if let Some(complete) = capture.into_complete() {
             raw_stdout = decode_captured_lines(&complete.stdout);
             raw_stderr = decode_captured_lines(&complete.stderr);
@@ -780,6 +796,7 @@ pub fn run_streaming(
         capture_complete,
         raw_stdout_bytes,
         raw_stderr_bytes,
+        observed_output_bytes,
     })
 }
 
@@ -1108,6 +1125,34 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn capture_read_failure_keeps_count_for_bytes_seen_before_fail_open() {
+        let mut capture = CaptureAccumulator::new(64);
+        let bytes = b"read-before-error".to_vec();
+        let mut replayed = Vec::new();
+
+        capture
+            .push(
+                CapturedStream::Stdout,
+                bytes.clone(),
+                &mut |stream, bytes| {
+                    replayed.push((stream, bytes.to_vec()));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        capture
+            .fail_open(&mut |stream, bytes| {
+                replayed.push((stream, bytes.to_vec()));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(capture.observed_bytes(), bytes.len());
+        assert_eq!(replayed, vec![(CapturedStream::Stdout, bytes)]);
+        assert!(!capture.is_complete());
+    }
+
+    #[test]
     fn test_exit_code_zero() {
         let status = success_command().status().unwrap();
         assert_eq!(status_to_exit_code(status), 0);
@@ -1184,6 +1229,7 @@ pub(crate) mod tests {
             capture_complete: true,
             raw_stdout_bytes: Vec::new(),
             raw_stderr_bytes: Vec::new(),
+            observed_output_bytes: 0,
         };
         assert!(r.success());
         assert!(r.capture_complete);
@@ -1202,6 +1248,7 @@ pub(crate) mod tests {
             capture_complete: true,
             raw_stdout_bytes: Vec::new(),
             raw_stderr_bytes: Vec::new(),
+            observed_output_bytes: 0,
         };
         assert!(!r.success());
     }
@@ -1217,6 +1264,7 @@ pub(crate) mod tests {
             capture_complete: true,
             raw_stdout_bytes: Vec::new(),
             raw_stderr_bytes: Vec::new(),
+            observed_output_bytes: 0,
         };
         assert!(!r.success());
     }

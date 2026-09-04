@@ -132,6 +132,70 @@ fn token_at(bytes: &[u8], index: usize, token: &[u8]) -> bool {
             .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
 }
 
+fn cfg_arguments(predicate: &[u8]) -> Option<Vec<&[u8]>> {
+    if predicate.is_empty() {
+        return None;
+    }
+    let mut arguments = Vec::new();
+    let mut depth = 0_usize;
+    let mut start = 0_usize;
+    for (index, byte) in predicate.iter().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => depth = depth.checked_sub(1)?,
+            b',' if depth == 0 => {
+                if start == index {
+                    return None;
+                }
+                arguments.push(&predicate[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 || start == predicate.len() {
+        return None;
+    }
+    arguments.push(&predicate[start..]);
+    Some(arguments)
+}
+
+/// Return true only when the predicate itself proves the item cannot exist in
+/// a non-test build. Unknown or mixed cfg syntax stays visible to the audit.
+fn cfg_implies_test(predicate: &[u8]) -> bool {
+    if predicate == b"test" {
+        return true;
+    }
+    for (operator, require_all) in [(b"all".as_slice(), false), (b"any".as_slice(), true)] {
+        let Some(arguments) = predicate
+            .strip_prefix(operator)
+            .and_then(|rest| rest.strip_prefix(b"("))
+            .and_then(|rest| rest.strip_suffix(b")"))
+            .and_then(cfg_arguments)
+        else {
+            continue;
+        };
+        return if require_all {
+            arguments.iter().all(|argument| cfg_implies_test(argument))
+        } else {
+            arguments.iter().any(|argument| cfg_implies_test(argument))
+        };
+    }
+    false
+}
+
+fn is_test_exclusive_cfg(attribute: &[u8]) -> bool {
+    let compact: Vec<u8> = attribute
+        .iter()
+        .copied()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    compact
+        .strip_prefix(b"#[cfg(")
+        .and_then(|rest| rest.strip_suffix(b")]"))
+        .is_some_and(cfg_implies_test)
+}
+
 fn test_module_ranges(mask: &[u8]) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut cursor = 0;
@@ -148,8 +212,7 @@ fn test_module_ranges(mask: &[u8]) -> Vec<(usize, usize)> {
         };
         let attribute_end = attribute_start + 2 + close_offset + 1;
         let attribute = &mask[attribute_start..attribute_end];
-        let is_test_cfg = attribute.windows(3).any(|word| word == b"cfg")
-            && attribute.windows(4).any(|word| word == b"test");
+        let is_test_cfg = is_test_exclusive_cfg(attribute);
         let mut item = skip_space(mask, attribute_end);
         if token_at(mask, item, b"pub") {
             item = skip_space(mask, item + 3);
@@ -296,6 +359,21 @@ fn item_level_cfg_test_does_not_hide_later_production_stdout() {
 #[test]
 fn crlf_test_module_is_excluded_without_hiding_later_production() {
     let source = "#[cfg(test)]\r\nmod tests {\r\n fn prints() { println!(\"test only\"); }\r\n}\r\npub fn run() { println!(\"production\"); }\r\n";
+
+    assert_eq!(audit_source(source).unwrap().print_macros, 1);
+}
+
+#[test]
+fn cfg_not_test_module_remains_in_the_production_audit() {
+    let source =
+        "#[cfg(not(test))]\nmod production { pub fn run() { println!(\"production\"); } }\n";
+
+    assert_eq!(audit_source(source).unwrap().print_macros, 1);
+}
+
+#[test]
+fn cfg_mixed_test_or_feature_module_remains_in_the_production_audit() {
+    let source = "#[cfg(any(test, feature = \"audit\"))]\nmod mixed { pub fn run() { println!(\"production capable\"); } }\n";
 
     assert_eq!(audit_source(source).unwrap().print_macros, 1);
 }

@@ -1793,8 +1793,12 @@ pub fn record_parse_failure_silent(raw_command: &str, error_message: &str, succe
 /// assert_eq!(estimate_tokens("hello world"), 3); // 11 chars = ceil(2.75) = 3
 /// ```
 pub fn estimate_tokens(text: &str) -> usize {
-    // ~4 chars per token on average
-    (text.len() as f64 / 4.0).ceil() as usize
+    estimate_tokens_from_bytes(text.len())
+}
+
+/// Estimate tokens from a byte count when fail-open output is not retained.
+pub fn estimate_tokens_from_bytes(byte_count: usize) -> usize {
+    byte_count.div_ceil(4)
 }
 
 /// Helper struct for timing command execution
@@ -1885,9 +1889,21 @@ impl TimedExecution {
         output: &str,
         tracking: OutputTracking,
     ) {
-        let elapsed_ms = self.start.elapsed().as_millis() as u64;
         let input_tokens = estimate_tokens(input);
         let output_tokens = estimate_tokens(output);
+
+        self.track_output_tokens(original_cmd, rtk_cmd, input_tokens, output_tokens, tracking);
+    }
+
+    pub fn track_output_tokens(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input_tokens: usize,
+        output_tokens: usize,
+        tracking: OutputTracking,
+    ) {
+        let elapsed_ms = self.start.elapsed().as_millis() as u64;
 
         if let Ok(tracker) = Tracker::new() {
             let _ = tracker.record_with_output(
