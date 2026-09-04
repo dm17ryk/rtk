@@ -1,22 +1,26 @@
-src/cmds/cloud/aws_cmd.rs
-src/cmds/cloud/container.rs
-src/cmds/cloud/wget_cmd.rs
-src/cmds/dotnet/dotnet_cmd.rs
-src/cmds/git/diff_cmd.rs
-src/cmds/git/git.rs
-src/cmds/go/go_cmd.rs
-src/cmds/js/pnpm_cmd.rs
-src/cmds/js/prisma_cmd.rs
-src/cmds/python/pip_cmd.rs
-src/cmds/system/deps.rs
-src/cmds/system/env_cmd.rs
-src/cmds/system/format_cmd.rs
-src/cmds/system/json_cmd.rs
-src/cmds/system/local_llm.rs
-src/cmds/system/log_cmd.rs
-src/cmds/system/ls.rs
-src/cmds/system/pipe_cmd.rs
-src/cmds/system/read.rs
-src/cmds/system/search.rs
-src/cmds/system/summary.rs
-src/cmds/system/wc_cmd.rs
+src/cmds/cloud/aws_cmd.rs	prints=2	stdout_handles=0	fingerprint=82746f2e1b1a51de
+src/cmds/cloud/container.rs	prints=12	stdout_handles=0	fingerprint=5d8a759b2f0f4a63
+src/cmds/cloud/curl_cmd.rs	prints=0	stdout_handles=1	fingerprint=6bcd64fa044f4f08
+src/cmds/cloud/wget_cmd.rs	prints=4	stdout_handles=0	fingerprint=1bca0f20521e4513
+src/cmds/dotnet/dotnet_cmd.rs	prints=3	stdout_handles=0	fingerprint=c326e89f4d1b9ce1
+src/cmds/git/diff_cmd.rs	prints=2	stdout_handles=0	fingerprint=617b103fe0550b0e
+src/cmds/git/git.rs	prints=20	stdout_handles=0	fingerprint=13c13c3bd61e6ade
+src/cmds/go/go_cmd.rs	prints=2	stdout_handles=0	fingerprint=09d0edc630754cc0
+src/cmds/js/pnpm_cmd.rs	prints=3	stdout_handles=0	fingerprint=41bb7cfd8d5d4288
+src/cmds/js/prisma_cmd.rs	prints=3	stdout_handles=0	fingerprint=fb15ed49f1af9fbd
+src/cmds/powershell/orchestrator.rs	prints=0	stdout_handles=1	fingerprint=c3d8f5adc5d99741
+src/cmds/python/pip_cmd.rs	prints=3	stdout_handles=0	fingerprint=24b844e062a58a4a
+src/cmds/system/deps.rs	prints=1	stdout_handles=0	fingerprint=fb863404f568c4f4
+src/cmds/system/env_cmd.rs	prints=1	stdout_handles=0	fingerprint=91785b550575fb14
+src/cmds/system/find_cmd.rs	prints=0	stdout_handles=1	fingerprint=b1601072f331dac9
+src/cmds/system/format_cmd.rs	prints=1	stdout_handles=0	fingerprint=f0067720d876a0d9
+src/cmds/system/json_cmd.rs	prints=2	stdout_handles=0	fingerprint=0692e67509df0529
+src/cmds/system/local_llm.rs	prints=2	stdout_handles=0	fingerprint=61e57a715e961f75
+src/cmds/system/log_cmd.rs	prints=2	stdout_handles=0	fingerprint=77f4b957ab2f737b
+src/cmds/system/ls.rs	prints=1	stdout_handles=0	fingerprint=c991c3b8394e6ac7
+src/cmds/system/pipe_cmd.rs	prints=1	stdout_handles=1	fingerprint=819f69ecd9863fd9
+src/cmds/system/read.rs	prints=2	stdout_handles=0	fingerprint=128190dd0f6608e8
+src/cmds/system/search.rs	prints=3	stdout_handles=0	fingerprint=24bedf24e343b2b9
+src/cmds/system/summary.rs	prints=1	stdout_handles=0	fingerprint=de7a84cd3e84d9a4
+src/cmds/system/wc_cmd.rs	prints=1	stdout_handles=0	fingerprint=76c2fd2e87f08c26
+src/cmds/windows/orchestrator.rs	prints=0	stdout_handles=1	fingerprint=31889a38fda4c91a

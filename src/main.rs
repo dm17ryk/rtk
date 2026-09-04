@@ -106,8 +106,11 @@ enum Commands {
     /// Read file with intelligent filtering
     Read {
         /// Files to read (supports multiple, like cat)
-        #[arg(required = true, num_args = 1..)]
+        #[arg(required_unless_present = "recovery", num_args = 1.., conflicts_with = "recovery")]
         files: Vec<PathBuf>,
+        /// Read a private lossless artifact by its shell-neutral recovery ID
+        #[arg(long, value_name = "ID", conflicts_with = "files")]
+        recovery: Option<String>,
         /// Filter: none (default, full content), minimal, aggressive
         #[arg(short, long, default_value = "none")]
         level: core::filter::FilterLevel,
@@ -1617,19 +1620,22 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                     core::ai_output::BudgetClass::Collection,
                 );
                 let prepared =
-                    core::ai_output::prepare_emission(&combined_raw, &raw_command, rendered);
+                    core::ai_output::prepare_emission(&combined_raw, &raw_command, rendered, true);
                 let shown = prepared.as_str().to_string();
                 let emission_meta = prepared.meta();
-                core::runner::emit_prepared(&prepared, true);
+                core::runner::emit_prepared(&prepared);
 
-                // Task 5 extends this seam to persist semantic emission metadata.
-                let _ = emission_meta;
-
-                timer.track(
+                timer.track_output(
                     &raw_command,
                     &format!("rtk:toml {}", raw_command),
                     &combined_raw,
                     &shown,
+                    core::runner::output_tracking_from_emission(
+                        core::ai_output::OutputContract::AiOwned(
+                            core::ai_output::BudgetClass::Collection,
+                        ),
+                        emission_meta,
+                    ),
                 );
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
 
@@ -1653,7 +1659,11 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
 
         match status {
             Ok(s) => {
-                timer.track_passthrough(&raw_command, &format!("rtk fallback: {}", raw_command));
+                timer.track_exact(
+                    &raw_command,
+                    &format!("rtk fallback: {}", raw_command),
+                    core::ai_output::ExactReason::Unknown.as_str(),
+                );
 
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
 
@@ -1907,40 +1917,64 @@ fn run_cli() -> Result<i32> {
         // ISSUE #989: support multiple files (cat file1 file2 → rtk read file1 file2)
         Commands::Read {
             files,
+            recovery,
             level,
             max_lines,
             tail_lines,
             line_numbers,
         } => {
-            let mut had_error = false;
-            let mut stdin_seen = false;
-            for file in &files {
-                let result = if file == Path::new("-") {
-                    if stdin_seen {
-                        eprintln!("rtk: warning: stdin specified more than once");
-                        continue;
-                    }
-                    stdin_seen = true;
-                    read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)
-                } else {
-                    read::run(
-                        file,
+            if let Some(identifier) = recovery {
+                match core::tee::resolve_lossless_recovery(&identifier) {
+                    Some(file) => match read::run(
+                        &file,
                         level,
                         max_lines,
                         tail_lines,
                         line_numbers,
                         cli.verbose,
-                    )
-                };
-                if let Err(e) = result {
-                    eprintln!("cat: {}: {}", file.display(), e.root_cause());
-                    had_error = true;
+                    ) {
+                        Ok(()) => 0,
+                        Err(error) => {
+                            eprintln!("rtk: recovery {}: {}", identifier, error.root_cause());
+                            1
+                        }
+                    },
+                    None => {
+                        eprintln!("rtk: recovery artifact not found: {}", identifier);
+                        1
+                    }
                 }
-            }
-            if had_error {
-                1
             } else {
-                0
+                let mut had_error = false;
+                let mut stdin_seen = false;
+                for file in &files {
+                    let result = if file == Path::new("-") {
+                        if stdin_seen {
+                            eprintln!("rtk: warning: stdin specified more than once");
+                            continue;
+                        }
+                        stdin_seen = true;
+                        read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)
+                    } else {
+                        read::run(
+                            file,
+                            level,
+                            max_lines,
+                            tail_lines,
+                            line_numbers,
+                            cli.verbose,
+                        )
+                    };
+                    if let Err(e) = result {
+                        eprintln!("cat: {}: {}", file.display(), e.root_cause());
+                        had_error = true;
+                    }
+                }
+                if had_error {
+                    1
+                } else {
+                    0
+                }
             }
         }
 
@@ -3205,6 +3239,23 @@ mod tests {
                 groups: 0,
             })
         );
+    }
+
+    #[test]
+    fn read_accepts_a_shell_neutral_recovery_identifier_without_a_path() {
+        let identifier = "123_0_cargo_test.lossless.log";
+        let cli =
+            Cli::try_parse_from(["rtk", "read", "-l", "none", "--recovery", identifier]).unwrap();
+
+        match cli.command {
+            Commands::Read {
+                files, recovery, ..
+            } => {
+                assert!(files.is_empty());
+                assert_eq!(recovery.as_deref(), Some(identifier));
+            }
+            _ => panic!("expected read command"),
+        }
     }
 
     #[test]

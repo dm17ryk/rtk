@@ -321,18 +321,22 @@ impl LosslessTeeReservation {
 
     /// Format the exact recovery hint without making the reservation durable.
     pub fn hint(&self) -> String {
-        format_hint(&self.committed_path)
+        format!("[full output: {}]", self.recovery_command())
     }
 
     pub fn recovery_command(&self) -> String {
-        format!(
-            "rtk read -l none {}",
-            display_shell_path(&self.committed_path)
-        )
+        format!("rtk read -l none --recovery {}", self.recovery_identifier())
+    }
+
+    pub fn recovery_identifier(&self) -> &str {
+        self.committed_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("lossless recovery filenames are generated as ASCII")
     }
 
     fn cmd_hint(&self) -> String {
-        format_cmd_hint(&self.committed_path)
+        self.hint()
     }
 
     /// Keep the complete artifact once the caller has selected compact output.
@@ -384,9 +388,7 @@ impl LosslessTeeReservation {
     }
 
     pub fn commit_output_if_better(self, raw: &str, output: String) -> Option<LosslessTeeCommit> {
-        if crate::core::tracking::estimate_tokens(&output)
-            >= crate::core::tracking::estimate_tokens(raw)
-        {
+        if !crate::core::ai_output::strictly_smaller(raw, &output) {
             return None;
         }
         self.commit_with_lock(output)
@@ -411,7 +413,7 @@ pub fn commit_lossless_if_better_for_cmd(
 ) -> Option<LosslessTeeCommit> {
     let hint = reservation.cmd_hint();
     let shown = format!("{filtered}\r\n{hint}\r\n");
-    if crate::core::guard::never_worse(raw, &shown) == raw {
+    if !crate::core::ai_output::strictly_smaller(raw, &shown) {
         return None;
     }
     reservation.commit_with_lock(shown)
@@ -427,7 +429,7 @@ pub fn commit_lossless_if_better_for_powershell(
 ) -> Option<LosslessTeeCommit> {
     let hint = reservation.hint();
     let shown = format!("{filtered}\r\n{hint}\r\n");
-    if crate::core::guard::never_worse(raw, &shown) == raw {
+    if !crate::core::ai_output::strictly_smaller(raw, &shown) {
         return None;
     }
     reservation.commit_with_lock(shown)
@@ -498,6 +500,25 @@ pub fn reserve_lossless_tee(raw: &str, command_slug: &str) -> Option<LosslessTee
         config.tee.max_file_size,
         max_files,
     )
+}
+
+fn resolve_lossless_recovery_file(identifier: &str, tee_dir: &std::path::Path) -> Option<PathBuf> {
+    if !identifier.ends_with(".lossless.log")
+        || identifier.is_empty()
+        || !identifier
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return None;
+    }
+    let path = tee_dir.join(identifier);
+    path.is_file().then_some(path)
+}
+
+pub(crate) fn resolve_lossless_recovery(identifier: &str) -> Option<PathBuf> {
+    let config = Config::load().ok()?;
+    let tee_dir = get_tee_dir(&config)?;
+    resolve_lossless_recovery_file(identifier, &tee_dir)
 }
 
 /// Write raw output to tee file if conditions are met.
@@ -586,22 +607,6 @@ fn display_shell_path(path: &std::path::Path) -> String {
 
 fn format_hint(path: &std::path::Path) -> String {
     format!("[full output: {}]", display_shell_path(path))
-}
-
-fn format_cmd_hint(path: &std::path::Path) -> String {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|directory| directory.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    };
-    let escaped = absolute
-        .to_string_lossy()
-        .replace('^', "^^")
-        .replace('%', "^%")
-        .replace('!', "^!");
-    format!("[full output: type \"{escaped}\"]")
 }
 
 /// Convenience: tee + format hint in one call.
@@ -974,7 +979,41 @@ mod tests {
             reserve_lossless_tee_file("complete raw output", "cargo test", temp.path(), 1_024, 20)
                 .unwrap();
         let command = reservation.recovery_command();
-        assert!(command.starts_with("rtk read -l none "));
+        assert!(command.starts_with("rtk read -l none --recovery "));
+        assert!(!command.contains(&temp.path().display().to_string()));
+        assert!(!command.contains("$HOME"));
+        assert!(!command.contains('%'));
+    }
+
+    #[test]
+    fn recovery_identifier_resolves_inside_a_metacharacter_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("home & 100% ! $ ` space");
+        let reservation =
+            reserve_lossless_tee_file("complete raw output", "cargo test", &directory, 1_024, 20)
+                .unwrap();
+        let identifier = reservation.recovery_identifier().to_string();
+        let expected = reservation.committed_path.clone();
+        reservation.commit_hint().unwrap();
+
+        assert_eq!(
+            resolve_lossless_recovery_file(&identifier, &directory),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn recovery_identifier_rejects_paths_and_pending_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            resolve_lossless_recovery_file("../escape.lossless.log", temp.path()),
+            None
+        );
+        assert_eq!(
+            resolve_lossless_recovery_file("artifact.lossless.pending", temp.path()),
+            None
+        );
     }
 
     #[test]
@@ -1036,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn cmd_lossless_recovery_hint_is_a_directly_usable_absolute_type_command() {
+    fn cmd_lossless_recovery_hint_is_shell_neutral_and_path_free() {
         let tmpdir = tempfile::tempdir().expect("tempdir");
         let raw = "native output\r\n".repeat(80);
         let reservation = reserve_lossless_tee_file(&raw, "cmd-dir", tmpdir.path(), 4096, 2)
@@ -1045,9 +1084,12 @@ mod tests {
             .expect("compact display should win");
         let shown = std::str::from_utf8(commit.as_bytes()).unwrap();
 
-        assert!(shown.contains("[full output: type \""), "{shown}");
         assert!(
-            shown.contains(&tmpdir.path().display().to_string()),
+            shown.contains("[full output: rtk read -l none --recovery "),
+            "{shown}"
+        );
+        assert!(
+            !shown.contains(&tmpdir.path().display().to_string()),
             "{shown}"
         );
         assert!(!shown.contains("$HOME"), "{shown}");

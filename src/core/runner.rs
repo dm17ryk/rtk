@@ -12,12 +12,14 @@ use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
 use crate::core::tracking;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 
-pub fn emit_prepared(prepared: &crate::core::ai_output::PreparedEmission, trailing_newline: bool) {
-    if trailing_newline {
-        println!("{}", prepared.as_str());
-    } else {
-        print!("{}", prepared.as_str());
-    }
+pub fn emit_prepared(prepared: &crate::core::ai_output::PreparedEmission) {
+    print!("{}", prepared.as_str());
+}
+
+fn guard_framed_payload(raw: &str, candidate: &str, trailing_newline: bool) -> String {
+    let framed_raw = crate::core::ai_output::frame_payload(raw, trailing_newline);
+    let framed_candidate = crate::core::ai_output::frame_payload(candidate, trailing_newline);
+    crate::core::guard::never_worse(&framed_raw, &framed_candidate).to_string()
 }
 
 /// Compose `filtered` with an optional recovery `hint`, cap the total at `raw`
@@ -28,13 +30,13 @@ pub fn emit_guarded(filtered: &str, hint: Option<&str>, raw: &str) -> String {
         Some(h) => format!("{}\n{}", filtered, h),
         None => filtered.to_string(),
     };
-    let shown = crate::core::guard::never_worse(raw, &body).to_string();
+    let framed = guard_framed_payload(raw, &body, true);
     let prepared = crate::core::ai_output::PreparedEmission::Plain {
-        output: shown.clone(),
+        output: framed.clone(),
         meta: crate::core::ai_output::EmissionMeta::default(),
     };
-    emit_prepared(&prepared, true);
-    shown
+    emit_prepared(&prepared);
+    framed
 }
 
 pub fn print_with_hint(
@@ -160,7 +162,7 @@ fn track_exact_execution(timer: tracking::TimedExecution, cmd_label: &str, reaso
     );
 }
 
-fn output_tracking_from_emission(
+pub(crate) fn output_tracking_from_emission(
     contract: OutputContract,
     meta: EmissionMeta,
 ) -> tracking::OutputTracking {
@@ -205,14 +207,47 @@ where
     let raw = &result.raw;
     let raw_stdout = &result.raw_stdout;
 
+    if !result.capture_complete {
+        track_captured_emission(
+            timer,
+            cmd_label,
+            raw,
+            raw,
+            output_contract,
+            EmissionMeta {
+                used_raw_fallback: true,
+                ..EmissionMeta::default()
+            },
+        );
+        return Ok(exit_code);
+    }
+
+    if opts.filter_stdout_only {
+        result
+            .write_captured_stderr()
+            .context("Failed to preserve captured stderr")?;
+    }
+
     if opts.skip_filter_on_failure && exit_code != 0 {
-        if !result.raw_stdout.trim().is_empty() {
-            print!("{}", result.raw_stdout);
+        result
+            .write_captured_stdout()
+            .context("Failed to replay captured stdout")?;
+        if !opts.filter_stdout_only {
+            result
+                .write_captured_stderr()
+                .context("Failed to replay captured stderr")?;
         }
-        if !result.raw_stderr.trim().is_empty() {
-            eprint!("{}", result.raw_stderr);
-        }
-        timer.track(cmd_label, &format!("rtk {}", cmd_label), raw, raw);
+        track_captured_emission(
+            timer,
+            cmd_label,
+            raw,
+            raw,
+            output_contract,
+            EmissionMeta {
+                used_raw_fallback: true,
+                ..EmissionMeta::default()
+            },
+        );
         return Ok(exit_code);
     }
 
@@ -233,35 +268,47 @@ where
         CapturedContract::Legacy => {
             let filtered = render(&document, BudgetClass::Source).text;
             let shown = if let Some(label) = opts.tee_label {
-                print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
+                print_with_hint(
+                    &filtered,
+                    raw_for_tracking,
+                    raw_for_tracking,
+                    label,
+                    exit_code,
+                )
             } else {
-                let guarded =
-                    crate::core::guard::never_worse(raw_for_tracking, &filtered).to_string();
-                if opts.no_trailing_newline {
-                    print!("{}", guarded);
-                } else {
-                    println!("{}", guarded);
-                }
-                guarded
+                let framed =
+                    guard_framed_payload(raw_for_tracking, &filtered, !opts.no_trailing_newline);
+                print!("{}", framed);
+                framed
             };
             (shown, EmissionMeta::default())
         }
         CapturedContract::Ai(budget) => {
             let rendered = render(&document, budget);
             let command_slug = opts.tee_label.unwrap_or(cmd_label);
-            let prepared = prepare_emission(raw_for_tracking, command_slug, rendered);
+            let prepared = prepare_emission(
+                raw_for_tracking,
+                command_slug,
+                rendered,
+                !opts.no_trailing_newline,
+            );
             let shown = prepared.as_str().to_string();
             let meta = prepared.meta();
-            emit_prepared(&prepared, !opts.no_trailing_newline);
+            emit_prepared(&prepared);
             (shown, meta)
         }
     };
 
+    let (tracking_raw, tracking_shown) = if opts.filter_stdout_only {
+        (raw.as_str(), format!("{}{}", result.raw_stderr, shown))
+    } else {
+        (raw_for_tracking.as_str(), shown)
+    };
     track_captured_emission(
         timer,
         cmd_label,
-        raw_for_tracking,
-        &shown,
+        tracking_raw,
+        &tracking_shown,
         output_contract,
         meta,
     );
@@ -1078,6 +1125,240 @@ fn is_bun_count_line(trimmed: &str) -> bool {
 mod err_test_runner_tests {
     use super::*;
     use crate::core::ai_output::{render, AiDocument, BudgetClass, ExactReason};
+    use std::io::Write;
+
+    const SEMANTIC_WRAPPER_HELPER: &str = "core::runner::tests::semantic_wrapper_subprocess_helper";
+
+    #[test]
+    fn legacy_guard_compares_the_final_framed_payload() {
+        let shown = guard_framed_payload("12345", "abcdefgh", true);
+
+        assert_eq!(shown, "12345\n");
+    }
+
+    #[test]
+    fn semantic_wrapper_subprocess_helper() {
+        if let Ok(source) = std::env::var("RTK_TEST_SEMANTIC_SOURCE") {
+            match source.as_str() {
+                "stdout-overflow" => {
+                    let mut stdout = std::io::stdout().lock();
+                    stdout.write_all(b"BEGIN\n").unwrap();
+                    stdout
+                        .write_all(&vec![b'x'; crate::core::stream::RAW_CAP + 1])
+                        .unwrap();
+                    stdout.write_all(b"\nEND\n").unwrap();
+                    stdout.flush().unwrap();
+                    std::process::exit(0);
+                }
+                "stdout-stderr-exit7" => {
+                    let mut stdout = std::io::stdout().lock();
+                    stdout.write_all(b"native stdout payload\n").unwrap();
+                    stdout.flush().unwrap();
+                    let mut stderr = std::io::stderr().lock();
+                    stderr.write_all(b"native stderr payload\n").unwrap();
+                    stderr.flush().unwrap();
+                    std::process::exit(7);
+                }
+                "many-lines" => {
+                    let mut stdout = std::io::stdout().lock();
+                    for index in 0..500 {
+                        writeln!(stdout, "diagnostic record {index}: {}", "x".repeat(48)).unwrap();
+                    }
+                    stdout.flush().unwrap();
+                    std::process::exit(0);
+                }
+                other => panic!("unknown semantic source helper: {other}"),
+            }
+        }
+
+        let Ok(mode) = std::env::var("RTK_TEST_SEMANTIC_WRAPPER") else {
+            return;
+        };
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", SEMANTIC_WRAPPER_HELPER, "--nocapture"])
+            .env("RTK_TEST_SEMANTIC_SOURCE", &mode);
+        let marker =
+            std::env::var_os("RTK_TEST_SEMANTIC_FILTER_MARKER").map(std::path::PathBuf::from);
+        let filter_fails = std::env::var_os("RTK_TEST_SEMANTIC_FILTER_FAIL").is_some();
+        let options = if std::env::var_os("RTK_TEST_SEMANTIC_EARLY_FAILURE").is_some() {
+            RunOptions::stdout_only().early_exit_on_failure()
+        } else {
+            RunOptions::stdout_only()
+        };
+        let exit_code = run_ai_filtered(
+            command,
+            "semantic-helper",
+            &mode,
+            BudgetClass::State,
+            move |_| {
+                if let Some(path) = &marker {
+                    std::fs::write(path, "filter-called").unwrap();
+                }
+                if filter_fails {
+                    Err(anyhow::anyhow!("synthetic parser failure"))
+                } else {
+                    Ok(AiDocument::legacy("FILTER_RAN"))
+                }
+            },
+            options,
+        )
+        .unwrap();
+        std::process::exit(exit_code);
+    }
+
+    #[test]
+    fn semantic_wrapper_does_not_parse_or_append_to_overflow_replay() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("filter-called");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", SEMANTIC_WRAPPER_HELPER, "--nocapture"])
+            .env("RTK_TEST_SEMANTIC_WRAPPER", "stdout-overflow")
+            .env("RTK_TEST_SEMANTIC_FILTER_MARKER", &marker)
+            .env("RTK_DB_PATH", temp.path().join("tracking.db"))
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(0));
+        assert!(
+            !marker.exists(),
+            "incomplete capture reached semantic parser"
+        );
+        let begin = output
+            .stdout
+            .windows(b"BEGIN\n".len())
+            .position(|window| window == b"BEGIN\n")
+            .expect("native replay begin marker");
+        let replay = &output.stdout[begin..];
+        let mut expected = b"BEGIN\n".to_vec();
+        expected.extend(std::iter::repeat_n(b'x', crate::core::stream::RAW_CAP + 1));
+        expected.extend_from_slice(b"\nEND\n");
+        assert_eq!(replay, expected, "overflow replay must be byte-complete");
+    }
+
+    #[test]
+    fn semantic_wrapper_stdout_only_preserves_stderr_once_and_nonzero_exit() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("tracking.db");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", SEMANTIC_WRAPPER_HELPER, "--nocapture"])
+            .env("RTK_TEST_SEMANTIC_WRAPPER", "stdout-stderr-exit7")
+            .env("RTK_DB_PATH", &database)
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(7));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("FILTER_RAN\n"), "stdout={stdout:?}");
+        assert!(
+            !stdout.contains("native stderr payload"),
+            "stdout={stdout:?}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            stderr.matches("native stderr payload\n").count(),
+            1,
+            "stderr={stderr:?}"
+        );
+        let connection = rusqlite::Connection::open(database).unwrap();
+        let output_tokens: i64 = connection
+            .query_row(
+                "SELECT output_tokens FROM commands ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            output_tokens
+                >= crate::core::tracking::estimate_tokens("FILTER_RAN\nnative stderr payload\n")
+                    as i64,
+            "tracking must include the native stderr emission; got {output_tokens}"
+        );
+    }
+
+    #[test]
+    fn semantic_early_failure_tracks_definitive_contract_and_native_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("tracking.db");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", SEMANTIC_WRAPPER_HELPER, "--nocapture"])
+            .env("RTK_TEST_SEMANTIC_WRAPPER", "stdout-stderr-exit7")
+            .env("RTK_TEST_SEMANTIC_EARLY_FAILURE", "1")
+            .env("RTK_DB_PATH", &database)
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(7));
+        assert!(output.stdout.ends_with(b"native stdout payload\n"));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr)
+                .matches("native stderr payload\n")
+                .count(),
+            1
+        );
+        let connection = rusqlite::Connection::open(database).unwrap();
+        let stored: (String, Option<String>, i64, i64, bool) = connection
+            .query_row(
+                "SELECT output_contract, exact_reason, input_tokens, output_tokens, filter_failed
+                 FROM commands ORDER BY id DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(stored.0, "ai_owned");
+        assert_eq!(stored.1, None);
+        assert_eq!(stored.2, stored.3, "native replay is exact");
+        assert!(!stored.4);
+    }
+
+    #[test]
+    fn semantic_parse_failure_tracks_omission_recovery_and_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("tracking.db");
+        let tee_dir = temp.path().join("lossless");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", SEMANTIC_WRAPPER_HELPER, "--nocapture"])
+            .env("RTK_TEST_SEMANTIC_WRAPPER", "many-lines")
+            .env("RTK_TEST_SEMANTIC_FILTER_FAIL", "1")
+            .env("RTK_DB_PATH", &database)
+            .env("RTK_TEE_DIR", &tee_dir)
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        let connection = rusqlite::Connection::open(database).unwrap();
+        let stored: (String, Option<String>, i64, i64, bool, bool) = connection
+            .query_row(
+                "SELECT output_contract, exact_reason, omitted_items, omitted_groups,
+                        recovery_created, filter_failed
+                 FROM commands ORDER BY id DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(stored.0, "ai_owned");
+        assert_eq!(stored.1, None);
+        assert!(stored.2 > 0 || stored.3 > 0, "stored={stored:?}");
+        assert!(stored.4, "stored={stored:?}");
+        assert!(stored.5, "stored={stored:?}");
+    }
 
     #[test]
     fn test_filter_errors() {

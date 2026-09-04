@@ -96,7 +96,7 @@ status=fail errors=3 warnings=7 passed=124 duration=8.2s
 src/lib.rs:42:17 E0308 expected=u32 actual=String
 tests/api.rs:91 FAIL login_expired expected=401 actual=200
 E0308 repeats=11 files=4
-omitted items=184 groups=9 recover=rtk read -l none "<raw-path>"
+omitted items=184 groups=9 recover=rtk read -l none --recovery <artifact-id>
 ```
 
 Rules:
@@ -146,7 +146,7 @@ Native exit codes, signals, cancellation, and command-start failures are preserv
 - Lossy output stores exact raw output only when recovery is needed.
 - Exact, authentication, API, binary, and known-sensitive routes are not automatically copied beyond existing native behavior.
 
-Recovery artifacts use RTK's private tee directory, restricted user-only permissions, and bounded retention. The footer provides a directly executable RTK recovery command. Recovery generation must not change the child command's exit result.
+Recovery artifacts use RTK's private tee directory, restricted user-only permissions, and bounded retention. The footer provides a directly executable, shell-neutral RTK recovery command; RTK resolves its opaque artifact ID internally so private paths and shell metacharacters never enter the command line. Recovery generation must not change the child command's exit result.
 
 For AI-owned routes, stdout and stderr may be captured together and represented semantically. RTK's own diagnostics are compact and emitted separately only when they are actionable. Exact routes preserve native stdout/stderr separation.
 

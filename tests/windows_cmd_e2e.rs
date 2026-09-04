@@ -696,10 +696,22 @@ fn hidden_cmd_runner_filters_with_complete_lossless_tee_and_native_result_metada
         .strip_prefix("[full output: ")
         .and_then(|value| value.strip_suffix(']'))
         .expect("paste-ready CMD recovery hint");
+    assert!(
+        hint.starts_with("rtk read -l none --recovery "),
+        "shell-neutral recovery hint: {hint}"
+    );
+    let rtk_bin = std::path::Path::new(env!("CARGO_BIN_EXE_rtk"));
+    let mut recovery_path = vec![rtk_bin.parent().unwrap().to_path_buf()];
+    recovery_path.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
     let mut recovered_command = Command::new("cmd.exe");
     recovered_command
         .args(["/D", "/V:ON", "/S", "/C"])
         .raw_arg(hint)
+        .env("PATH", std::env::join_paths(recovery_path).unwrap())
+        .env("RTK_TEE_DIR", &tee_dir)
+        .env("RTK_DB_PATH", directory.path().join("recovery-history.db"))
         .env("TEMP", directory.path().join("expanded-temp"))
         .env("RTK_HINT_EXPAND", "expanded-bang");
     let recovered = recovered_command
@@ -865,9 +877,11 @@ fn hidden_cmd_runner_serializes_lossless_tee_commits_between_processes() {
         .collect::<Vec<_>>();
     for output in [&first_output, &second_output] {
         assert!(
-            observed_paths
-                .iter()
-                .any(|path| String::from_utf8_lossy(&output.stdout).contains(path.trim())),
+            observed_paths.iter().any(|path| {
+                Path::new(path.trim()).file_name().is_some_and(|name| {
+                    String::from_utf8_lossy(&output.stdout).contains(&*name.to_string_lossy())
+                })
+            }),
             "each child returns a hint to the artifact it observed while holding the lock"
         );
     }

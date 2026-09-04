@@ -254,11 +254,13 @@ pub fn prepare_emission(
     raw: &str,
     command_slug: &str,
     rendered: RenderedOutput,
+    trailing_newline: bool,
 ) -> PreparedEmission {
     prepare_emission_with(
         raw,
         command_slug,
         rendered,
+        trailing_newline,
         crate::core::tee::reserve_lossless_tee,
     )
 }
@@ -267,15 +269,23 @@ fn prepare_emission_with<F>(
     raw: &str,
     command_slug: &str,
     rendered: RenderedOutput,
+    trailing_newline: bool,
     reserve: F,
 ) -> PreparedEmission
 where
     F: FnOnce(&str, &str) -> Option<crate::core::tee::LosslessTeeReservation>,
 {
     let parser_failed = rendered.parser_failed;
+    let raw_fallback = frame_payload(raw, trailing_newline);
     let Some(omission) = rendered.omission else {
-        let output = crate::core::guard::never_worse(raw, &rendered.text).to_string();
-        let used_raw_fallback = output == raw && rendered.text != raw;
+        let candidate = frame_payload(&rendered.text, trailing_newline);
+        let used_raw_fallback = crate::core::tracking::estimate_tokens(&candidate)
+            > crate::core::tracking::estimate_tokens(&raw_fallback);
+        let output = if used_raw_fallback {
+            raw_fallback
+        } else {
+            candidate
+        };
         return PreparedEmission::Plain {
             output,
             meta: EmissionMeta {
@@ -288,7 +298,7 @@ where
 
     let Some(reservation) = reserve(raw, command_slug) else {
         return PreparedEmission::Plain {
-            output: raw.to_string(),
+            output: raw_fallback,
             meta: EmissionMeta {
                 parser_failed,
                 used_raw_fallback: true,
@@ -298,9 +308,12 @@ where
     };
     let recovery = reservation.recovery_command();
     let body = rendered.text.trim_end_matches(['\r', '\n']);
-    let candidate = format!(
-        "{body}\nomitted items={} groups={} recover={recovery}",
-        omission.items, omission.groups
+    let candidate = frame_payload(
+        &format!(
+            "{body}\nomitted items={} groups={} recover={recovery}",
+            omission.items, omission.groups
+        ),
+        trailing_newline,
     );
     let meta = EmissionMeta {
         omitted_items: omission.items,
@@ -309,10 +322,10 @@ where
         parser_failed,
         used_raw_fallback: false,
     };
-    match reservation.commit_output_if_better(raw, candidate) {
+    match reservation.commit_output_if_better(&raw_fallback, candidate) {
         Some(commit) => PreparedEmission::Recovered { commit, meta },
         None => PreparedEmission::Plain {
-            output: raw.to_string(),
+            output: raw_fallback,
             meta: EmissionMeta {
                 parser_failed,
                 used_raw_fallback: true,
@@ -320,6 +333,18 @@ where
             },
         },
     }
+}
+
+pub(crate) fn frame_payload(output: &str, trailing_newline: bool) -> String {
+    let mut framed = output.to_string();
+    if trailing_newline {
+        framed.push('\n');
+    }
+    framed
+}
+
+pub(crate) fn strictly_smaller(raw: &str, output: &str) -> bool {
+    crate::core::tracking::estimate_tokens(output) < crate::core::tracking::estimate_tokens(raw)
 }
 
 #[derive(Debug)]
@@ -701,6 +726,32 @@ mod tests {
     }
 
     #[test]
+    fn final_newline_is_part_of_the_strict_token_comparison() {
+        let raw = "12345";
+        let unframed = "abcd";
+        assert!(strictly_smaller(raw, unframed));
+
+        let framed = frame_payload(unframed, true);
+
+        assert_eq!(framed, "abcd\n");
+        assert!(!strictly_smaller(raw, &framed));
+    }
+
+    #[test]
+    fn prepared_plain_output_owns_its_final_framing() {
+        let raw = "native output is substantially longer";
+        let rendered = RenderedOutput {
+            text: "short".to_string(),
+            omission: None,
+            parser_failed: false,
+        };
+
+        let prepared = prepare_emission_with(raw, "test", rendered, true, |_, _| None);
+
+        assert_eq!(prepared.as_str(), "short\n");
+    }
+
+    #[test]
     fn lossy_emission_contains_exact_counts_and_recovery_command() {
         let temp = tempfile::tempdir().unwrap();
         let rendered = RenderedOutput {
@@ -712,11 +763,12 @@ mod tests {
             parser_failed: false,
         };
         let raw = "native line\n".repeat(400);
-        let prepared = prepare_emission_with(&raw, "cargo test", rendered, |raw, slug| {
+        let prepared = prepare_emission_with(&raw, "cargo test", rendered, true, |raw, slug| {
             crate::core::tee::reserve_lossless_tee_file(raw, slug, temp.path(), 64_000, 20)
         });
         let shown = prepared.as_str();
         assert!(shown.contains("omitted items=14 groups=3 recover=rtk read -l none "));
+        assert!(shown.ends_with('\n'));
         assert!(prepared.recovery_created());
     }
 
@@ -731,8 +783,8 @@ mod tests {
             }),
             parser_failed: false,
         };
-        let prepared = prepare_emission_with(&raw, "test", rendered, |_, _| None);
-        assert_eq!(prepared.as_str(), raw);
+        let prepared = prepare_emission_with(&raw, "test", rendered, true, |_, _| None);
+        assert_eq!(prepared.as_str(), format!("{raw}\n"));
         assert!(!prepared.recovery_created());
     }
 
