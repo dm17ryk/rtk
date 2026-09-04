@@ -11,9 +11,11 @@ use crate::core::stream::{
 };
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, strip_ansi};
-use crate::core::{args_utils, config};
-use anyhow::{Context, Result};
+use crate::core::ai_output::{AiDocument, AiRecord, BudgetClass, ExactReason, Severity};
+use crate::core::{args_utils, config, path_inventory, runner};
+use anyhow::{anyhow, Context, Result};
 use regex::Regex;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::process::Command;
@@ -25,10 +27,11 @@ use std::sync::LazyLock;
 /// (stripped) and `-E` (dialect, left to #2138). Failure mode for a missing
 /// entry: the value becomes a positional (visible wrong result, not silent).
 const VALUE_FLAGS_SHORT: &[u8] = b"ABCMTdfgjmt";
+const RG_VALUE_FLAGS_SHORT: &[u8] = b"ABCMTdefgjmrt";
 
 /// Long flags that consume the NEXT token as their value (space-separated form).
 /// Inline `=` form (`--flag=value`) is one token and passes through unchanged.
-/// `--regexp` is handled separately (its value goes to `patterns`).
+/// `--regexp` is additionally extracted into `patterns` for semantic anchoring.
 /// `--encoding` value is consumed correctly here; dialect routing is #2138's job.
 const VALUE_FLAGS_LONG: &[&str] = &[
     "--after-context",
@@ -53,6 +56,7 @@ const VALUE_FLAGS_LONG: &[&str] = &[
     "--pre",
     "--pre-glob",
     "--replace",
+    "--regexp",
     "--sort",
     "--sortr",
     "--threads",
@@ -175,6 +179,11 @@ fn extract_pattern_path<T: AsRef<str>>(args: &[T]) -> (Vec<String>, Vec<String>,
                 }
                 continue;
             }
+            if let Some(pattern) = arg.strip_prefix("--regexp=") {
+                e_patterns.push(pattern.to_string());
+                i += 1;
+                continue;
+            }
             // Other long value-taking flags: consume next token as value.
             if VALUE_FLAGS_LONG.contains(&arg) {
                 flags.push(arg.to_string());
@@ -260,6 +269,556 @@ fn unparsed_signal(stdout: &str) -> usize {
             !trimmed.is_empty() && trimmed != "--" && parse_match_line(line).is_none()
         })
         .count()
+}
+
+/// Output shapes that RTK can render as compact, line-oriented AI records.
+/// Any flag that is not explicitly understood stays exact; adding a future
+/// ripgrep flag must therefore be an intentional routing decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RgRoute {
+    Matches,
+    JsonEvents,
+    Inventory,
+    Counts,
+    OnlyMatching,
+    Exact(ExactReason),
+}
+
+fn select_rg_route(current: &mut RgRoute, next: RgRoute) -> Option<ExactReason> {
+    match (*current, next) {
+        (RgRoute::Matches, next) => {
+            *current = next;
+            None
+        }
+        (current, next) if current == next => None,
+        _ => Some(ExactReason::Structured),
+    }
+}
+
+fn rg_long_flag_value(flag: &str) -> bool {
+    VALUE_FLAGS_LONG.contains(&flag)
+}
+
+fn is_rg_text_long_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--auto-hybrid-regex"
+            | "--case-sensitive"
+            | "--crlf"
+            | "--fixed-strings"
+            | "--glob-case-insensitive"
+            | "--hidden"
+            | "--ignore-case"
+            | "--invert-match"
+            | "--line-regexp"
+            | "--messages"
+            | "--mmap"
+            | "--no-auto-hybrid-regex"
+            | "--no-config"
+            | "--no-ignore"
+            | "--no-ignore-dot"
+            | "--no-ignore-exclude"
+            | "--no-ignore-files"
+            | "--no-ignore-global"
+            | "--no-ignore-messages"
+            | "--no-ignore-parent"
+            | "--no-ignore-vcs"
+            | "--no-messages"
+            | "--no-mmap"
+            | "--no-pcre2-unicode"
+            | "--no-require-git"
+            | "--no-search-zip"
+            | "--no-unicode"
+            | "--one-file-system"
+            | "--pcre2"
+            | "--pcre2-unicode"
+            | "--search-zip"
+            | "--smart-case"
+            | "--trim"
+            | "--unicode"
+            | "--with-filename"
+            | "--no-filename"
+            | "--line-number"
+            | "--no-line-number"
+            | "--word-regexp"
+    )
+}
+
+fn classify_rg(args: &[String]) -> RgRoute {
+    // Newline-bearing paths cannot be represented safely by the line-oriented
+    // semantic parser, so preserve ripgrep's native output and exit behavior.
+    if args
+        .iter()
+        .any(|arg| arg.contains('\r') || arg.contains('\n'))
+    {
+        return RgRoute::Exact(ExactReason::Sensitive);
+    }
+    let mut route = RgRoute::Matches;
+    let mut no_filename = false;
+    let mut past_dashdash = false;
+    let mut i = 0;
+
+    while i < args.len() {
+        let arg = &args[i];
+        if past_dashdash {
+            i += 1;
+            continue;
+        }
+        if arg == "--" {
+            past_dashdash = true;
+            i += 1;
+            continue;
+        }
+
+        if let Some(rest) = arg.strip_prefix("--") {
+            let (flag, has_inline_value) = rest
+                .split_once('=')
+                .map(|(flag, _)| (format!("--{flag}"), true))
+                .unwrap_or_else(|| (arg.clone(), false));
+
+            let mode = match flag.as_str() {
+                "--json" => Some(RgRoute::JsonEvents),
+                "--files" | "--files-with-matches" | "--files-without-match" => {
+                    Some(RgRoute::Inventory)
+                }
+                "--count" | "--count-matches" => Some(RgRoute::Counts),
+                "--only-matching" => Some(RgRoute::OnlyMatching),
+                "--help" | "--version" => return RgRoute::Exact(ExactReason::Interactive),
+                "--follow" => return RgRoute::Exact(ExactReason::Streaming),
+                "--binary" | "--text" | "--text-encoding" => {
+                    return RgRoute::Exact(ExactReason::Binary)
+                }
+                "--byte-offset"
+                | "--column"
+                | "--context-separator"
+                | "--field-context-separator"
+                | "--field-match-separator"
+                | "--heading"
+                | "--null"
+                | "--null-data"
+                | "--passthru"
+                | "--pretty"
+                | "--quiet"
+                | "--silent"
+                | "--stats"
+                | "--vimgrep" => return RgRoute::Exact(ExactReason::Structured),
+                "--debug" | "--trace" | "--type-list" | "--pcre2-version" => {
+                    return RgRoute::Exact(ExactReason::Interactive)
+                }
+                "--color" | "--colors" | "--encoding" | "--pre" | "--pre-glob" => {
+                    return RgRoute::Exact(ExactReason::Sensitive)
+                }
+                "--multiline" | "--multiline-dotall" => {
+                    return RgRoute::Exact(ExactReason::Structured)
+                }
+                _ if rg_long_flag_value(&flag) || is_rg_text_long_flag(&flag) => None,
+                _ => return RgRoute::Exact(ExactReason::Unknown),
+            };
+
+            if flag == "--no-filename" {
+                no_filename = true;
+            }
+
+            if let Some(next) = mode {
+                if let Some(reason) = select_rg_route(&mut route, next) {
+                    return RgRoute::Exact(reason);
+                }
+            }
+            if matches!(route, RgRoute::Counts) && no_filename {
+                return RgRoute::Exact(ExactReason::Structured);
+            }
+            if rg_long_flag_value(&flag) && !has_inline_value {
+                if flag == "--replace"
+                    && args
+                        .get(i + 1)
+                        .is_none_or(|value| value.starts_with('-'))
+                {
+                    return RgRoute::Exact(ExactReason::Unknown);
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+
+        let Some(cluster) = arg.strip_prefix('-').filter(|cluster| !cluster.is_empty()) else {
+            i += 1;
+            continue;
+        };
+        let bytes = cluster.as_bytes();
+        let mut j = 0;
+        while j < bytes.len() {
+            let flag = bytes[j] as char;
+            let mode = match flag {
+                'c' => Some(RgRoute::Counts),
+                'l' => Some(RgRoute::Inventory),
+                'L' => return RgRoute::Exact(ExactReason::Streaming),
+                'o' => Some(RgRoute::OnlyMatching),
+                'h' | 'V' => return RgRoute::Exact(ExactReason::Interactive),
+                '0' | 'Z' | 'b' | 'p' | 'q' => {
+                    return RgRoute::Exact(ExactReason::Structured)
+                }
+                'a' | 'U' | 'z' => return RgRoute::Exact(ExactReason::Binary),
+                'A' | 'B' | 'C' | 'M' | 'd' | 'e' | 'f' | 'g' | 'j' | 'm' | 'r' | 't'
+                | 'T' => {
+                    if j + 1 == bytes.len() {
+                        if flag == 'r'
+                            && args
+                                .get(i + 1)
+                                .is_none_or(|value| value.starts_with('-'))
+                        {
+                            return RgRoute::Exact(ExactReason::Unknown);
+                        }
+                        i += 1;
+                    }
+                    break;
+                }
+                'F' | 'H' | 'i' | 'n' | 'N' | 'P' | 'R' | 's' | 'S' | 'u' | 'v' | 'w'
+                | 'x' => None,
+                _ => return RgRoute::Exact(ExactReason::Unknown),
+            };
+            if let Some(next) = mode {
+                if let Some(reason) = select_rg_route(&mut route, next) {
+                    return RgRoute::Exact(reason);
+                }
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+
+    route
+}
+
+const RG_AI_MAX_LINE_LEN: usize = 80;
+type RgMatchEntry = (String, usize, bool, String, bool);
+type RgMatchBlock = (String, Vec<(usize, bool, String, bool)>);
+
+fn rg_document(
+    route: RgRoute,
+    raw: &str,
+    patterns: &[String],
+    _paths: &[String],
+) -> Result<AiDocument> {
+    if raw.is_empty() {
+        return Ok(AiDocument::legacy(""));
+    }
+
+    match route {
+        RgRoute::Matches => rg_match_document(raw, patterns, false),
+        RgRoute::OnlyMatching => rg_match_document(raw, patterns, true),
+        RgRoute::JsonEvents => rg_json_document(raw, patterns),
+        RgRoute::Inventory => Ok(path_inventory::document(&parse_inventory_paths(raw))),
+        RgRoute::Counts => rg_count_document(raw, _paths),
+        RgRoute::Exact(reason) => Err(anyhow!(
+            "exact rg route reached semantic renderer: {}",
+            reason.as_str()
+        )),
+    }
+}
+
+fn rg_faithful_match_baseline(
+    raw: &str,
+    paths: &[String],
+    extra_args: &[String],
+) -> Result<String> {
+    let show_file = rg_show_file(paths, extra_args);
+    let show_line = show_line(Engine::Rg, extra_args, std::io::stdout().is_terminal());
+    let mut plain = String::new();
+    for line in raw.lines() {
+        if let Some(output) = format_match_line(line, show_file, show_line) {
+            plain.push_str(&output);
+        } else if line == "--" {
+            plain.push_str("--\n");
+        } else {
+            return Err(anyhow!("unrecognized ripgrep match record"));
+        }
+    }
+    Ok(plain)
+}
+
+fn rg_match_document(raw: &str, patterns: &[String], preserve_exact: bool) -> Result<AiDocument> {
+    let mut entries = Vec::new();
+    for line in raw.lines() {
+        if line == "--" {
+            continue;
+        }
+        let Some((path, line_number, is_match, content)) = parse_match_line(line) else {
+            return Err(anyhow!("unrecognized ripgrep match record"));
+        };
+        let (content, was_shortened) = clean_rg_line(content, patterns, preserve_exact);
+        entries.push((path, line_number, is_match, content, was_shortened));
+    }
+    Ok(rg_match_document_from_entries(entries))
+}
+
+fn clean_rg_line(content: &str, anchors: &[String], preserve_exact: bool) -> (String, bool) {
+    if preserve_exact {
+        return (content.to_string(), false);
+    }
+    let content_lower = content.to_lowercase();
+    let anchor = anchors
+        .iter()
+        .find(|anchor| !anchor.is_empty() && content_lower.contains(&anchor.to_lowercase()))
+        .map(String::as_str)
+        .unwrap_or_default();
+    let cleaned = clean_line(content, RG_AI_MAX_LINE_LEN, None, anchor);
+    let shortened = cleaned != content;
+    (cleaned, shortened)
+}
+
+fn rg_match_document_from_entries(entries: Vec<RgMatchEntry>) -> AiDocument {
+    let mut document = AiDocument::new(Some("search"));
+    let matches = entries
+        .iter()
+        .filter(|(_, _, is_match, _, _)| *is_match)
+        .count();
+    document.fact("matches", matches.to_string());
+
+    let mut blocks: Vec<RgMatchBlock> = Vec::new();
+    for (path, line_number, is_match, content, was_shortened) in entries {
+        if let Some((previous_path, records)) = blocks.last_mut() {
+            if *previous_path == path {
+                records.push((line_number, is_match, content, was_shortened));
+                continue;
+            }
+        }
+        blocks.push((path, vec![(line_number, is_match, content, was_shortened)]));
+    }
+
+    for (path, records) in blocks {
+        // Keep per-file groups compact, but never make a large file an
+        // indivisible record that is dropped wholesale by the source budget.
+        for chunk in records.chunks(20) {
+            let rendered_records = chunk
+                .iter()
+                .map(|(line_number, is_match, content, _)| {
+                    let separator = if *is_match { ':' } else { '-' };
+                    format!("{line_number}{separator} {content}")
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            let shortened = chunk
+                .iter()
+                .filter(|(_, _, _, was_shortened)| *was_shortened)
+                .count();
+            document.push(
+                AiRecord::new(Severity::Info, format!("{path} {{{rendered_records}}}"))
+                    .grouped(&path)
+                    .representing(chunk.len())
+                    .omitting(shortened),
+            );
+        }
+    }
+
+    document
+}
+
+fn rg_json_document(raw: &str, patterns: &[String]) -> Result<AiDocument> {
+    let mut entries = Vec::new();
+
+    for line in raw.lines() {
+        let event: Value = serde_json::from_str(line).context("invalid ripgrep JSON event")?;
+        let event_type = event
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("ripgrep JSON event has no type"))?;
+        if !matches!(event_type, "match" | "context") {
+            continue;
+        }
+
+        let data = event
+            .get("data")
+            .ok_or_else(|| anyhow!("ripgrep JSON {event_type} event has no data"))?;
+        let path_value = data.get("path");
+        if path_value
+            .and_then(|path| path.get("bytes"))
+            .is_some()
+        {
+            return Err(anyhow!("ripgrep JSON path is not valid UTF-8"));
+        }
+        let path = path_value
+            .and_then(|path| path.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or("<stdin>");
+        let line_number = data
+            .get("line_number")
+            .and_then(Value::as_u64)
+            .and_then(|line_number| usize::try_from(line_number).ok())
+            .ok_or_else(|| anyhow!("ripgrep JSON {event_type} event has no line number"))?;
+        let text = data
+            .get("lines")
+            .and_then(|lines| lines.get("text"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("ripgrep JSON {event_type} event has non-text lines"))?;
+        let (text, was_shortened) = clean_rg_line(
+            text.trim_end_matches(['\r', '\n']),
+            patterns,
+            false,
+        );
+        entries.push((
+            path.to_string(),
+            line_number,
+            event_type == "match",
+            text,
+            was_shortened,
+        ));
+    }
+
+    Ok(rg_match_document_from_entries(entries))
+}
+
+fn parse_inventory_paths(raw: &str) -> Vec<String> {
+    raw.split(['\n', '\0'])
+        .map(|path| path.trim_end_matches('\r'))
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn rg_count_document(raw: &str, paths: &[String]) -> Result<AiDocument> {
+    let mut document = AiDocument::new(Some("counts"));
+    let mut files = 0;
+    for line in raw.lines().filter(|line| !line.is_empty()) {
+        let (path, count) = if let Some((path, count)) = line.split_once('\0') {
+            (path, count)
+        } else if let Some((path, count)) = line.rsplit_once(':') {
+            (path, count)
+        } else if line.chars().all(|character| character.is_ascii_digit()) {
+            (paths.first().map(String::as_str).unwrap_or("<stdin>"), line)
+        } else {
+            return Err(anyhow!("unrecognized ripgrep count record"));
+        };
+        if !count.chars().all(|character| character.is_ascii_digit()) {
+            return Err(anyhow!("ripgrep count is not numeric"));
+        }
+        files += 1;
+        document.push(AiRecord::new(Severity::Info, format!("{path}={count}")).grouped(path));
+    }
+    document.fact("files", files.to_string());
+    Ok(document)
+}
+
+fn append_rg_parse_aids(cmd: &mut Command, args: &[String], aids: &[&str]) {
+    if let Some(separator) = args.iter().position(|arg| arg == "--") {
+        cmd.args(&args[..separator]);
+        cmd.args(aids);
+        cmd.arg("--");
+        cmd.args(&args[separator + 1..]);
+    } else {
+        cmd.args(args);
+        cmd.args(aids);
+    }
+}
+
+fn rg_semantic_command(route: RgRoute, args: &[String]) -> Command {
+    let mut cmd = resolved_command("rg");
+    match route {
+        RgRoute::Matches | RgRoute::OnlyMatching => {
+            append_rg_parse_aids(&mut cmd, args, &["-n", "--with-filename", "--null"])
+        }
+        RgRoute::Counts | RgRoute::JsonEvents | RgRoute::Inventory | RgRoute::Exact(_) => {
+            cmd.args(args);
+        }
+    };
+    cmd
+}
+
+fn run_rg_ai(route: RgRoute, args: &[String]) -> Result<i32> {
+    let (mut patterns, paths, extra_args) = extract_pattern_path(args);
+    patterns.extend(rg_replacement_values(args));
+    let budget = match route {
+        RgRoute::Inventory => BudgetClass::Collection,
+        RgRoute::Matches | RgRoute::JsonEvents | RgRoute::Counts | RgRoute::OnlyMatching => {
+            BudgetClass::Source
+        }
+        RgRoute::Exact(_) => unreachable!("exact rg route cannot use semantic runner"),
+    };
+    let command = rg_semantic_command(route, args);
+    let args_display = args.join(" ");
+    let native_args = args.to_vec();
+
+    runner::run_ai_filtered_with_exit(
+        command,
+        "rg",
+        &args_display,
+        budget,
+        move |raw, exit_code| {
+            if raw.is_empty() && exit_code != 0 {
+                Ok(AiDocument::legacy(""))
+            } else {
+                let parsed = (|| -> Result<AiDocument> {
+                    let document = rg_document(route, raw, &patterns, &paths)?;
+                    if matches!(route, RgRoute::Matches | RgRoute::OnlyMatching) {
+                        Ok(document.with_lossless_baseline(rg_faithful_match_baseline(
+                            raw,
+                            &paths,
+                            &extra_args,
+                        )?))
+                    } else {
+                        Ok(document)
+                    }
+                })();
+
+                parsed.or_else(|_| {
+                    // Parse aids are deliberately augmented onto the semantic
+                    // invocation. If parsing fails, rerun the original argv so
+                    // recovery and fallback preserve native output exactly.
+                    let mut native = resolved_command("rg");
+                    native.args(&native_args);
+                    let result = exec_capture_stdin(&mut native)?;
+                    let stdout = result.stdout;
+                    Ok(AiDocument::legacy(stdout.clone()).with_lossless_baseline(stdout))
+                })
+            }
+        },
+        runner::RunOptions::stdout_only(),
+    )
+}
+
+fn rg_replacement_values(args: &[String]) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut past_dashdash = false;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if past_dashdash {
+            break;
+        }
+        if arg == "--" {
+            past_dashdash = true;
+            index += 1;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--replace=") {
+            values.push(value.to_string());
+        } else if arg == "--replace" || arg == "-r" {
+            if let Some(value) = args.get(index + 1) {
+                values.push(value.clone());
+                index += 1;
+            }
+        } else if let Some(cluster) = arg.strip_prefix('-') {
+            if let Some(position) = cluster.bytes().position(|character| character == b'r') {
+                let replacement = &cluster[position + 1..];
+                if !replacement.is_empty() {
+                    values.push(replacement.to_string());
+                } else if let Some(value) = args.get(index + 1) {
+                    values.push(value.clone());
+                    index += 1;
+                }
+            }
+        }
+        index += 1;
+    }
+    values
+}
+
+fn run_rg_exact(args: &[String], verbose: u8, reason: ExactReason) -> Result<i32> {
+    let args = args
+        .iter()
+        .map(std::ffi::OsString::from)
+        .collect::<Vec<_>>();
+    runner::run_passthrough_with_reason("rg", &args, verbose, reason)
 }
 
 /// Run real grep so matches and the savings baseline match the agent's command;
@@ -397,6 +956,52 @@ fn show_file(paths: &[String], extra_args: &[String]) -> bool {
             .any(|f| f == "--with-filename" || f == "--recursive")
 }
 
+/// Ripgrep's filename selectors override its default of showing names for
+/// multi-file and recursive searches. Preserve their argument order while
+/// reconstructing the lossless baseline from our parse-aided invocation.
+fn rg_show_file(paths: &[String], extra_args: &[String]) -> bool {
+    let mut explicit = None;
+    let mut index = 0;
+    while index < extra_args.len() {
+        let arg = &extra_args[index];
+        if VALUE_FLAGS_LONG.contains(&arg.as_str()) {
+            index += 2;
+            continue;
+        }
+
+        if arg == "--with-filename" {
+            explicit = Some(true);
+        } else if arg == "--no-filename" {
+            explicit = Some(false);
+        } else if let Some(cluster) = arg.strip_prefix('-').filter(|cluster| !cluster.is_empty())
+        {
+            let mut value_taking = false;
+            for (position, flag) in cluster.bytes().enumerate() {
+                if RG_VALUE_FLAGS_SHORT.contains(&flag) {
+                    value_taking = position + 1 == cluster.len();
+                    break;
+                }
+                match flag {
+                    b'H' => explicit = Some(true),
+                    b'h' => explicit = Some(false),
+                    _ => {}
+                }
+            }
+            if value_taking {
+                index += 2;
+                continue;
+            }
+        }
+        index += 1;
+    }
+
+    explicit.unwrap_or_else(|| {
+        paths.is_empty()
+            || paths.len() > 1
+            || paths.iter().any(|path| std::path::Path::new(path).is_dir())
+    })
+}
+
 fn show_line(engine: Engine, extra_args: &[String], stdout_is_tty: bool) -> bool {
     if has_short_flag(extra_args, 'N')
         || extra_args.iter().any(|f| f == "--no-line-number")
@@ -510,7 +1115,8 @@ pub fn run(
     // --version / --help: pass through to the engine without filtering.
     // Note: Clap strips `--` before populating trailing_var_arg, so both
     // `rtk grep --version` and `rtk grep -- --version` land here identically.
-    if args
+    if matches!(engine, Engine::Grep)
+        && args
         .iter()
         .any(|a| a == "--version" || a == "--help" || a == "-h")
     {
@@ -526,6 +1132,21 @@ pub fn run(
 
     // Re-insert `--` when clap's trailing_var_arg consumed it
     let args = args_utils::restore_double_dash(args);
+
+    if matches!(engine, Engine::Rg) {
+        let (_, rg_paths, _) = extract_pattern_path(&args);
+        let route = classify_rg(&args);
+        let reads_piped_stdin = !std::io::stdin().is_terminal()
+            && (rg_paths.is_empty() || rg_paths.iter().any(|path| path == "-"));
+        if reads_piped_stdin && !matches!(route, RgRoute::Inventory) {
+            return run_rg_exact(&args, verbose, ExactReason::Streaming);
+        }
+        return match route {
+            RgRoute::Exact(reason) => run_rg_exact(&args, verbose, reason),
+            route => run_rg_ai(route, &args),
+        };
+    }
+
     let real_cmd = format!("{} {}", engine.label(), args.join(" "));
     let rtk_label = format!("rtk {}", engine.label());
 
@@ -855,6 +1476,345 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::ai_output::Omission;
+
+    #[test]
+    fn rg_route_table_is_conservative_and_complete() {
+        let cases = [
+            (&["needle"][..], RgRoute::Matches),
+            (&["--json", "needle"][..], RgRoute::JsonEvents),
+            (&["--files"][..], RgRoute::Inventory),
+            (&["-l", "needle"][..], RgRoute::Inventory),
+            (
+                &["-L", "needle"][..],
+                RgRoute::Exact(ExactReason::Streaming),
+            ),
+            (&["-c", "needle"][..], RgRoute::Counts),
+            (&["--count-matches", "needle"][..], RgRoute::Counts),
+            (&["-o", "needle"][..], RgRoute::OnlyMatching),
+            (&["--replace", "hit", "needle"][..], RgRoute::Matches),
+            (
+                &["--replace", "-h", "needle"][..],
+                RgRoute::Exact(ExactReason::Unknown),
+            ),
+            (
+                &["-r", "-h", "needle"][..],
+                RgRoute::Exact(ExactReason::Unknown),
+            ),
+            (&["--regexp", "needle", "src"][..], RgRoute::Matches),
+            (&["--regexp=needle", "src"][..], RgRoute::Matches),
+            (&["-C", "2", "needle"][..], RgRoute::Matches),
+            (
+                &["--glob", "--future-flag", "needle"][..],
+                RgRoute::Matches,
+            ),
+            (&["needle", "--", "--future-flag"][..], RgRoute::Matches),
+            (
+                &["--null", "needle"][..],
+                RgRoute::Exact(ExactReason::Structured),
+            ),
+            (
+                &["--help"][..],
+                RgRoute::Exact(ExactReason::Interactive),
+            ),
+            (
+                &["--version"][..],
+                RgRoute::Exact(ExactReason::Interactive),
+            ),
+            (
+                &["--text", "needle"][..],
+                RgRoute::Exact(ExactReason::Binary),
+            ),
+            (
+                &["--follow", "needle"][..],
+                RgRoute::Exact(ExactReason::Streaming),
+            ),
+            (
+                &["--future-flag", "needle"][..],
+                RgRoute::Exact(ExactReason::Unknown),
+            ),
+            (
+                &["needle", "file\nname.txt"][..],
+                RgRoute::Exact(ExactReason::Sensitive),
+            ),
+            (
+                &["--count", "--no-filename", "needle"][..],
+                RgRoute::Exact(ExactReason::Structured),
+            ),
+            (
+                &["--no-filename", "--count", "needle"][..],
+                RgRoute::Exact(ExactReason::Structured),
+            ),
+            (
+                &["--json", "--count", "needle"][..],
+                RgRoute::Exact(ExactReason::Structured),
+            ),
+        ];
+
+        for (raw, expected) in cases {
+            let args = raw.iter().map(|value| (*value).to_string()).collect::<Vec<_>>();
+            assert_eq!(classify_rg(&args), expected, "args={raw:?}");
+        }
+    }
+
+    #[test]
+    fn rg_matches_group_contiguous_entries_without_reordering() {
+        let raw = concat!(
+            "a.rs\0",
+            "3:needle one\n",
+            "b.rs\0",
+            "2:needle two\n",
+            "a.rs\0",
+            "9:needle three\n",
+        );
+        let document = rg_document(
+            RgRoute::Matches,
+            raw,
+            &["needle".into()],
+            &[],
+        )
+        .unwrap();
+        let rendered = crate::core::ai_output::render(
+            &document,
+            crate::core::ai_output::BudgetClass::Source,
+        )
+        .text;
+
+        assert!(rendered.contains("a.rs"));
+        assert!(rendered.contains("3: needle one"));
+        assert!(rendered.find("b.rs").unwrap() < rendered.rfind("a.rs").unwrap());
+    }
+
+    #[test]
+    fn rg_shortened_match_declares_a_lossless_omission() {
+        let long_match = format!("prefix {} needle suffix", "x".repeat(100));
+        let raw = format!("a.rs\0{}:{}\n", 7, long_match);
+        let document = rg_document(RgRoute::Matches, &raw, &["needle".into()], &[]).unwrap();
+        let rendered = crate::core::ai_output::render(
+            &document,
+            crate::core::ai_output::BudgetClass::Source,
+        );
+
+        assert_eq!(
+            rendered.omission,
+            Some(Omission {
+                items: 1,
+                groups: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn rg_whitespace_cleanup_declares_a_lossless_omission() {
+        let raw = "a.rs\x007:  needle  \n";
+        let document = rg_document(RgRoute::Matches, raw, &["needle".into()], &[]).unwrap();
+        let rendered = crate::core::ai_output::render(
+            &document,
+            crate::core::ai_output::BudgetClass::Source,
+        );
+
+        assert_eq!(
+            rendered.omission,
+            Some(Omission {
+                items: 1,
+                groups: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn rg_no_filename_baseline_overrides_multiple_paths() {
+        let raw = "a.rs\x007:needle\nb.rs\x007:needle\n";
+        let paths = vec!["a.rs".to_string(), "b.rs".to_string()];
+        let extra_args = vec!["--no-filename".to_string()];
+
+        assert_eq!(
+            rg_faithful_match_baseline(raw, &paths, &extra_args).unwrap(),
+            "needle\nneedle\n"
+        );
+    }
+
+    #[test]
+    fn rg_filename_selectors_follow_argument_order() {
+        let paths = vec!["a.rs".to_string(), "b.rs".to_string()];
+
+        assert!(!rg_show_file(
+            &paths,
+            &["--with-filename".to_string(), "--no-filename".to_string()],
+        ));
+        assert!(rg_show_file(
+            &paths,
+            &["--no-filename".to_string(), "--with-filename".to_string()],
+        ));
+        assert!(!rg_show_file(&paths, &["-Hh".to_string()]));
+        assert!(rg_show_file(&paths, &["-hH".to_string()]));
+    }
+
+    #[test]
+    fn rg_filename_selector_ignores_inline_replace_values() {
+        let raw = "a.rs\x007:-h\nb.rs\x007:-h\n";
+        let paths = vec!["a.rs".to_string(), "b.rs".to_string()];
+        let extra_args = vec!["--replace=-h".to_string()];
+
+        assert_eq!(
+            rg_faithful_match_baseline(raw, &paths, &extra_args).unwrap(),
+            "a.rs:-h\nb.rs:-h\n"
+        );
+
+        let short_args = vec!["-r-h".to_string()];
+        assert_eq!(
+            rg_faithful_match_baseline(raw, &paths, &short_args).unwrap(),
+            "a.rs:-h\nb.rs:-h\n"
+        );
+    }
+
+    #[test]
+    fn rg_default_filename_behavior_ignores_inline_replace_flag_text() {
+        let raw = "a.rs\x007:-h\n";
+        let paths = vec!["a.rs".to_string()];
+        let extra_args = vec!["-r-h".to_string()];
+
+        assert_eq!(
+            rg_faithful_match_baseline(raw, &paths, &extra_args).unwrap(),
+            "-h\n"
+        );
+    }
+
+    #[test]
+    fn rg_budget_chunks_large_match_set() {
+        let long_match = format!("needle {}", "x".repeat(60));
+        let raw = (1..=500)
+            .map(|line_number| format!("a.rs\0{line_number}:{long_match}\n"))
+            .collect::<String>();
+        let document = rg_document(RgRoute::Matches, &raw, &["needle".into()], &[]).unwrap();
+        let rendered = crate::core::ai_output::render(
+            &document,
+            crate::core::ai_output::BudgetClass::Source,
+        );
+
+        let omission = rendered.omission.expect("large match set should report omission");
+        assert_eq!(omission.groups, 1);
+        assert!(
+            omission.items < 500,
+            "large file should be previewed in chunks: {omission:?}, text_len={}"
+            , rendered.text.len()
+        );
+        assert!(rendered.text.contains("a.rs"));
+    }
+
+    #[test]
+    fn rg_json_budget_chunks_large_match_set() {
+        let long_match = format!("needle {}", "x".repeat(60));
+        let raw = (1..=500)
+            .map(|line_number| {
+                format!(
+                    "{{\"type\":\"match\",\"data\":{{\"path\":{{\"text\":\"a.rs\"}},\"lines\":{{\"text\":\"{long_match}\\n\"}},\"line_number\":{line_number}}}}}\n"
+                )
+            })
+            .collect::<String>();
+        let document = rg_document(RgRoute::JsonEvents, &raw, &["needle".into()], &[]).unwrap();
+        let rendered = crate::core::ai_output::render(
+            &document,
+            crate::core::ai_output::BudgetClass::Source,
+        );
+
+        let omission = rendered.omission.expect("large JSON match set should report omission");
+        assert_eq!(omission.groups, 1);
+        assert!(
+            omission.items < 500,
+            "large JSON file should be previewed in chunks: {omission:?}, text_len={}"
+            , rendered.text.len()
+        );
+        assert!(rendered.text.contains("a.rs"));
+    }
+
+    #[test]
+    fn rg_json_discards_event_noise_but_keeps_match_text() {
+        let raw = concat!(
+            "{\"type\":\"begin\",\"data\":{\"path\":{\"text\":\"a.rs\"}}}\n",
+            "{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"a.rs\"},",
+            "\"lines\":{\"text\":\"needle here\\n\"},\"line_number\":7,",
+            "\"absolute_offset\":0,\"submatches\":[{\"match\":{\"text\":\"needle\"},\"start\":0,\"end\":6}]}}\n",
+            "{\"type\":\"end\",\"data\":{\"path\":{\"text\":\"a.rs\"},\"binary_offset\":null,\"stats\":{}}}\n",
+        );
+        let document = rg_document(
+            RgRoute::JsonEvents,
+            raw,
+            &["needle".into()],
+            &[],
+        )
+        .unwrap();
+        let rendered = crate::core::ai_output::render(
+            &document,
+            crate::core::ai_output::BudgetClass::Source,
+        )
+        .text;
+
+        assert!(rendered.contains("a.rs"));
+        assert!(rendered.contains("7: needle here"));
+        assert!(!rendered.contains("\"type\":\"begin\""));
+        assert!(!rendered.contains("omitted items="));
+    }
+
+    #[test]
+    fn rg_count_records_are_path_equals_count() {
+        let document = rg_document(
+            RgRoute::Counts,
+            concat!("a.rs\0", "4\n", "b.rs\0", "1\n"),
+            &[],
+            &[],
+        )
+        .unwrap();
+        let rendered = crate::core::ai_output::render(
+            &document,
+            crate::core::ai_output::BudgetClass::Collection,
+        )
+        .text;
+
+        assert!(rendered.contains("a.rs=4"));
+        assert!(rendered.contains("b.rs=1"));
+    }
+
+    #[test]
+    fn rg_count_single_file_numeric_output_keeps_the_file_name() {
+        let document = rg_document(
+            RgRoute::Counts,
+            "4\n",
+            &[],
+            &["src/main.rs".into()],
+        )
+        .unwrap();
+        let rendered = crate::core::ai_output::render(
+            &document,
+            crate::core::ai_output::BudgetClass::Collection,
+        )
+        .text;
+
+        assert!(rendered.contains("src/main.rs=4"));
+        assert!(!rendered.contains("<stdin>"));
+    }
+
+    #[test]
+    fn rg_only_matching_preserves_long_match_values() {
+        let value = "needle".to_string() + &"x".repeat(120);
+        let raw = format!("a.rs\01:{value}\n");
+        let document = rg_document(RgRoute::OnlyMatching, &raw, &["needle".into()], &[]).unwrap();
+        let rendered = crate::core::ai_output::render(
+            &document,
+            crate::core::ai_output::BudgetClass::Source,
+        )
+        .text;
+
+        assert!(rendered.contains(&value));
+        assert!(!rendered.contains("omitted items="));
+    }
+
+    #[test]
+    fn rg_json_non_utf8_path_is_not_fabricated() {
+        let raw = r#"{"type":"match","data":{"path":{"bytes":[255]},"lines":{"text":"needle\n"},"line_number":1}}"#;
+        let error = rg_document(RgRoute::JsonEvents, raw, &["needle".into()], &[]).unwrap_err();
+        assert!(error.to_string().contains("not valid UTF-8"));
+    }
 
     #[test]
     fn test_clean_line() {

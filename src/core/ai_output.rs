@@ -96,6 +96,8 @@ pub struct AiRecord {
     pub text: String,
     pub group: Option<String>,
     source_order: usize,
+    represented_items: usize,
+    omitted_items: usize,
 }
 
 impl AiRecord {
@@ -105,11 +107,26 @@ impl AiRecord {
             text: text.into(),
             group: None,
             source_order: 0,
+            represented_items: 1,
+            omitted_items: 0,
         }
     }
 
     pub fn grouped(mut self, group: impl Into<String>) -> Self {
         self.group = Some(group.into());
+        self
+    }
+
+    pub fn representing(mut self, items: usize) -> Self {
+        self.represented_items = items.max(1);
+        self
+    }
+
+    /// Marks source items compacted inside this record. They count as omitted
+    /// only when this record is emitted; a budget-dropped record is instead
+    /// accounted for by its full represented-item count.
+    pub fn omitting(mut self, items: usize) -> Self {
+        self.omitted_items = items;
         self
     }
 }
@@ -134,6 +151,7 @@ pub struct AiDocument {
     body: DocumentBody,
     declared_omission: Option<Omission>,
     parser_failed: bool,
+    lossless_baseline: Option<String>,
 }
 
 impl AiDocument {
@@ -145,6 +163,7 @@ impl AiDocument {
             body: DocumentBody::Semantic,
             declared_omission: None,
             parser_failed: false,
+            lossless_baseline: None,
         }
     }
 
@@ -156,6 +175,7 @@ impl AiDocument {
             body: DocumentBody::Legacy(raw.into()),
             declared_omission: None,
             parser_failed: false,
+            lossless_baseline: None,
         }
     }
 
@@ -200,6 +220,17 @@ impl AiDocument {
     pub fn with_omission(mut self, omission: Omission) -> Self {
         self.declared_omission = Some(omission);
         self
+    }
+
+    /// Supplies the native-equivalent stdout used for no-worse fallback,
+    /// tracking, and lossless recovery when an adapter needed parse aids.
+    pub fn with_lossless_baseline(mut self, baseline: impl Into<String>) -> Self {
+        self.lossless_baseline = Some(baseline.into());
+        self
+    }
+
+    pub(crate) fn lossless_baseline(&self) -> Option<&str> {
+        self.lossless_baseline.as_deref()
     }
 }
 
@@ -256,8 +287,19 @@ pub fn prepare_emission(
     rendered: RenderedOutput,
     trailing_newline: bool,
 ) -> PreparedEmission {
-    prepare_emission_with(
+    prepare_emission_with_baseline(raw, raw, command_slug, rendered, trailing_newline)
+}
+
+pub fn prepare_emission_with_baseline(
+    raw: &str,
+    fallback_baseline: &str,
+    command_slug: &str,
+    rendered: RenderedOutput,
+    trailing_newline: bool,
+) -> PreparedEmission {
+    prepare_emission_with_fallback(
         raw,
+        fallback_baseline,
         command_slug,
         rendered,
         trailing_newline,
@@ -275,8 +317,22 @@ fn prepare_emission_with<F>(
 where
     F: FnOnce(&str, &str) -> Option<crate::core::tee::LosslessTeeReservation>,
 {
+    prepare_emission_with_fallback(raw, raw, command_slug, rendered, trailing_newline, reserve)
+}
+
+fn prepare_emission_with_fallback<F>(
+    raw: &str,
+    fallback_baseline: &str,
+    command_slug: &str,
+    rendered: RenderedOutput,
+    trailing_newline: bool,
+    reserve: F,
+) -> PreparedEmission
+where
+    F: FnOnce(&str, &str) -> Option<crate::core::tee::LosslessTeeReservation>,
+{
     let parser_failed = rendered.parser_failed;
-    let raw_fallback = frame_payload(raw, trailing_newline);
+    let raw_fallback = frame_payload(fallback_baseline, trailing_newline);
     let Some(omission) = rendered.omission else {
         let candidate = frame_payload(&rendered.text, trailing_newline);
         let used_raw_fallback = crate::core::tracking::estimate_tokens(&candidate)
@@ -337,7 +393,7 @@ where
 
 pub(crate) fn frame_payload(output: &str, trailing_newline: bool) -> String {
     let mut framed = output.to_string();
-    if trailing_newline {
+    if trailing_newline && !framed.ends_with('\n') {
         framed.push('\n');
     }
     framed
@@ -352,6 +408,8 @@ struct CollapsedRecord {
     group: Option<String>,
     text: String,
     source_records: usize,
+    represented_items: usize,
+    omitted_items: usize,
 }
 
 pub fn render(document: &AiDocument, budget: BudgetClass) -> RenderedOutput {
@@ -385,9 +443,14 @@ fn render_semantic(document: &AiDocument, budget: BudgetClass) -> RenderedOutput
         emitted += 1;
     }
 
+    let emitted_internal_omissions = records[..emitted]
+        .iter()
+        .map(|record| record.omitted_items)
+        .sum();
     let omission = omission_from(
         document.declared_omission.clone(),
         omitted_summary_items,
+        emitted_internal_omissions,
         &records[emitted..],
     );
     if lines.is_empty() {
@@ -456,6 +519,8 @@ fn collapsed_records(document: &AiDocument) -> Vec<CollapsedRecord> {
             .find(|existing| existing.group == record.group && existing.text == record.text)
         {
             existing.source_records += 1;
+            existing.represented_items += record.represented_items;
+            existing.omitted_items += record.omitted_items;
             continue;
         }
 
@@ -463,6 +528,8 @@ fn collapsed_records(document: &AiDocument) -> Vec<CollapsedRecord> {
             group: record.group,
             text: record.text,
             source_records: 1,
+            represented_items: record.represented_items,
+            omitted_items: record.omitted_items,
         });
     }
 
@@ -472,22 +539,23 @@ fn collapsed_records(document: &AiDocument) -> Vec<CollapsedRecord> {
 fn omission_from(
     declared_omission: Option<Omission>,
     omitted_summary_items: usize,
+    emitted_internal_omissions: usize,
     omitted_records: &[CollapsedRecord],
 ) -> Option<Omission> {
     let mut omitted = match declared_omission {
         Some(mut declared) => {
-            declared.items += omitted_summary_items;
+            declared.items += omitted_summary_items + emitted_internal_omissions;
             declared
         }
         None => Omission {
-            items: omitted_summary_items,
+            items: omitted_summary_items + emitted_internal_omissions,
             groups: 0,
         },
     };
     let mut omitted_groups = std::collections::BTreeSet::new();
 
     for record in omitted_records {
-        omitted.items += record.source_records;
+        omitted.items += record.represented_items;
         if let Some(group) = &record.group {
             omitted_groups.insert(group);
         }
@@ -676,6 +744,31 @@ mod tests {
     }
 
     #[test]
+    fn semantic_render_counts_logical_items_for_omitted_group_records() {
+        let mut doc = AiDocument::new(None::<String>);
+        doc.push(
+            AiRecord::new(Severity::Info, format!("first {}", "x".repeat(260)))
+                .grouped("alpha")
+                .representing(4),
+        );
+        doc.push(
+            AiRecord::new(Severity::Info, format!("second {}", "y".repeat(260)))
+                .grouped("beta")
+                .representing(12),
+        );
+
+        let rendered = render(&doc, BudgetClass::Acknowledgement);
+
+        assert_eq!(
+            rendered.omission,
+            Some(Omission {
+                items: 12,
+                groups: 1,
+            })
+        );
+    }
+
+    #[test]
     fn semantic_render_adds_declared_omission_to_budget_omission() {
         let mut doc = AiDocument::new(None::<String>).with_omission(Omission {
             items: 5,
@@ -752,6 +845,23 @@ mod tests {
     }
 
     #[test]
+    fn prepared_emission_keeps_required_baseline_when_ai_output_is_longer() {
+        let raw = "visible.txt";
+        let baseline = "visible.txt\n(1 filtered by policy)";
+        let rendered = RenderedOutput {
+            text: "status=inventory files=1 dirs=1\nvisible.txt\n(1 filtered by policy)"
+                .to_string(),
+            omission: None,
+            parser_failed: false,
+        };
+
+        let prepared = prepare_emission_with_baseline(raw, baseline, "find", rendered, true);
+
+        assert_eq!(prepared.as_str(), "visible.txt\n(1 filtered by policy)\n");
+        assert!(prepared.meta().used_raw_fallback);
+    }
+
+    #[test]
     fn lossy_emission_contains_exact_counts_and_recovery_command() {
         let temp = tempfile::tempdir().unwrap();
         let rendered = RenderedOutput {
@@ -784,7 +894,7 @@ mod tests {
             parser_failed: false,
         };
         let prepared = prepare_emission_with(&raw, "test", rendered, true, |_, _| None);
-        assert_eq!(prepared.as_str(), format!("{raw}\n"));
+        assert_eq!(prepared.as_str(), raw);
         assert!(!prepared.recovery_created());
     }
 

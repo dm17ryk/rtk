@@ -1,11 +1,119 @@
 //! Reads source files with optional language-aware filtering to strip boilerplate.
 
+use crate::core::ai_output::{AiDocument, AiRecord, BudgetClass, Omission, Severity};
 use crate::core::filter::{self, FilterLevel, Language};
 use crate::core::guard::never_worse;
 use crate::core::tracking;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
+
+fn source_document(file: &str, lines: &[filter::FilteredLine]) -> AiDocument {
+    let mut document = AiDocument::new(Some("source"));
+    document.fact("file", file);
+    for line in lines {
+        document.push(AiRecord::new(
+            Severity::Info,
+            format!("{}: {}", line.original_line, line.text),
+        ));
+    }
+    document
+}
+
+struct AiSourceRequest<'a> {
+    timer: &'a tracking::TimedExecution,
+    original_cmd: &'a str,
+    rtk_cmd: &'a str,
+    file_label: &'a str,
+    content: &'a str,
+    level: FilterLevel,
+    lang: &'a Language,
+    max_lines: Option<usize>,
+    tail_lines: Option<usize>,
+    line_numbers: bool,
+    fallback_baseline: &'a str,
+    verbose: u8,
+}
+
+fn emit_ai_source(request: AiSourceRequest<'_>) -> bool {
+    let AiSourceRequest {
+        timer,
+        original_cmd,
+        rtk_cmd,
+        file_label,
+        content,
+        level,
+        lang,
+        max_lines,
+        tail_lines,
+        line_numbers,
+        fallback_baseline,
+        verbose,
+    } = request;
+    let filter = filter::get_filter(level);
+    let lines = filter.filter_lines(content, lang);
+    let selected = select_filtered_line_window(&lines, max_lines, tail_lines);
+    if selected.is_empty() {
+        return false;
+    }
+
+    if verbose > 0 {
+        let original_lines = content.lines().count();
+        let reduction = if original_lines > 0 {
+            ((original_lines - selected.len()) as f64 / original_lines as f64) * 100.0
+        } else {
+            0.0
+        };
+        eprintln!(
+            "Lines: {} -> {} ({:.1}% reduction)",
+            original_lines,
+            selected.len(),
+            reduction
+        );
+    }
+
+    let omitted_by_filter = content.lines().count().saturating_sub(lines.len());
+    let mut document = source_document(file_label, &selected);
+    if let Some(max) = max_lines {
+        document.fact("window", format!("max={max}"));
+    } else if let Some(tail) = tail_lines {
+        document.fact("window", format!("tail={tail}"));
+    }
+    if omitted_by_filter > 0 {
+        document = document.with_omission(Omission {
+            items: omitted_by_filter,
+            groups: 0,
+        });
+    }
+    let native_output = if line_numbers {
+        format_with_line_numbers(content)
+    } else {
+        content.to_string()
+    };
+    let fallback = if max_lines.is_some() || tail_lines.is_some() {
+        if line_numbers {
+            format_with_line_numbers(fallback_baseline)
+        } else {
+            fallback_baseline.to_string()
+        }
+    } else {
+        native_output.clone()
+    };
+    crate::core::runner::emit_ai_document_with_baseline(
+        crate::core::runner::AiEmission {
+            timer,
+            original_cmd,
+            rtk_cmd,
+            raw: &native_output,
+            fallback_baseline: &fallback,
+            command_slug: "read",
+            budget: BudgetClass::Source,
+            trailing_newline: true,
+        },
+        document,
+    );
+    true
+}
 
 pub fn run(
     file: &Path,
@@ -50,6 +158,42 @@ pub fn run(
         filtered = content.clone();
     }
 
+    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
+
+    let (raw, rtk_output) = if line_numbers {
+        (
+            format_with_line_numbers(&content),
+            format_with_line_numbers(&filtered),
+        )
+    } else {
+        (content.clone(), filtered.clone())
+    };
+
+    let original_cmd = format!("cat {}", file.display());
+    let file_label = file.display().to_string();
+    if level != FilterLevel::None
+        && emit_ai_source(AiSourceRequest {
+            timer: &timer,
+            original_cmd: &original_cmd,
+            rtk_cmd: "rtk read",
+            file_label: &file_label,
+            content: &content,
+            level,
+            lang: &lang,
+            max_lines,
+            tail_lines,
+            line_numbers,
+            fallback_baseline: if max_lines.is_none() && tail_lines.is_none() {
+                &content
+            } else {
+                &filtered
+            },
+            verbose,
+        })
+    {
+        return Ok(());
+    }
+
     if verbose > 0 {
         let original_lines = content.lines().count();
         let filtered_lines = filtered.lines().count();
@@ -64,16 +208,6 @@ pub fn run(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
-
-    let (raw, rtk_output) = if line_numbers {
-        (
-            format_with_line_numbers(&content),
-            format_with_line_numbers(&filtered),
-        )
-    } else {
-        (content.clone(), filtered.clone())
-    };
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
     timer.track(
@@ -118,6 +252,49 @@ pub fn run_stdin(
     let filter = filter::get_filter(level);
     let mut filtered = filter.filter(&content, &lang);
 
+    // Safety: if filter emptied non-empty stdin, fall back to raw content.
+    if filtered.trim().is_empty() && !content.trim().is_empty() {
+        eprintln!(
+            "rtk: warning: filter produced empty output for stdin ({} bytes), showing raw content",
+            content.len()
+        );
+        filtered = content.clone();
+    }
+
+    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
+
+    let (raw, rtk_output) = if line_numbers {
+        (
+            format_with_line_numbers(&content),
+            format_with_line_numbers(&filtered),
+        )
+    } else {
+        (content.clone(), filtered.clone())
+    };
+
+    if level != FilterLevel::None
+        && emit_ai_source(AiSourceRequest {
+            timer: &timer,
+            original_cmd: "cat - (stdin)",
+            rtk_cmd: "rtk read -",
+            file_label: "stdin",
+            content: &content,
+            level,
+            lang: &lang,
+            max_lines,
+            tail_lines,
+            line_numbers,
+            fallback_baseline: if max_lines.is_none() && tail_lines.is_none() {
+                &content
+            } else {
+                &filtered
+            },
+            verbose,
+        })
+    {
+        return Ok(());
+    }
+
     if verbose > 0 {
         let original_lines = content.lines().count();
         let filtered_lines = filtered.lines().count();
@@ -132,16 +309,6 @@ pub fn run_stdin(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
-
-    let (raw, rtk_output) = if line_numbers {
-        (
-            format_with_line_numbers(&content),
-            format_with_line_numbers(&filtered),
-        )
-    } else {
-        (content.clone(), filtered.clone())
-    };
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
 
@@ -157,6 +324,23 @@ fn format_with_line_numbers(content: &str) -> String {
         out.push_str(&format!("{:>width$} │ {}\n", i + 1, line, width = width));
     }
     out
+}
+
+fn select_filtered_line_window(
+    lines: &[filter::FilteredLine],
+    max_lines: Option<usize>,
+    tail_lines: Option<usize>,
+) -> Vec<filter::FilteredLine> {
+    if let Some(tail) = tail_lines {
+        let start = lines.len().saturating_sub(tail);
+        return lines[start..].to_vec();
+    }
+
+    if let Some(max) = max_lines {
+        return filter::smart_truncate_lines(lines, max);
+    }
+
+    lines.to_vec()
 }
 
 fn apply_line_window(
@@ -212,6 +396,90 @@ fn main() {{
         // Test that run_stdin has correct signature and compiles
         // We don't actually run it because it would hang waiting for stdin
         // Compile-time verification that the function exists with correct signature
+    }
+
+    #[test]
+    fn source_document_uses_original_dense_line_markers() {
+        let lines = vec![
+            filter::FilteredLine {
+                original_line: 2,
+                text: "fn kept() {}".into(),
+            },
+            filter::FilteredLine {
+                original_line: 5,
+                text: "let value = 1;".into(),
+            },
+        ];
+
+        let rendered = crate::core::ai_output::render(
+            &source_document("sample.rs", &lines),
+            crate::core::ai_output::BudgetClass::Source,
+        )
+        .text;
+
+        assert_eq!(
+            rendered,
+            "status=source file=sample.rs\n2: fn kept() {}\n5: let value = 1;"
+        );
+    }
+
+    #[test]
+    fn selected_source_window_keeps_legacy_priority_and_original_locations() {
+        let lines = vec![
+            filter::FilteredLine {
+                original_line: 2,
+                text: "let first = 1;".into(),
+            },
+            filter::FilteredLine {
+                original_line: 5,
+                text: "fn retained() {}".into(),
+            },
+            filter::FilteredLine {
+                original_line: 9,
+                text: "let not_reached = 2;".into(),
+            },
+            filter::FilteredLine {
+                original_line: 12,
+                text: "let also_not_reached = 3;".into(),
+            },
+        ];
+
+        let selected = select_filtered_line_window(&lines, Some(3), None);
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|line| line.original_line)
+                .collect::<Vec<_>>(),
+            vec![2, 5]
+        );
+    }
+
+    #[test]
+    fn selected_tail_window_keeps_original_locations() {
+        let lines = vec![
+            filter::FilteredLine {
+                original_line: 2,
+                text: "first".into(),
+            },
+            filter::FilteredLine {
+                original_line: 5,
+                text: "second".into(),
+            },
+            filter::FilteredLine {
+                original_line: 9,
+                text: "third".into(),
+            },
+        ];
+
+        let selected = select_filtered_line_window(&lines, None, Some(2));
+        assert_eq!(
+            selected
+                .iter()
+                .map(|line| line.original_line)
+                .collect::<Vec<_>>(),
+            vec![5, 9]
+        );
     }
 
     #[test]

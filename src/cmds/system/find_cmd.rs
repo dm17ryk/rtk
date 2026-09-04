@@ -1,6 +1,7 @@
 //! Filters find results by grouping files by directory.
 
-use crate::core::tracking;
+use crate::core::ai_output::{AiDocument, AiRecord, BudgetClass, Omission, Severity};
+use crate::core::{path_inventory, tracking};
 use crate::core::truncate::CAP_INVENTORY;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
@@ -617,6 +618,14 @@ fn filtered_hint(filtered: &[String]) -> Option<String> {
     }
 }
 
+fn find_document(files: &[String], note: Option<&str>) -> AiDocument {
+    let mut document = path_inventory::document(files);
+    if let Some(note) = note {
+        document.push(AiRecord::new(Severity::Warning, note));
+    }
+    document
+}
+
 fn render(
     mut files: Vec<String>,
     max_results: usize,
@@ -627,118 +636,49 @@ fn render(
     timer: &tracking::TimedExecution,
 ) -> String {
     files.sort();
-    let note = filtered_hint(filtered);
-
-    if files.is_empty() {
-        let shown = match &note {
-            Some(note) => crate::core::runner::emit_guarded(note, None, note),
-            None => String::new(),
-        };
-        timer.track(track_cmd, "rtk find", raw_output, &shown);
-        return shown;
-    }
-
     let ordered = display_ordered(&files);
+    let displayed = ordered.iter().take(max_results).cloned().collect::<Vec<_>>();
+    let hidden = &ordered[displayed.len()..];
+    let note = filtered_hint(filtered);
+    let mut document = find_document(&displayed, note.as_deref());
 
-    let by_dir = group_by_dir(&files);
-    let mut dirs: Vec<_> = by_dir.keys().cloned().collect();
-    dirs.sort();
-    let dirs_count = dirs.len();
-    let total_files = files.len();
-
-    let mut body = String::new();
-    body.push_str(&format!("{}F {}D:\n", total_files, dirs_count));
-    body.push('\n');
-
-    // Display with proper --max limiting (count individual files)
-    let mut displayed = 0;
-    for dir in &dirs {
-        if displayed >= max_results {
-            break;
-        }
-
-        let files_in_dir = &by_dir[dir];
-        let dir_display = if dir.chars().count() > 50 {
-            let tail: String = dir
-                .chars()
-                .rev()
-                .take(47)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            format!("...{}", tail)
-        } else {
-            dir.clone()
-        };
-
-        let remaining_budget = max_results - displayed;
-        if files_in_dir.len() <= remaining_budget {
-            body.push_str(&format!("{}/ {}\n", dir_display, files_in_dir.join(" ")));
-            displayed += files_in_dir.len();
-        } else {
-            // Partial display: show only what fits in budget
-            let partial: Vec<_> = files_in_dir
-                .iter()
-                .take(remaining_budget)
-                .cloned()
-                .collect();
-            body.push_str(&format!("{}/ {}\n", dir_display, partial.join(" ")));
-            displayed += partial.len();
-            break;
+    if !hidden.is_empty() {
+        document.fact("matched", files.len().to_string());
+        if !max_explicit {
+            document = document.with_omission(Omission {
+                items: hidden.len(),
+                groups: path_inventory::canonical_groups(hidden).len(),
+            });
         }
     }
 
-    if displayed < total_files {
-        body.push_str(&format!("+{} more\n", total_files - displayed));
-    }
-
-    // Extension summary
-    let mut by_ext: HashMap<String, usize> = HashMap::new();
-    for file in &files {
-        let ext = Path::new(file)
-            .extension()
-            .map(|e| e.to_string_lossy().to_string())
-            .unwrap_or_else(|| "none".to_string());
-        *by_ext.entry(ext).or_default() += 1;
-    }
-
-    if by_ext.len() > 1 {
-        body.push('\n');
-        let mut exts: Vec<_> = by_ext.iter().collect();
-        exts.sort_by(|a, b| b.1.cmp(a.1));
-        let ext_str: Vec<String> = exts
-            .iter()
-            .take(5)
-            .map(|(e, c)| format!(".{}({})", e, c))
-            .collect();
-        let ext_line = format!("ext: {}", ext_str.join(" "));
-        body.push_str(&format!("{}\n", ext_line));
-    }
-
-    if let Some(note) = &note {
-        body.push_str(&format!("{}\n", note));
-    }
-
-    let capped_raw = build_capped_listing(&ordered, max_results);
-    let hint = if displayed < total_files && !max_explicit {
-        crate::core::tee::force_tee_tail_hint(&ordered.join("\n"), "find", displayed + 1)
+    let mut baseline = if max_explicit {
+        build_capped_listing(&ordered, max_results)
+            .trim_end_matches('\n')
+            .to_string()
     } else {
-        None
-    };
-    let listing = capped_raw.trim_end_matches('\n');
-    let mut baseline = match &hint {
-        Some(h) => format!("{}\n{}", listing, h),
-        None => listing.to_string(),
+        raw_output.to_string()
     };
     if let Some(note) = &note {
-        baseline.push('\n');
+        if !baseline.is_empty() {
+            baseline.push('\n');
+        }
         baseline.push_str(note);
     }
-    let shown =
-        crate::core::runner::emit_guarded(body.trim_end_matches('\n'), hint.as_deref(), &baseline);
-    timer.track(track_cmd, "rtk find", raw_output, &shown);
-    shown
+
+    crate::core::runner::emit_ai_document_with_baseline(
+        crate::core::runner::AiEmission {
+            timer,
+            original_cmd: track_cmd,
+            rtk_cmd: "rtk find",
+            raw: raw_output,
+            fallback_baseline: &baseline,
+            command_slug: "find",
+            budget: BudgetClass::Collection,
+            trailing_newline: true,
+        },
+        document,
+    )
 }
 
 #[cfg(test)]
@@ -1297,6 +1237,22 @@ mod tests {
         let capped = build_capped_listing(&files, 10);
         let grouped = "1F 1D:\n\n./ a.rs\n\next: .rs(1)\n";
         assert_eq!(never_worse(&capped, grouped), capped);
+    }
+
+    #[test]
+    fn render_emits_shared_ai_inventory_for_compact_find_results() {
+        let timer = tracking::TimedExecution::start();
+        let files = (0..20)
+            .map(|index| format!("src/core/file-{index:02}.rs"))
+            .chain((0..20).map(|index| format!("src/cmds/file-{index:02}.rs")))
+            .collect::<Vec<_>>();
+        let raw = files.join("\n");
+
+        let shown = render(files, 50, false, &[], "find src", &raw, &timer);
+
+        assert!(shown.contains("status=inventory files=40 dirs=2 root=src"));
+        assert!(shown.contains("cmds/{"));
+        assert!(shown.contains("core/{"));
     }
 
     #[test]
