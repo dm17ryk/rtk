@@ -11,6 +11,7 @@ use crate::core::stream::{
 };
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, strip_ansi};
+use crate::core::ai_output::ExactReason;
 use crate::core::{args_utils, config};
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -260,6 +261,194 @@ fn unparsed_signal(stdout: &str) -> usize {
             !trimmed.is_empty() && trimmed != "--" && parse_match_line(line).is_none()
         })
         .count()
+}
+
+/// Output shapes that RTK can render as compact, line-oriented AI records.
+/// Any flag that is not explicitly understood stays exact; adding a future
+/// ripgrep flag must therefore be an intentional routing decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RgRoute {
+    Matches,
+    JsonEvents,
+    Inventory,
+    Counts,
+    OnlyMatching,
+    Exact(ExactReason),
+}
+
+fn select_rg_route(current: &mut RgRoute, next: RgRoute) -> Option<ExactReason> {
+    match (*current, next) {
+        (RgRoute::Matches, next) => {
+            *current = next;
+            None
+        }
+        (current, next) if current == next => None,
+        _ => Some(ExactReason::Structured),
+    }
+}
+
+fn rg_long_flag_value(flag: &str) -> bool {
+    VALUE_FLAGS_LONG.contains(&flag)
+}
+
+fn is_rg_text_long_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--auto-hybrid-regex"
+            | "--case-sensitive"
+            | "--crlf"
+            | "--fixed-strings"
+            | "--glob-case-insensitive"
+            | "--hidden"
+            | "--ignore-case"
+            | "--invert-match"
+            | "--line-regexp"
+            | "--messages"
+            | "--mmap"
+            | "--no-auto-hybrid-regex"
+            | "--no-config"
+            | "--no-ignore"
+            | "--no-ignore-dot"
+            | "--no-ignore-exclude"
+            | "--no-ignore-files"
+            | "--no-ignore-global"
+            | "--no-ignore-messages"
+            | "--no-ignore-parent"
+            | "--no-ignore-vcs"
+            | "--no-messages"
+            | "--no-mmap"
+            | "--no-pcre2-unicode"
+            | "--no-require-git"
+            | "--no-search-zip"
+            | "--no-unicode"
+            | "--one-file-system"
+            | "--pcre2"
+            | "--pcre2-unicode"
+            | "--search-zip"
+            | "--smart-case"
+            | "--trim"
+            | "--unicode"
+            | "--with-filename"
+            | "--no-filename"
+            | "--line-number"
+            | "--no-line-number"
+            | "--word-regexp"
+    )
+}
+
+fn classify_rg(args: &[String]) -> RgRoute {
+    let mut route = RgRoute::Matches;
+    let mut past_dashdash = false;
+    let mut i = 0;
+
+    while i < args.len() {
+        let arg = &args[i];
+        if past_dashdash {
+            i += 1;
+            continue;
+        }
+        if arg == "--" {
+            past_dashdash = true;
+            i += 1;
+            continue;
+        }
+
+        if let Some(rest) = arg.strip_prefix("--") {
+            let (flag, has_inline_value) = rest
+                .split_once('=')
+                .map(|(flag, _)| (format!("--{flag}"), true))
+                .unwrap_or_else(|| (arg.clone(), false));
+
+            let mode = match flag.as_str() {
+                "--json" => Some(RgRoute::JsonEvents),
+                "--files" | "--files-with-matches" | "--files-without-match" => {
+                    Some(RgRoute::Inventory)
+                }
+                "--count" | "--count-matches" => Some(RgRoute::Counts),
+                "--only-matching" => Some(RgRoute::OnlyMatching),
+                "--help" | "--version" => return RgRoute::Exact(ExactReason::Interactive),
+                "--follow" => return RgRoute::Exact(ExactReason::Streaming),
+                "--binary" | "--text" | "--text-encoding" => {
+                    return RgRoute::Exact(ExactReason::Binary)
+                }
+                "--byte-offset"
+                | "--column"
+                | "--context-separator"
+                | "--field-context-separator"
+                | "--field-match-separator"
+                | "--heading"
+                | "--null"
+                | "--null-data"
+                | "--passthru"
+                | "--pretty"
+                | "--quiet"
+                | "--silent"
+                | "--stats"
+                | "--vimgrep" => return RgRoute::Exact(ExactReason::Structured),
+                "--debug" | "--trace" | "--type-list" | "--pcre2-version" => {
+                    return RgRoute::Exact(ExactReason::Interactive)
+                }
+                "--color" | "--colors" | "--encoding" | "--pre" | "--pre-glob" => {
+                    return RgRoute::Exact(ExactReason::Sensitive)
+                }
+                "--multiline" | "--multiline-dotall" => {
+                    return RgRoute::Exact(ExactReason::Structured)
+                }
+                _ if rg_long_flag_value(&flag) || is_rg_text_long_flag(&flag) => None,
+                _ => return RgRoute::Exact(ExactReason::Unknown),
+            };
+
+            if let Some(next) = mode {
+                if let Some(reason) = select_rg_route(&mut route, next) {
+                    return RgRoute::Exact(reason);
+                }
+            }
+            if rg_long_flag_value(&flag) && !has_inline_value {
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+
+        let Some(cluster) = arg.strip_prefix('-').filter(|cluster| !cluster.is_empty()) else {
+            i += 1;
+            continue;
+        };
+        let bytes = cluster.as_bytes();
+        let mut j = 0;
+        while j < bytes.len() {
+            let flag = bytes[j] as char;
+            let mode = match flag {
+                'c' => Some(RgRoute::Counts),
+                'l' | 'L' => Some(RgRoute::Inventory),
+                'o' => Some(RgRoute::OnlyMatching),
+                'h' | 'V' => return RgRoute::Exact(ExactReason::Interactive),
+                '0' | 'Z' | 'b' | 'p' | 'q' => {
+                    return RgRoute::Exact(ExactReason::Structured)
+                }
+                'a' | 'U' | 'z' => return RgRoute::Exact(ExactReason::Binary),
+                'A' | 'B' | 'C' | 'M' | 'd' | 'e' | 'f' | 'g' | 'j' | 'm' | 'r' | 't'
+                | 'T' => {
+                    if j + 1 == bytes.len() {
+                        i += 1;
+                    }
+                    break;
+                }
+                'F' | 'H' | 'i' | 'n' | 'N' | 'P' | 'R' | 's' | 'S' | 'u' | 'v' | 'w'
+                | 'x' => None,
+                _ => return RgRoute::Exact(ExactReason::Unknown),
+            };
+            if let Some(next) = mode {
+                if let Some(reason) = select_rg_route(&mut route, next) {
+                    return RgRoute::Exact(reason);
+                }
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+
+    route
 }
 
 /// Run real grep so matches and the savings baseline match the agent's command;
@@ -855,6 +1044,60 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rg_route_table_is_conservative_and_complete() {
+        let cases = [
+            (&["needle"][..], RgRoute::Matches),
+            (&["--json", "needle"][..], RgRoute::JsonEvents),
+            (&["--files"][..], RgRoute::Inventory),
+            (&["-l", "needle"][..], RgRoute::Inventory),
+            (&["-L", "needle"][..], RgRoute::Inventory),
+            (&["-c", "needle"][..], RgRoute::Counts),
+            (&["--count-matches", "needle"][..], RgRoute::Counts),
+            (&["-o", "needle"][..], RgRoute::OnlyMatching),
+            (&["--replace", "hit", "needle"][..], RgRoute::Matches),
+            (&["-C", "2", "needle"][..], RgRoute::Matches),
+            (
+                &["--glob", "--future-flag", "needle"][..],
+                RgRoute::Matches,
+            ),
+            (&["needle", "--", "--future-flag"][..], RgRoute::Matches),
+            (
+                &["--null", "needle"][..],
+                RgRoute::Exact(ExactReason::Structured),
+            ),
+            (
+                &["--help"][..],
+                RgRoute::Exact(ExactReason::Interactive),
+            ),
+            (
+                &["--version"][..],
+                RgRoute::Exact(ExactReason::Interactive),
+            ),
+            (
+                &["--text", "needle"][..],
+                RgRoute::Exact(ExactReason::Binary),
+            ),
+            (
+                &["--follow", "needle"][..],
+                RgRoute::Exact(ExactReason::Streaming),
+            ),
+            (
+                &["--future-flag", "needle"][..],
+                RgRoute::Exact(ExactReason::Unknown),
+            ),
+            (
+                &["--json", "--count", "needle"][..],
+                RgRoute::Exact(ExactReason::Structured),
+            ),
+        ];
+
+        for (raw, expected) in cases {
+            let args = raw.iter().map(|value| (*value).to_string()).collect::<Vec<_>>();
+            assert_eq!(classify_rg(&args), expected, "args={raw:?}");
+        }
+    }
 
     #[test]
     fn test_clean_line() {
