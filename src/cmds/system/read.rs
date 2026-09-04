@@ -30,6 +30,7 @@ struct AiSourceRequest<'a> {
     lang: &'a Language,
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
+    line_numbers: bool,
     fallback_baseline: &'a str,
     verbose: u8,
 }
@@ -45,6 +46,7 @@ fn emit_ai_source(request: AiSourceRequest<'_>) -> bool {
         lang,
         max_lines,
         tail_lines,
+        line_numbers,
         fallback_baseline,
         verbose,
     } = request;
@@ -83,13 +85,27 @@ fn emit_ai_source(request: AiSourceRequest<'_>) -> bool {
             groups: 0,
         });
     }
+    let native_output = if line_numbers {
+        format_with_line_numbers(content)
+    } else {
+        content.to_string()
+    };
+    let fallback = if max_lines.is_some() || tail_lines.is_some() {
+        if line_numbers {
+            format_with_line_numbers(fallback_baseline)
+        } else {
+            fallback_baseline.to_string()
+        }
+    } else {
+        native_output.clone()
+    };
     crate::core::runner::emit_ai_document_with_baseline(
         crate::core::runner::AiEmission {
             timer,
             original_cmd,
             rtk_cmd,
-            raw: content,
-            fallback_baseline,
+            raw: &native_output,
+            fallback_baseline: &fallback,
             command_slug: "read",
             budget: BudgetClass::Source,
             trailing_newline: true,
@@ -166,10 +182,11 @@ pub fn run(
             lang: &lang,
             max_lines,
             tail_lines,
+            line_numbers,
             fallback_baseline: if max_lines.is_none() && tail_lines.is_none() {
                 &content
             } else {
-                &rtk_output
+                &filtered
             },
             verbose,
         })
@@ -266,10 +283,11 @@ pub fn run_stdin(
             lang: &lang,
             max_lines,
             tail_lines,
+            line_numbers,
             fallback_baseline: if max_lines.is_none() && tail_lines.is_none() {
                 &content
             } else {
-                &rtk_output
+                &filtered
             },
             verbose,
         })

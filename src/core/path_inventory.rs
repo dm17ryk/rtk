@@ -32,6 +32,17 @@ fn relative_to<'a>(path: &'a str, root: &str) -> Option<&'a str> {
     remainder.strip_prefix(['/', '\\'])
 }
 
+fn escape_component(component: &str) -> String {
+    let mut escaped = String::with_capacity(component.len());
+    for character in component.chars() {
+        if matches!(character, '\\' | ',' | '{' | '}') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
 pub(crate) fn common_root(paths: &[String]) -> Option<String> {
     let first = normalized(paths.first()?);
     let mut common = components_with_ends(&first);
@@ -95,7 +106,14 @@ pub fn document(paths: &[String]) -> AiDocument {
 
     for (directory, leaves) in groups {
         let item_count = leaves.len();
-        let record = format!("{directory}/{{{}}}", leaves.join(","));
+        let record = format!(
+            "{directory}/{{{}}}",
+            leaves
+                .iter()
+                .map(|leaf| escape_component(leaf))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         document.push(
             AiRecord::new(Severity::Info, record)
                 .grouped(directory)
@@ -104,4 +122,20 @@ pub fn document(paths: &[String]) -> AiDocument {
     }
 
     document
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_inventory_escapes_group_delimiters() {
+        let rendered = crate::core::ai_output::render(
+            &document(&["src/a,comma.rs".into(), "src/brace{file}.rs".into()]),
+            crate::core::ai_output::BudgetClass::Collection,
+        )
+        .text;
+
+        assert!(rendered.contains(r"./{a\,comma.rs,brace\{file\}.rs}"));
+    }
 }

@@ -19,8 +19,8 @@ src/cmds/system/local_llm.rs	prints=2	stdout_handles=0	fingerprint=61e57a715e961
 src/cmds/system/log_cmd.rs	prints=2	stdout_handles=0	fingerprint=77f4b957ab2f737b
 src/cmds/system/ls.rs	prints=1	stdout_handles=0	fingerprint=35f2018ddc32f8a8
 src/cmds/system/pipe_cmd.rs	prints=1	stdout_handles=1	fingerprint=819f69ecd9863fd9
-src/cmds/system/read.rs	prints=2	stdout_handles=0	fingerprint=607742fda83b32d1
-src/cmds/system/search.rs	prints=3	stdout_handles=0	fingerprint=1ff8e7fb7711fe1c
+src/cmds/system/read.rs	prints=2	stdout_handles=0	fingerprint=fcbcd47d83247df9
+src/cmds/system/search.rs	prints=3	stdout_handles=0	fingerprint=47a6f4202ace5ace
 src/cmds/system/summary.rs	prints=1	stdout_handles=0	fingerprint=de7a84cd3e84d9a4
 src/cmds/system/wc_cmd.rs	prints=1	stdout_handles=0	fingerprint=76c2fd2e87f08c26
 src/cmds/windows/orchestrator.rs	prints=0	stdout_handles=1	fingerprint=31889a38fda4c91a
