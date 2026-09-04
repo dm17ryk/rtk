@@ -82,6 +82,11 @@ rendered as compact source records with dense line markers. This makes
 declarations, imports, and retained source lines directly addressable by an
 agent without repeatedly printing a wide line-number column.
 
+Minimal filtering must preserve every retained line's original one-based line
+number. Add a line-preserving filter result in `core::filter`; retain the
+existing string-returning filter API as a compatibility wrapper. RTK must
+never present a filtered line with a renumbered location.
+
 - `rtk read -l none` remains an explicit complete source read.
 - User-selected `-m` and `--tail-lines` retain their requested windowing
   semantics.

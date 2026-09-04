@@ -17,6 +17,8 @@
 - Preserve native exit codes and emit captured stderr exactly once.
 - Use lossless recovery and exact omission metadata whenever RTK omits data.
 - Keep NUL/binary, interactive, unsupported, and unknown `rg` modes exact.
+- Preserve original one-based source line numbers through minimal filtering;
+  never renumber a retained source line after filtering.
 - Do not add dependencies or change release metadata.
 - Use `rtk` wrappers for cargo, git, and gh commands.
 
@@ -126,7 +128,7 @@ Expected: one commit containing only the runner adapter and its tests.
 - Consumes: `&[String]` paths in caller-established stable order.
 - Produces: `pub fn document(paths: &[String]) -> AiDocument` with `files`, `dirs`, and optional `root` facts.
 - Produces: `pub fn canonical_groups(paths: &[String]) -> Vec<(String, Vec<String>)>` for deterministic grouped records.
-- Consumed later by: the `rg` inventory routes in Task 4.
+- Consumed later by: the `rg` inventory routes in Task 5.
 
 - [ ] **Step 1: Write failing path-inventory tests**
 
@@ -216,7 +218,81 @@ Run: `rtk git commit -m "feat(find): render compact AI path inventories"`
 
 Expected: the commit introduces the reusable renderer and its first caller.
 
-### Task 3: Make `rtk read` AI-first by default with source recovery
+### Task 3: Preserve source locations through language-aware filtering
+
+**Files:**
+- Modify: `src/core/filter.rs:37-230`
+- Test: `src/core/filter.rs` module tests
+
+**Interfaces:**
+- Consumes: `content: &str` and `Language`.
+- Produces: `pub struct FilteredLine { pub original_line: usize, pub text: String }`.
+- Produces: `pub fn filter_lines(&self, content: &str, lang: &Language) -> Vec<FilteredLine>` on `FilterStrategy`.
+- Preserves: `fn filter(&self, content, lang) -> String` as a compatibility wrapper over `filter_lines`.
+
+- [ ] **Step 1: Write failing line-location tests for minimal filtering**
+
+```rust
+#[test]
+fn minimal_filter_lines_retains_original_line_numbers() {
+    let input = "// ignored\nfn kept() {}\n\n// ignored too\nlet value = 1;\n";
+    let lines = MinimalFilter.filter_lines(input, &Language::Rust);
+    assert_eq!(lines, vec![
+        FilteredLine { original_line: 2, text: "fn kept() {}".into() },
+        FilteredLine { original_line: 5, text: "let value = 1;".into() },
+    ]);
+}
+```
+
+- [ ] **Step 2: Run the test and verify the line-preserving API is absent**
+
+Run: `rtk test cargo test --bin rtk minimal_filter_lines_retains_original_line_numbers`
+
+Expected: compile failure because `filter_lines` and `FilteredLine` do not exist.
+
+- [ ] **Step 3: Implement `FilteredLine` and the compatibility wrapper**
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilteredLine {
+    pub original_line: usize,
+    pub text: String,
+}
+
+pub trait FilterStrategy {
+    fn filter_lines(&self, content: &str, lang: &Language) -> Vec<FilteredLine>;
+
+    fn filter(&self, content: &str, lang: &Language) -> String {
+        self.filter_lines(content, lang)
+            .into_iter()
+            .map(|line| line.text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+```
+
+Port `NoFilter`, `MinimalFilter`, and `AggressiveFilter` without changing their retained-text
+selection. Preserve trailing-newline behavior in the compatibility wrapper and add tests proving
+the existing string output remains byte-for-byte equal for current fixtures.
+
+- [ ] **Step 4: Run focused filter tests**
+
+Run: `rtk test cargo test --bin rtk minimal_filter_lines_`
+
+Run: `rtk test cargo test --bin rtk filter_`
+
+Expected: location-aware and legacy string-output filter tests pass.
+
+- [ ] **Step 5: Commit the location-preserving filter API**
+
+Run: `rtk git add src/core/filter.rs`
+
+Run: `rtk git commit -m "feat(filter): preserve original source line locations"`
+
+Expected: one compatibility-focused core filter commit.
+
+### Task 4: Make `rtk read` AI-first by default with source recovery
 
 **Files:**
 - Modify: `src/main.rs:107-125`
@@ -229,6 +305,7 @@ Expected: the commit introduces the reusable renderer and its first caller.
 - Consumes: file content, `FilterLevel`, explicit window flags, and the new runner adapter.
 - Produces: `fn source_document(file: &Path, content: &str, filtered: &str) -> AiDocument`.
 - Produces: default CLI level `FilterLevel::Minimal`; explicit `-l none` remains exact.
+- Consumes: `FilteredLine` from Task 3 for original source locations.
 
 - [ ] **Step 1: Write failing parser and renderer tests**
 
@@ -300,7 +377,7 @@ Run: `rtk git commit -m "feat(read): default to compact AI source output"`
 
 Expected: one commit with parser help, source rendering, stdin behavior, and tests.
 
-### Task 4: Classify all recognized `rtk rg` output routes
+### Task 5: Classify all recognized `rtk rg` output routes
 
 **Files:**
 - Modify: `src/cmds/system/search.rs:22-252`
@@ -373,7 +450,7 @@ Run: `rtk git commit -m "feat(rg): classify AI output routes"`
 
 Expected: classifier-only commit; no renderer integration yet.
 
-### Task 5: Render and run semantic `rg` routes
+### Task 6: Render and run semantic `rg` routes
 
 **Files:**
 - Modify: `src/cmds/system/search.rs:255-485`
@@ -482,7 +559,7 @@ Run: `rtk git commit -m "feat(rg): emit compact semantic search output"`
 
 Expected: one commit covering parsers, runner integration, and integration tests.
 
-### Task 6: Prove measurement, documentation, and full compatibility
+### Task 7: Prove measurement, documentation, and full compatibility
 
 **Files:**
 - Create: `tests/ai_output_core_commands_test.rs`
