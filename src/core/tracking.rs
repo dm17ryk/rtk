@@ -2375,6 +2375,16 @@ mod tests {
 
     #[test]
     fn timed_execution_track_output_records_metadata() {
+        use std::env;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let db_path = env::temp_dir().join(format!(
+            "rtk_test_timed_output_metadata_{}.db",
+            std::process::id()
+        ));
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
+        env::set_var("RTK_DB_PATH", &db_path);
+
         let original_cmd = format!("semantic_track_test_{}", std::process::id());
         let timer = TimedExecution::start();
         timer.track_output(
@@ -2402,10 +2412,25 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored, ("ai_owned".into(), 4, true, true));
+
+        drop(tracker);
+        env::remove_var("RTK_DB_PATH");
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
     }
 
     #[test]
     fn timed_execution_track_exact_records_reason() {
+        use std::env;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let db_path = env::temp_dir().join(format!(
+            "rtk_test_timed_exact_reason_{}.db",
+            std::process::id()
+        ));
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
+        env::set_var("RTK_DB_PATH", &db_path);
+
         let original_cmd = format!("exact_track_test_{}", std::process::id());
         let timer = TimedExecution::start();
         timer.track_exact(&original_cmd, "rtk exact-track", "structured");
@@ -2421,6 +2446,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored, ("exact".into(), Some("structured".into()), 0, 0));
+
+        drop(tracker);
+        env::remove_var("RTK_DB_PATH");
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
     }
 
     // 7. get_db_path respects environment variable RTK_DB_PATH

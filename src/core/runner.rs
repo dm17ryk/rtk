@@ -1144,7 +1144,8 @@ mod err_test_runner_tests {
     use crate::core::ai_output::{render, AiDocument, BudgetClass, ExactReason};
     use std::io::Write;
 
-    const SEMANTIC_WRAPPER_HELPER: &str = "core::runner::tests::semantic_wrapper_subprocess_helper";
+    const SEMANTIC_WRAPPER_HELPER: &str =
+        "core::runner::err_test_runner_tests::semantic_wrapper_subprocess_helper";
 
     #[test]
     fn legacy_guard_compares_the_final_framed_payload() {
