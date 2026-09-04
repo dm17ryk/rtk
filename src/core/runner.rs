@@ -6,7 +6,8 @@ use std::process::Command;
 use std::sync::LazyLock;
 
 use crate::core::ai_output::{
-    prepare_emission, render, AiDocument, BudgetClass, EmissionMeta, ExactReason, OutputContract,
+    prepare_emission, prepare_emission_with_baseline, render, AiDocument, BudgetClass,
+    EmissionMeta, ExactReason, OutputContract,
 };
 use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
 use crate::core::tracking;
@@ -17,7 +18,7 @@ pub fn emit_prepared(prepared: &crate::core::ai_output::PreparedEmission) {
 }
 
 pub(crate) fn emit_ai_document(
-    timer: tracking::TimedExecution,
+    timer: &tracking::TimedExecution,
     original_cmd: &str,
     rtk_cmd: &str,
     raw: &str,
@@ -26,8 +27,33 @@ pub(crate) fn emit_ai_document(
     document: AiDocument,
     trailing_newline: bool,
 ) -> String {
-    let prepared = prepare_emission(
+    emit_ai_document_with_baseline(
+        timer,
+        original_cmd,
+        rtk_cmd,
         raw,
+        raw,
+        command_slug,
+        budget,
+        document,
+        trailing_newline,
+    )
+}
+
+pub(crate) fn emit_ai_document_with_baseline(
+    timer: &tracking::TimedExecution,
+    original_cmd: &str,
+    rtk_cmd: &str,
+    raw: &str,
+    fallback_baseline: &str,
+    command_slug: &str,
+    budget: BudgetClass,
+    document: AiDocument,
+    trailing_newline: bool,
+) -> String {
+    let prepared = prepare_emission_with_baseline(
+        raw,
+        fallback_baseline,
         command_slug,
         render(&document, budget),
         trailing_newline,
@@ -1193,8 +1219,9 @@ mod err_test_runner_tests {
         document.fact("file", "sample.rs");
         document.push(AiRecord::new(Severity::Info, "3: fn kept() {}"));
 
+        let timer = tracking::TimedExecution::start();
         let shown = emit_ai_document(
-            tracking::TimedExecution::start(),
+            &timer,
             "cat sample.rs",
             "rtk read sample.rs",
             &raw,
@@ -1211,6 +1238,30 @@ mod err_test_runner_tests {
             crate::core::tracking::estimate_tokens(&shown)
                 < crate::core::tracking::estimate_tokens(&raw)
         );
+    }
+
+    #[test]
+    fn semantic_adapter_keeps_required_disclosure_baseline() {
+        let raw = "visible.txt";
+        let baseline = "visible.txt\n(1 filtered by policy)";
+        let mut document = AiDocument::new(Some("inventory"));
+        document.push(AiRecord::new(Severity::Info, "visible.txt"));
+        document.push(AiRecord::new(Severity::Warning, "(1 filtered by policy)"));
+
+        let timer = tracking::TimedExecution::start();
+        let shown = emit_ai_document_with_baseline(
+            &timer,
+            "find .",
+            "rtk find .",
+            raw,
+            baseline,
+            "find",
+            BudgetClass::Collection,
+            document,
+            true,
+        );
+
+        assert_eq!(shown, "visible.txt\n(1 filtered by policy)\n");
     }
 
     #[test]

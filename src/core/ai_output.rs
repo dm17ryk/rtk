@@ -96,6 +96,7 @@ pub struct AiRecord {
     pub text: String,
     pub group: Option<String>,
     source_order: usize,
+    represented_items: usize,
 }
 
 impl AiRecord {
@@ -105,11 +106,17 @@ impl AiRecord {
             text: text.into(),
             group: None,
             source_order: 0,
+            represented_items: 1,
         }
     }
 
     pub fn grouped(mut self, group: impl Into<String>) -> Self {
         self.group = Some(group.into());
+        self
+    }
+
+    pub fn representing(mut self, items: usize) -> Self {
+        self.represented_items = items.max(1);
         self
     }
 }
@@ -256,8 +263,19 @@ pub fn prepare_emission(
     rendered: RenderedOutput,
     trailing_newline: bool,
 ) -> PreparedEmission {
-    prepare_emission_with(
+    prepare_emission_with_baseline(raw, raw, command_slug, rendered, trailing_newline)
+}
+
+pub fn prepare_emission_with_baseline(
+    raw: &str,
+    fallback_baseline: &str,
+    command_slug: &str,
+    rendered: RenderedOutput,
+    trailing_newline: bool,
+) -> PreparedEmission {
+    prepare_emission_with_fallback(
         raw,
+        fallback_baseline,
         command_slug,
         rendered,
         trailing_newline,
@@ -275,8 +293,22 @@ fn prepare_emission_with<F>(
 where
     F: FnOnce(&str, &str) -> Option<crate::core::tee::LosslessTeeReservation>,
 {
+    prepare_emission_with_fallback(raw, raw, command_slug, rendered, trailing_newline, reserve)
+}
+
+fn prepare_emission_with_fallback<F>(
+    raw: &str,
+    fallback_baseline: &str,
+    command_slug: &str,
+    rendered: RenderedOutput,
+    trailing_newline: bool,
+    reserve: F,
+) -> PreparedEmission
+where
+    F: FnOnce(&str, &str) -> Option<crate::core::tee::LosslessTeeReservation>,
+{
     let parser_failed = rendered.parser_failed;
-    let raw_fallback = frame_payload(raw, trailing_newline);
+    let raw_fallback = frame_payload(fallback_baseline, trailing_newline);
     let Some(omission) = rendered.omission else {
         let candidate = frame_payload(&rendered.text, trailing_newline);
         let used_raw_fallback = crate::core::tracking::estimate_tokens(&candidate)
@@ -352,6 +384,7 @@ struct CollapsedRecord {
     group: Option<String>,
     text: String,
     source_records: usize,
+    represented_items: usize,
 }
 
 pub fn render(document: &AiDocument, budget: BudgetClass) -> RenderedOutput {
@@ -456,6 +489,7 @@ fn collapsed_records(document: &AiDocument) -> Vec<CollapsedRecord> {
             .find(|existing| existing.group == record.group && existing.text == record.text)
         {
             existing.source_records += 1;
+            existing.represented_items += record.represented_items;
             continue;
         }
 
@@ -463,6 +497,7 @@ fn collapsed_records(document: &AiDocument) -> Vec<CollapsedRecord> {
             group: record.group,
             text: record.text,
             source_records: 1,
+            represented_items: record.represented_items,
         });
     }
 
@@ -487,7 +522,7 @@ fn omission_from(
     let mut omitted_groups = std::collections::BTreeSet::new();
 
     for record in omitted_records {
-        omitted.items += record.source_records;
+        omitted.items += record.represented_items;
         if let Some(group) = &record.group {
             omitted_groups.insert(group);
         }
@@ -676,6 +711,31 @@ mod tests {
     }
 
     #[test]
+    fn semantic_render_counts_logical_items_for_omitted_group_records() {
+        let mut doc = AiDocument::new(None::<String>);
+        doc.push(
+            AiRecord::new(Severity::Info, format!("first {}", "x".repeat(260)))
+                .grouped("alpha")
+                .representing(4),
+        );
+        doc.push(
+            AiRecord::new(Severity::Info, format!("second {}", "y".repeat(260)))
+                .grouped("beta")
+                .representing(12),
+        );
+
+        let rendered = render(&doc, BudgetClass::Acknowledgement);
+
+        assert_eq!(
+            rendered.omission,
+            Some(Omission {
+                items: 12,
+                groups: 1,
+            })
+        );
+    }
+
+    #[test]
     fn semantic_render_adds_declared_omission_to_budget_omission() {
         let mut doc = AiDocument::new(None::<String>).with_omission(Omission {
             items: 5,
@@ -749,6 +809,23 @@ mod tests {
         let prepared = prepare_emission_with(raw, "test", rendered, true, |_, _| None);
 
         assert_eq!(prepared.as_str(), "short\n");
+    }
+
+    #[test]
+    fn prepared_emission_keeps_required_baseline_when_ai_output_is_longer() {
+        let raw = "visible.txt";
+        let baseline = "visible.txt\n(1 filtered by policy)";
+        let rendered = RenderedOutput {
+            text: "status=inventory files=1 dirs=1\nvisible.txt\n(1 filtered by policy)"
+                .to_string(),
+            omission: None,
+            parser_failed: false,
+        };
+
+        let prepared = prepare_emission_with_baseline(raw, baseline, "find", rendered, true);
+
+        assert_eq!(prepared.as_str(), "visible.txt\n(1 filtered by policy)\n");
+        assert!(prepared.meta().used_raw_fallback);
     }
 
     #[test]
