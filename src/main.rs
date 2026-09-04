@@ -111,8 +111,8 @@ enum Commands {
         /// Read a private lossless artifact by its shell-neutral recovery ID
         #[arg(long, value_name = "ID", conflicts_with = "files")]
         recovery: Option<String>,
-        /// Filter: none (default, full content), minimal, aggressive
-        #[arg(short, long, default_value = "none")]
+        /// Filter: minimal (default, AI-oriented), none (exact), aggressive
+        #[arg(short, long, default_value = "minimal")]
         level: core::filter::FilterLevel,
         /// Max lines
         #[arg(short, long, conflicts_with = "tail_lines")]
@@ -3253,6 +3253,18 @@ mod tests {
             } => {
                 assert!(files.is_empty());
                 assert_eq!(recovery.as_deref(), Some(identifier));
+            }
+            _ => panic!("expected read command"),
+        }
+    }
+
+    #[test]
+    fn read_defaults_to_minimal_ai_filtering() {
+        let cli = Cli::try_parse_from(["rtk", "read", "src/main.rs"]).unwrap();
+
+        match cli.command {
+            Commands::Read { level, .. } => {
+                assert_eq!(level, core::filter::FilterLevel::Minimal)
             }
             _ => panic!("expected read command"),
         }
