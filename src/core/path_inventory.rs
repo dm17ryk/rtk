@@ -2,33 +2,52 @@ use crate::core::ai_output::{AiDocument, AiRecord, Severity};
 use std::collections::BTreeMap;
 
 fn normalized(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    normalized
-        .strip_prefix("./")
-        .unwrap_or(&normalized)
-        .to_string()
+    path.strip_prefix("./").unwrap_or(path).to_string()
+}
+
+fn components_with_ends(path: &str) -> Vec<(&str, usize)> {
+    let mut components = Vec::new();
+    let mut start = 0;
+    for (index, character) in path.char_indices() {
+        if matches!(character, '/' | '\\') {
+            if start < index {
+                components.push((&path[start..index], index));
+            }
+            start = index + character.len_utf8();
+        }
+    }
+    if start < path.len() {
+        components.push((&path[start..], path.len()));
+    }
+    components
+}
+
+fn split_parent(path: &str) -> Option<(&str, &str)> {
+    let separator = path.rfind(['/', '\\'])?;
+    Some((&path[..separator], &path[separator + 1..]))
+}
+
+fn relative_to<'a>(path: &'a str, root: &str) -> Option<&'a str> {
+    let remainder = path.strip_prefix(root)?;
+    remainder.strip_prefix(['/', '\\'])
 }
 
 pub(crate) fn common_root(paths: &[String]) -> Option<String> {
-    fn parent_components(path: &str) -> Vec<&str> {
-        path.rsplit_once('/')
-            .map(|(parent, _)| parent.split('/').filter(|part| !part.is_empty()).collect())
-            .unwrap_or_default()
-    }
-
     let first = normalized(paths.first()?);
-    let mut common = parent_components(&first);
+    let mut common = components_with_ends(&first);
+    common.pop();
     if common.is_empty() {
         return None;
     }
 
     for path in paths.iter().skip(1) {
         let normalized = normalized(path);
-        let components = parent_components(&normalized);
+        let mut components = components_with_ends(&normalized);
+        components.pop();
         let shared = common
             .iter()
             .zip(&components)
-            .take_while(|(left, right)| left == right)
+            .take_while(|((left, _), (right, _))| left == right)
             .count();
         common.truncate(shared);
         if common.is_empty() {
@@ -36,7 +55,7 @@ pub(crate) fn common_root(paths: &[String]) -> Option<String> {
         }
     }
 
-    Some(common.join("/"))
+    Some(first[..common.last()?.1].to_string())
 }
 
 pub fn canonical_groups(paths: &[String]) -> Vec<(String, Vec<String>)> {
@@ -47,11 +66,9 @@ pub fn canonical_groups(paths: &[String]) -> Vec<(String, Vec<String>)> {
         let normalized = normalized(path);
         let relative = root
             .as_deref()
-            .and_then(|root| normalized.strip_prefix(root)?.strip_prefix('/'))
+            .and_then(|root| relative_to(&normalized, root))
             .unwrap_or(&normalized);
-        let (directory, leaf) = relative
-            .rsplit_once('/')
-            .map_or((".", relative), |(directory, leaf)| (directory, leaf));
+        let (directory, leaf) = split_parent(relative).unwrap_or((".", relative));
         groups
             .entry(directory.to_string())
             .or_default()

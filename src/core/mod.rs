@@ -44,7 +44,7 @@ mod path_inventory_tests {
     }
 
     #[test]
-    fn canonical_groups_normalizes_windows_path_separators() {
+    fn canonical_groups_preserves_windows_path_separators() {
         let paths = vec![
             "src\\core\\runner.rs".to_string(),
             "src\\core\\tracking.rs".to_string(),
@@ -68,7 +68,7 @@ mod path_inventory_tests {
 
         assert_eq!(
             common_root(&paths),
-            Some("C:/Temp/project/inventory".to_string())
+            Some("C:\\Temp\\project\\inventory".to_string())
         );
         assert_eq!(
             canonical_groups(&paths),
@@ -76,6 +76,20 @@ mod path_inventory_tests {
                 ".".to_string(),
                 vec!["one.txt".to_string(), "two.txt".to_string()],
             )]
+        );
+    }
+
+    #[test]
+    fn inventory_only_normalizes_a_leading_dot_slash() {
+        let paths = vec![
+            "./src\\core\\runner.rs".to_string(),
+            "./src\\core\\tracking.rs".to_string(),
+        ];
+
+        assert_eq!(common_root(&paths), Some("src\\core".to_string()));
+        assert_eq!(
+            render(&document(&paths), BudgetClass::Collection).text,
+            "status=inventory files=2 dirs=1 root=src\\core\n./{runner.rs,tracking.rs}"
         );
     }
 

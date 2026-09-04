@@ -177,11 +177,13 @@ Four strategies applied per command type:
 ### Files
 ```bash
 rtk ls .                        # Compact directory tree
-rtk read file.rs                # Smart file reading
+rtk read file.rs                # Compact AI source with original line locations
+rtk read file.rs -l none        # Exact file content
 rtk read file.rs -l aggressive  # Signatures only (strips bodies)
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
 rtk grep "pattern" .            # Grouped search results
+rtk rg "pattern" .              # Compact semantic ripgrep output
 rtk diff file1 file2            # Condensed diff (exit 1 if files differ)
 ```
 

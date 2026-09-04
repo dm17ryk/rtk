@@ -17,33 +17,37 @@ pub fn emit_prepared(prepared: &crate::core::ai_output::PreparedEmission) {
     print!("{}", prepared.as_str());
 }
 
+pub(crate) struct AiEmission<'a> {
+    pub timer: &'a tracking::TimedExecution,
+    pub original_cmd: &'a str,
+    pub rtk_cmd: &'a str,
+    pub raw: &'a str,
+    pub fallback_baseline: &'a str,
+    pub command_slug: &'a str,
+    pub budget: BudgetClass,
+    pub trailing_newline: bool,
+}
+
 pub(crate) fn emit_ai_document_with_baseline(
-    timer: &tracking::TimedExecution,
-    original_cmd: &str,
-    rtk_cmd: &str,
-    raw: &str,
-    fallback_baseline: &str,
-    command_slug: &str,
-    budget: BudgetClass,
+    emission: AiEmission<'_>,
     document: AiDocument,
-    trailing_newline: bool,
 ) -> String {
     let prepared = prepare_emission_with_baseline(
-        raw,
-        fallback_baseline,
-        command_slug,
-        render(&document, budget),
-        trailing_newline,
+        emission.raw,
+        emission.fallback_baseline,
+        emission.command_slug,
+        render(&document, emission.budget),
+        emission.trailing_newline,
     );
     let shown = prepared.as_str().to_string();
     let meta = prepared.meta();
     emit_prepared(&prepared);
-    timer.track_output(
-        original_cmd,
-        rtk_cmd,
-        raw,
+    emission.timer.track_output(
+        emission.original_cmd,
+        emission.rtk_cmd,
+        emission.raw,
         &shown,
-        output_tracking_from_emission(OutputContract::AiOwned(budget), meta),
+        output_tracking_from_emission(OutputContract::AiOwned(emission.budget), meta),
     );
     shown
 }
@@ -1203,15 +1207,17 @@ mod err_test_runner_tests {
 
         let timer = tracking::TimedExecution::start();
         let shown = emit_ai_document_with_baseline(
-            &timer,
-            "cat sample.rs",
-            "rtk read sample.rs",
-            &raw,
-            &raw,
-            "read",
-            BudgetClass::Source,
+            AiEmission {
+                timer: &timer,
+                original_cmd: "cat sample.rs",
+                rtk_cmd: "rtk read sample.rs",
+                raw: &raw,
+                fallback_baseline: &raw,
+                command_slug: "read",
+                budget: BudgetClass::Source,
+                trailing_newline: true,
+            },
             document,
-            true,
         );
 
         assert!(shown.contains("status=source"));
@@ -1233,15 +1239,17 @@ mod err_test_runner_tests {
 
         let timer = tracking::TimedExecution::start();
         let shown = emit_ai_document_with_baseline(
-            &timer,
-            "find .",
-            "rtk find .",
-            raw,
-            baseline,
-            "find",
-            BudgetClass::Collection,
+            AiEmission {
+                timer: &timer,
+                original_cmd: "find .",
+                rtk_cmd: "rtk find .",
+                raw,
+                fallback_baseline: baseline,
+                command_slug: "find",
+                budget: BudgetClass::Collection,
+                trailing_newline: true,
+            },
             document,
-            true,
         );
 
         assert_eq!(shown, "visible.txt\n(1 filtered by policy)\n");

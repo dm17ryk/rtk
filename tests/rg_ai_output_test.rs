@@ -47,6 +47,223 @@ fn recognized_rg_text_search_uses_compact_ai_records() {
     assert!(shown.contains("1: ..."), "shown={shown}");
     assert!(shown.len() < native.stdout.len(), "shown={shown}");
     assert!(!shown.contains('\0'), "shown={shown:?}");
+
+    let recovery = shown
+        .rsplit_once(" recover=rtk read -l none --recovery ")
+        .map(|(_, identifier)| identifier.trim())
+        .expect("a shortened rg record must advertise lossless recovery");
+    let recovered = rtk()
+        .args(["read", "-l", "none", "--recovery", recovery])
+        .env("RTK_DB_PATH", &database)
+        .env("RTK_TEE_DIR", &tee_dir)
+        .output()
+        .unwrap();
+    assert!(recovered.status.success(), "stderr={:?}", recovered.stderr);
+    assert_eq!(recovered.stdout, native.stdout);
+}
+
+#[test]
+fn no_filename_multi_file_recovery_matches_native_stdout() {
+    if !rg_available() {
+        return;
+    }
+
+    let temp = tempdir().unwrap();
+    let first = temp.path().join("first.txt");
+    let second = temp.path().join("second.txt");
+    let filler = "noise ".repeat(30);
+    let content = (1..=30)
+        .map(|line| format!("{filler}NEEDLE at line {line} {filler}\n"))
+        .collect::<String>();
+    std::fs::write(&first, &content).unwrap();
+    std::fs::write(&second, &content).unwrap();
+    let database = temp.path().join("tracking.db");
+    let tee_dir = temp.path().join("tee");
+    let first = first.to_str().unwrap();
+    let second = second.to_str().unwrap();
+
+    let native = Command::new("rg")
+        .args(["--no-filename", "--threads", "1", "NEEDLE", first, second])
+        .output()
+        .unwrap();
+    let output = rtk()
+        .args([
+            "rg",
+            "--no-filename",
+            "--threads",
+            "1",
+            "NEEDLE",
+            first,
+            second,
+        ])
+        .env("RTK_DB_PATH", &database)
+        .env("RTK_TEE_DIR", &tee_dir)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), native.status.code());
+    let shown = String::from_utf8(output.stdout).unwrap();
+    let recovery = shown
+        .rsplit_once(" recover=rtk read -l none --recovery ")
+        .map(|(_, identifier)| identifier.trim())
+        .expect("a shortened no-filename search must advertise lossless recovery");
+    let recovered = rtk()
+        .args(["read", "-l", "none", "--recovery", recovery])
+        .env("RTK_DB_PATH", &database)
+        .env("RTK_TEE_DIR", &tee_dir)
+        .output()
+        .unwrap();
+
+    assert!(recovered.status.success(), "stderr={:?}", recovered.stderr);
+    assert_eq!(recovered.stdout, native.stdout);
+}
+
+#[test]
+fn no_filename_directory_recovery_matches_native_stdout() {
+    if !rg_available() {
+        return;
+    }
+
+    let temp = tempdir().unwrap();
+    let directory = temp.path().join("matches");
+    std::fs::create_dir(&directory).unwrap();
+    let filler = "noise ".repeat(30);
+    let content = (1..=30)
+        .map(|line| format!("{filler}NEEDLE at line {line} {filler}\n"))
+        .collect::<String>();
+    std::fs::write(directory.join("first.txt"), &content).unwrap();
+    std::fs::write(directory.join("second.txt"), &content).unwrap();
+    let database = temp.path().join("tracking.db");
+    let tee_dir = temp.path().join("tee");
+    let directory = directory.to_str().unwrap();
+
+    let native = Command::new("rg")
+        .args(["--no-filename", "--threads", "1", "NEEDLE", directory])
+        .output()
+        .unwrap();
+    let output = rtk()
+        .args(["rg", "--no-filename", "--threads", "1", "NEEDLE", directory])
+        .env("RTK_DB_PATH", &database)
+        .env("RTK_TEE_DIR", &tee_dir)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), native.status.code());
+    let shown = String::from_utf8(output.stdout).unwrap();
+    let recovery = shown
+        .rsplit_once(" recover=rtk read -l none --recovery ")
+        .map(|(_, identifier)| identifier.trim())
+        .expect("a shortened no-filename search must advertise lossless recovery");
+    let recovered = rtk()
+        .args(["read", "-l", "none", "--recovery", recovery])
+        .env("RTK_DB_PATH", &database)
+        .env("RTK_TEE_DIR", &tee_dir)
+        .output()
+        .unwrap();
+
+    assert!(recovered.status.success(), "stderr={:?}", recovered.stderr);
+    assert_eq!(recovered.stdout, native.stdout);
+}
+
+#[test]
+fn ambiguous_dash_prefixed_replace_value_uses_native_passthrough() {
+    if !rg_available() {
+        return;
+    }
+
+    let temp = tempdir().unwrap();
+    let first = temp.path().join("first.txt");
+    let second = temp.path().join("second.txt");
+    let filler = "noise ".repeat(30);
+    let content = (1..=30)
+        .map(|line| format!("{filler}NEEDLE at line {line} {filler}\n"))
+        .collect::<String>();
+    std::fs::write(&first, &content).unwrap();
+    std::fs::write(&second, &content).unwrap();
+    let database = temp.path().join("tracking.db");
+    let tee_dir = temp.path().join("tee");
+    let first = first.to_str().unwrap();
+    let second = second.to_str().unwrap();
+
+    let native = Command::new("rg")
+        .args(["--replace", "-h", "--threads", "1", "NEEDLE", first, second])
+        .output()
+        .unwrap();
+    let output = rtk()
+        .args([
+            "rg",
+            "--replace",
+            "-h",
+            "--threads",
+            "1",
+            "NEEDLE",
+            first,
+            second,
+        ])
+        .env("RTK_DB_PATH", &database)
+        .env("RTK_TEE_DIR", &tee_dir)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), native.status.code());
+    assert_eq!(output.stdout, native.stdout);
+    assert_eq!(output.stderr, native.stderr);
+}
+
+#[test]
+fn inline_dash_prefixed_replace_value_has_lossless_recovery() {
+    if !rg_available() {
+        return;
+    }
+
+    let temp = tempdir().unwrap();
+    let first = temp.path().join("first.txt");
+    let second = temp.path().join("second.txt");
+    let filler = "noise ".repeat(30);
+    let content = (1..=30)
+        .map(|line| format!("{filler}NEEDLE at line {line} {filler}\n"))
+        .collect::<String>();
+    std::fs::write(&first, &content).unwrap();
+    std::fs::write(&second, &content).unwrap();
+    let database = temp.path().join("tracking.db");
+    let tee_dir = temp.path().join("tee");
+    let first = first.to_str().unwrap();
+    let second = second.to_str().unwrap();
+
+    let native = Command::new("rg")
+        .args(["--replace=-h", "--threads", "1", "NEEDLE", first, second])
+        .output()
+        .unwrap();
+    let output = rtk()
+        .args([
+            "rg",
+            "--replace=-h",
+            "--threads",
+            "1",
+            "NEEDLE",
+            first,
+            second,
+        ])
+        .env("RTK_DB_PATH", &database)
+        .env("RTK_TEE_DIR", &tee_dir)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), native.status.code());
+    let shown = String::from_utf8(output.stdout).unwrap();
+    let recovery = shown
+        .rsplit_once(" recover=rtk read -l none --recovery ")
+        .map(|(_, identifier)| identifier.trim())
+        .expect("a shortened inline replacement search must advertise lossless recovery");
+    let recovered = rtk()
+        .args(["read", "-l", "none", "--recovery", recovery])
+        .env("RTK_DB_PATH", &database)
+        .env("RTK_TEE_DIR", &tee_dir)
+        .output()
+        .unwrap();
+
+    assert!(recovered.status.success(), "stderr={:?}", recovered.stderr);
+    assert_eq!(recovered.stdout, native.stdout);
 }
 
 #[test]
@@ -140,10 +357,13 @@ fn count_and_nul_routes_preserve_their_native_boundaries() {
 
     let temp = tempdir().unwrap();
     let path = temp.path().join("count.txt");
+    let path_two = temp.path().join("count-two.txt");
     std::fs::write(&path, "NEEDLE\nNEEDLE\n").unwrap();
+    std::fs::write(&path_two, "NEEDLE\n").unwrap();
     let database = temp.path().join("tracking.db");
     let tee_dir = temp.path().join("tee");
     let path = path.to_str().unwrap();
+    let path_two = path_two.to_str().unwrap();
 
     let native_count = Command::new("rg")
         .args(["-c", "NEEDLE", path])
@@ -170,6 +390,37 @@ fn count_and_nul_routes_preserve_their_native_boundaries() {
         .unwrap();
     assert_eq!(nul.status.code(), native_nul.status.code());
     assert_eq!(nul.stdout, native_nul.stdout);
+
+    let native_no_filename = Command::new("rg")
+        .args([
+            "--threads",
+            "1",
+            "--count",
+            "--no-filename",
+            "NEEDLE",
+            path,
+            path_two,
+        ])
+        .output()
+        .unwrap();
+    let no_filename = rtk()
+        .args([
+            "rg",
+            "--threads",
+            "1",
+            "--count",
+            "--no-filename",
+            "NEEDLE",
+            path,
+            path_two,
+        ])
+        .env("RTK_DB_PATH", &database)
+        .env("RTK_TEE_DIR", &tee_dir)
+        .output()
+        .unwrap();
+    assert_eq!(no_filename.status.code(), native_no_filename.status.code());
+    assert_eq!(no_filename.stdout, native_no_filename.stdout);
+    assert_eq!(no_filename.stderr, native_no_filename.stderr);
 }
 
 #[test]
@@ -192,7 +443,14 @@ fn recognized_rg_selector_and_replacement_flags_keep_their_semantics() {
     let directory = directory.to_str().unwrap();
 
     let native = Command::new("rg")
-        .args(["--glob", "*.txt", "--replace", "HIT", "NEEDLE", directory])
+        .args([
+            "--glob",
+            "*.txt",
+            "--replace",
+            "HIT",
+            "--regexp=NEEDLE",
+            directory,
+        ])
         .output()
         .unwrap();
     let output = rtk()
@@ -202,7 +460,7 @@ fn recognized_rg_selector_and_replacement_flags_keep_their_semantics() {
             "*.txt",
             "--replace",
             "HIT",
-            "NEEDLE",
+            "--regexp=NEEDLE",
             directory,
         ])
         .env("RTK_DB_PATH", &database)

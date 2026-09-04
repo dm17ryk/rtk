@@ -652,9 +652,13 @@ fn render(
         }
     }
 
-    let mut baseline = build_capped_listing(&ordered, max_results)
-        .trim_end_matches('\n')
-        .to_string();
+    let mut baseline = if max_explicit {
+        build_capped_listing(&ordered, max_results)
+            .trim_end_matches('\n')
+            .to_string()
+    } else {
+        raw_output.to_string()
+    };
     if let Some(note) = &note {
         if !baseline.is_empty() {
             baseline.push('\n');
@@ -663,15 +667,17 @@ fn render(
     }
 
     crate::core::runner::emit_ai_document_with_baseline(
-        timer,
-        track_cmd,
-        "rtk find",
-        raw_output,
-        &baseline,
-        "find",
-        BudgetClass::Collection,
+        crate::core::runner::AiEmission {
+            timer,
+            original_cmd: track_cmd,
+            rtk_cmd: "rtk find",
+            raw: raw_output,
+            fallback_baseline: &baseline,
+            command_slug: "find",
+            budget: BudgetClass::Collection,
+            trailing_newline: true,
+        },
         document,
-        true,
     )
 }
 

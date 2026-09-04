@@ -40,7 +40,7 @@
 
 RTK separates command routes by the safety of transforming their output:
 
-- **Semantic**: safe human-readable text is parsed into an `AiDocument` and rendered deterministically under one of five `BudgetClass` limits: acknowledgement (128 estimated tokens), state (512), collection (1,024), diagnostic (2,048), or source (4,096).
+- **Semantic**: safe human-readable text is parsed into an `AiDocument` and rendered deterministically under one of five `BudgetClass` limits: acknowledgement (128 estimated tokens), state (512), collection (1,024), diagnostic (2,048), or source (4,096). `rtk read`, `rtk find`, and recognized `rtk rg` routes use this path; source records retain original line locations and path inventories elide shared roots.
 - **Legacy**: existing string filters remain output-compatible through `run_filtered()` while their command families await migration. New filtered routes must not use this API, and direct stdout is migration debt.
 - **Exact**: structured, interactive, binary, streaming, sensitive, and unknown output bypasses capture through `run_passthrough_with_reason(..., ExactReason)`. Native I/O is preserved and the reason is recorded.
 
@@ -59,6 +59,8 @@ command parser/filter --> AiDocument --> budget renderer --> lossless emitter --
 ```
 
 Parser failures are converted into a bounded recoverable `AiDocument`. For any lossy rendering, the emitter privately prepares a complete recovery artifact before exposing its command, commits the display atomically, and applies a final never-worse comparison. Native output is the fallback if bounded recovery cannot be guaranteed. These output decisions never override the child process's native exit status.
+
+`rtk rg` treats ordinary text, JSON events, inventory, count, and only-matching shapes as semantic candidates. NUL/binary, piped streaming, interactive, sensitive, and unknown flag forms use exact passthrough; this is a safety boundary, not an unsupported-command path.
 
 ### Hook Architecture (v0.9.5+)
 

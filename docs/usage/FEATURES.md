@@ -141,6 +141,8 @@ rtk read - [options]          # Lecture depuis stdin
 | `minimal` | Supprime commentaires et lignes vides excessives | ~30% |
 | `aggressive` | Signatures uniquement (supprime les corps de fonctions) | ~74% |
 
+La sortie compacte de `rtk read` garde les numeros de ligne source d'origine, y compris apres le filtrage. Utilisez `rtk read -l none` pour le contenu exact; lorsqu'une sortie compacte omet des donnees, l'identifiant `recover=...` se lit avec `rtk read -l none --recovery <ID>`.
+
 **Avant / Apres (mode aggressive) :**
 ```
 # cat main.rs (~200 lignes)                # rtk read main.rs -l aggressive (~50 lignes)
@@ -221,7 +223,7 @@ rtk grep <pattern> [chemin] [options]
 
 Aucune de ces options n'a de raccourci : `-l`, `-m` et `-c` sont reserves aux flags natifs de meme lettre (`--files-with-matches`, `--max-count`, `--count`) et sont transmis au moteur.
 
-Les arguments supplementaires sont transmis au moteur reellement invoque -- `grep` pour `rtk grep`, `rg` pour `rtk rg`, RTK ne substituant jamais l'un a l'autre. Un flag propre a ripgrep (`--glob`, `-t`) n'est donc valide que sous `rtk rg`. Les flags qui changent le format de sortie (`-c`, `-l`, `-L`, `-o`, `-Z`) passent directement au moteur sans filtrage RTK.
+Les arguments supplementaires sont transmis au moteur reellement invoque -- `grep` pour `rtk grep`, `rg` pour `rtk rg`, RTK ne substituant jamais l'un a l'autre. Un flag propre a ripgrep (`--glob`, `-t`) n'est donc valide que sous `rtk rg`. `rtk rg` rend en enregistrements AI compacts les recherches textuelles, JSON, inventaires, comptes et `-o`; les modes NUL/binaire/streaming/interactifs/sensibles/inconnus restent exacts. `rtk grep` conserve son rendu groupe existant.
 
 Il n'y a pas d'option `--file-type` : `rtk rg -t rust` filtre par type, `rtk grep -t rust` remonte l'erreur de grep (`invalid option -- 't'`).
 

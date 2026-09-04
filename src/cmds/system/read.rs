@@ -20,59 +20,81 @@ fn source_document(file: &str, lines: &[filter::FilteredLine]) -> AiDocument {
     document
 }
 
-fn emit_ai_source(
-    timer: &tracking::TimedExecution,
-    original_cmd: &str,
-    rtk_cmd: &str,
-    file_label: &str,
-    content: &str,
+struct AiSourceRequest<'a> {
+    timer: &'a tracking::TimedExecution,
+    original_cmd: &'a str,
+    rtk_cmd: &'a str,
+    file_label: &'a str,
+    content: &'a str,
     level: FilterLevel,
-    lang: &Language,
+    lang: &'a Language,
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
-    fallback_baseline: &str,
+    fallback_baseline: &'a str,
     verbose: u8,
-) -> bool {
+}
+
+fn emit_ai_source(request: AiSourceRequest<'_>) -> bool {
+    let AiSourceRequest {
+        timer,
+        original_cmd,
+        rtk_cmd,
+        file_label,
+        content,
+        level,
+        lang,
+        max_lines,
+        tail_lines,
+        fallback_baseline,
+        verbose,
+    } = request;
     let filter = filter::get_filter(level);
     let lines = filter.filter_lines(content, lang);
-    if lines.is_empty() || max_lines == Some(0) || tail_lines == Some(0) {
+    let selected = select_filtered_line_window(&lines, max_lines, tail_lines);
+    if selected.is_empty() {
         return false;
     }
-    let displayed = apply_filtered_line_window(&lines, max_lines, tail_lines);
 
     if verbose > 0 {
         let original_lines = content.lines().count();
         let reduction = if original_lines > 0 {
-            ((original_lines - displayed.len()) as f64 / original_lines as f64) * 100.0
+            ((original_lines - selected.len()) as f64 / original_lines as f64) * 100.0
         } else {
             0.0
         };
         eprintln!(
             "Lines: {} -> {} ({:.1}% reduction)",
             original_lines,
-            displayed.len(),
+            selected.len(),
             reduction
         );
     }
 
-    let omitted = content.lines().count().saturating_sub(displayed.len());
-    let mut document = source_document(file_label, displayed);
-    if omitted > 0 {
+    let omitted_by_filter = content.lines().count().saturating_sub(lines.len());
+    let mut document = source_document(file_label, &selected);
+    if let Some(max) = max_lines {
+        document.fact("window", format!("max={max}"));
+    } else if let Some(tail) = tail_lines {
+        document.fact("window", format!("tail={tail}"));
+    }
+    if omitted_by_filter > 0 {
         document = document.with_omission(Omission {
-            items: omitted,
+            items: omitted_by_filter,
             groups: 0,
         });
     }
     crate::core::runner::emit_ai_document_with_baseline(
-        timer,
-        original_cmd,
-        rtk_cmd,
-        content,
-        fallback_baseline,
-        "read",
-        BudgetClass::Source,
+        crate::core::runner::AiEmission {
+            timer,
+            original_cmd,
+            rtk_cmd,
+            raw: content,
+            fallback_baseline,
+            command_slug: "read",
+            budget: BudgetClass::Source,
+            trailing_newline: true,
+        },
         document,
-        true,
     );
     true
 }
@@ -131,20 +153,26 @@ pub fn run(
         (content.clone(), filtered.clone())
     };
 
+    let original_cmd = format!("cat {}", file.display());
+    let file_label = file.display().to_string();
     if level != FilterLevel::None
-        && emit_ai_source(
-            &timer,
-            &format!("cat {}", file.display()),
-            "rtk read",
-            &file.display().to_string(),
-            &content,
+        && emit_ai_source(AiSourceRequest {
+            timer: &timer,
+            original_cmd: &original_cmd,
+            rtk_cmd: "rtk read",
+            file_label: &file_label,
+            content: &content,
             level,
-            &lang,
+            lang: &lang,
             max_lines,
             tail_lines,
-            &rtk_output,
+            fallback_baseline: if max_lines.is_none() && tail_lines.is_none() {
+                &content
+            } else {
+                &rtk_output
+            },
             verbose,
-        )
+        })
     {
         return Ok(());
     }
@@ -228,19 +256,23 @@ pub fn run_stdin(
     };
 
     if level != FilterLevel::None
-        && emit_ai_source(
-            &timer,
-            "cat - (stdin)",
-            "rtk read -",
-            "stdin",
-            &content,
+        && emit_ai_source(AiSourceRequest {
+            timer: &timer,
+            original_cmd: "cat - (stdin)",
+            rtk_cmd: "rtk read -",
+            file_label: "stdin",
+            content: &content,
             level,
-            &lang,
+            lang: &lang,
             max_lines,
             tail_lines,
-            &rtk_output,
+            fallback_baseline: if max_lines.is_none() && tail_lines.is_none() {
+                &content
+            } else {
+                &rtk_output
+            },
             verbose,
-        )
+        })
     {
         return Ok(());
     }
@@ -276,21 +308,21 @@ fn format_with_line_numbers(content: &str) -> String {
     out
 }
 
-fn apply_filtered_line_window(
+fn select_filtered_line_window(
     lines: &[filter::FilteredLine],
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
-) -> &[filter::FilteredLine] {
+) -> Vec<filter::FilteredLine> {
     if let Some(tail) = tail_lines {
         let start = lines.len().saturating_sub(tail);
-        return &lines[start..];
+        return lines[start..].to_vec();
     }
 
     if let Some(max) = max_lines {
-        return &lines[..lines.len().min(max)];
+        return filter::smart_truncate_lines(lines, max);
     }
 
-    lines
+    lines.to_vec()
 }
 
 fn apply_line_window(
@@ -374,7 +406,39 @@ fn main() {{
     }
 
     #[test]
-    fn filtered_line_window_keeps_original_locations_for_tail_output() {
+    fn selected_source_window_keeps_legacy_priority_and_original_locations() {
+        let lines = vec![
+            filter::FilteredLine {
+                original_line: 2,
+                text: "let first = 1;".into(),
+            },
+            filter::FilteredLine {
+                original_line: 5,
+                text: "fn retained() {}".into(),
+            },
+            filter::FilteredLine {
+                original_line: 9,
+                text: "let not_reached = 2;".into(),
+            },
+            filter::FilteredLine {
+                original_line: 12,
+                text: "let also_not_reached = 3;".into(),
+            },
+        ];
+
+        let selected = select_filtered_line_window(&lines, Some(3), None);
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|line| line.original_line)
+                .collect::<Vec<_>>(),
+            vec![2, 5]
+        );
+    }
+
+    #[test]
+    fn selected_tail_window_keeps_original_locations() {
         let lines = vec![
             filter::FilteredLine {
                 original_line: 2,
@@ -390,16 +454,13 @@ fn main() {{
             },
         ];
 
-        let window = apply_filtered_line_window(&lines, None, Some(2));
-        let rendered = crate::core::ai_output::render(
-            &source_document("sample.rs", window),
-            crate::core::ai_output::BudgetClass::Source,
-        )
-        .text;
-
+        let selected = select_filtered_line_window(&lines, None, Some(2));
         assert_eq!(
-            rendered,
-            "status=source file=sample.rs\n5: second\n9: third"
+            selected
+                .iter()
+                .map(|line| line.original_line)
+                .collect::<Vec<_>>(),
+            vec![5, 9]
         );
     }
 

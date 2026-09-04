@@ -27,10 +27,11 @@ use std::sync::LazyLock;
 /// (stripped) and `-E` (dialect, left to #2138). Failure mode for a missing
 /// entry: the value becomes a positional (visible wrong result, not silent).
 const VALUE_FLAGS_SHORT: &[u8] = b"ABCMTdfgjmt";
+const RG_VALUE_FLAGS_SHORT: &[u8] = b"ABCMTdefgjmrt";
 
 /// Long flags that consume the NEXT token as their value (space-separated form).
 /// Inline `=` form (`--flag=value`) is one token and passes through unchanged.
-/// `--regexp` is handled separately (its value goes to `patterns`).
+/// `--regexp` is additionally extracted into `patterns` for semantic anchoring.
 /// `--encoding` value is consumed correctly here; dialect routing is #2138's job.
 const VALUE_FLAGS_LONG: &[&str] = &[
     "--after-context",
@@ -55,6 +56,7 @@ const VALUE_FLAGS_LONG: &[&str] = &[
     "--pre",
     "--pre-glob",
     "--replace",
+    "--regexp",
     "--sort",
     "--sortr",
     "--threads",
@@ -175,6 +177,11 @@ fn extract_pattern_path<T: AsRef<str>>(args: &[T]) -> (Vec<String>, Vec<String>,
                 } else {
                     i += 1;
                 }
+                continue;
+            }
+            if let Some(pattern) = arg.strip_prefix("--regexp=") {
+                e_patterns.push(pattern.to_string());
+                i += 1;
                 continue;
             }
             // Other long value-taking flags: consume next token as value.
@@ -339,6 +346,7 @@ fn is_rg_text_long_flag(flag: &str) -> bool {
 
 fn classify_rg(args: &[String]) -> RgRoute {
     let mut route = RgRoute::Matches;
+    let mut no_filename = false;
     let mut past_dashdash = false;
     let mut i = 0;
 
@@ -399,12 +407,26 @@ fn classify_rg(args: &[String]) -> RgRoute {
                 _ => return RgRoute::Exact(ExactReason::Unknown),
             };
 
+            if flag == "--no-filename" {
+                no_filename = true;
+            }
+
             if let Some(next) = mode {
                 if let Some(reason) = select_rg_route(&mut route, next) {
                     return RgRoute::Exact(reason);
                 }
             }
+            if matches!(route, RgRoute::Counts) && no_filename {
+                return RgRoute::Exact(ExactReason::Structured);
+            }
             if rg_long_flag_value(&flag) && !has_inline_value {
+                if flag == "--replace"
+                    && args
+                        .get(i + 1)
+                        .is_none_or(|value| value.starts_with('-'))
+                {
+                    return RgRoute::Exact(ExactReason::Unknown);
+                }
                 i += 1;
             }
             i += 1;
@@ -431,6 +453,13 @@ fn classify_rg(args: &[String]) -> RgRoute {
                 'A' | 'B' | 'C' | 'M' | 'd' | 'e' | 'f' | 'g' | 'j' | 'm' | 'r' | 't'
                 | 'T' => {
                     if j + 1 == bytes.len() {
+                        if flag == 'r'
+                            && args
+                                .get(i + 1)
+                                .is_none_or(|value| value.starts_with('-'))
+                        {
+                            return RgRoute::Exact(ExactReason::Unknown);
+                        }
                         i += 1;
                     }
                     break;
@@ -453,6 +482,8 @@ fn classify_rg(args: &[String]) -> RgRoute {
 }
 
 const RG_AI_MAX_LINE_LEN: usize = 80;
+type RgMatchEntry = (String, usize, bool, String, bool);
+type RgMatchBlock = (String, Vec<(usize, bool, String, bool)>);
 
 fn rg_document(
     route: RgRoute,
@@ -481,7 +512,7 @@ fn rg_faithful_match_baseline(
     paths: &[String],
     extra_args: &[String],
 ) -> Result<String> {
-    let show_file = paths.len() > 1 || show_file(paths, extra_args);
+    let show_file = rg_show_file(paths, extra_args);
     let show_line = show_line(Engine::Rg, extra_args, std::io::stdout().is_terminal());
     let mut plain = String::new();
     for line in raw.lines() {
@@ -505,55 +536,61 @@ fn rg_match_document(raw: &str, patterns: &[String]) -> Result<AiDocument> {
         let Some((path, line_number, is_match, content)) = parse_match_line(line) else {
             return Err(anyhow!("unrecognized ripgrep match record"));
         };
-        entries.push((
-            path,
-            line_number,
-            is_match,
-            clean_rg_line(content, patterns),
-        ));
+        let (content, was_shortened) = clean_rg_line(content, patterns);
+        entries.push((path, line_number, is_match, content, was_shortened));
     }
     Ok(rg_match_document_from_entries(entries))
 }
 
-fn clean_rg_line(content: &str, anchors: &[String]) -> String {
+fn clean_rg_line(content: &str, anchors: &[String]) -> (String, bool) {
     let content_lower = content.to_lowercase();
     let anchor = anchors
         .iter()
         .find(|anchor| !anchor.is_empty() && content_lower.contains(&anchor.to_lowercase()))
         .map(String::as_str)
         .unwrap_or_default();
-    clean_line(content, RG_AI_MAX_LINE_LEN, None, anchor)
+    let cleaned = clean_line(content, RG_AI_MAX_LINE_LEN, None, anchor);
+    let shortened = cleaned != content;
+    (cleaned, shortened)
 }
 
-fn rg_match_document_from_entries(entries: Vec<(String, usize, bool, String)>) -> AiDocument {
+fn rg_match_document_from_entries(entries: Vec<RgMatchEntry>) -> AiDocument {
     let mut document = AiDocument::new(Some("search"));
-    let matches = entries.iter().filter(|(_, _, is_match, _)| *is_match).count();
+    let matches = entries
+        .iter()
+        .filter(|(_, _, is_match, _, _)| *is_match)
+        .count();
     document.fact("matches", matches.to_string());
 
-    let mut blocks: Vec<(String, Vec<(usize, bool, String)>)> = Vec::new();
-    for (path, line_number, is_match, content) in entries {
+    let mut blocks: Vec<RgMatchBlock> = Vec::new();
+    for (path, line_number, is_match, content, was_shortened) in entries {
         if let Some((previous_path, records)) = blocks.last_mut() {
             if *previous_path == path {
-                records.push((line_number, is_match, content));
+                records.push((line_number, is_match, content, was_shortened));
                 continue;
             }
         }
-        blocks.push((path, vec![(line_number, is_match, content)]));
+        blocks.push((path, vec![(line_number, is_match, content, was_shortened)]));
     }
 
     for (path, records) in blocks {
         let rendered_records = records
             .iter()
-            .map(|(line_number, is_match, content)| {
+            .map(|(line_number, is_match, content, _)| {
                 let separator = if *is_match { ':' } else { '-' };
                 format!("{line_number}{separator} {content}")
             })
             .collect::<Vec<_>>()
             .join("; ");
+        let shortened = records
+            .iter()
+            .filter(|(_, _, _, was_shortened)| *was_shortened)
+            .count();
         document.push(
             AiRecord::new(Severity::Info, format!("{path} {{{rendered_records}}}"))
                 .grouped(path)
-                .representing(records.len()),
+                .representing(records.len())
+                .omitting(shortened),
         );
     }
 
@@ -593,11 +630,13 @@ fn rg_json_document(raw: &str, patterns: &[String]) -> Result<AiDocument> {
             .and_then(|lines| lines.get("text"))
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("ripgrep JSON {event_type} event has non-text lines"))?;
+        let (text, was_shortened) = clean_rg_line(text.trim_end_matches(['\r', '\n']), patterns);
         entries.push((
             path.to_string(),
             line_number,
             event_type == "match",
-            clean_rg_line(text.trim_end_matches(['\r', '\n']), patterns),
+            text,
+            was_shortened,
         ));
     }
 
@@ -728,8 +767,14 @@ fn rg_replacement_values(args: &[String]) -> Vec<String> {
                 index += 1;
             }
         } else if let Some(cluster) = arg.strip_prefix('-') {
-            if let Some(replacement) = cluster.strip_prefix('r').filter(|value| !value.is_empty()) {
-                values.push(replacement.to_string());
+            if let Some(position) = cluster.bytes().position(|character| character == b'r') {
+                let replacement = &cluster[position + 1..];
+                if !replacement.is_empty() {
+                    values.push(replacement.to_string());
+                } else if let Some(value) = args.get(index + 1) {
+                    values.push(value.clone());
+                    index += 1;
+                }
             }
         }
         index += 1;
@@ -878,6 +923,52 @@ fn show_file(paths: &[String], extra_args: &[String]) -> bool {
         || extra_args
             .iter()
             .any(|f| f == "--with-filename" || f == "--recursive")
+}
+
+/// Ripgrep's filename selectors override its default of showing names for
+/// multi-file and recursive searches. Preserve their argument order while
+/// reconstructing the lossless baseline from our parse-aided invocation.
+fn rg_show_file(paths: &[String], extra_args: &[String]) -> bool {
+    let mut explicit = None;
+    let mut index = 0;
+    while index < extra_args.len() {
+        let arg = &extra_args[index];
+        if VALUE_FLAGS_LONG.contains(&arg.as_str()) {
+            index += 2;
+            continue;
+        }
+
+        if arg == "--with-filename" {
+            explicit = Some(true);
+        } else if arg == "--no-filename" {
+            explicit = Some(false);
+        } else if let Some(cluster) = arg.strip_prefix('-').filter(|cluster| !cluster.is_empty())
+        {
+            let mut value_taking = false;
+            for (position, flag) in cluster.bytes().enumerate() {
+                if RG_VALUE_FLAGS_SHORT.contains(&flag) {
+                    value_taking = position + 1 == cluster.len();
+                    break;
+                }
+                match flag {
+                    b'H' => explicit = Some(true),
+                    b'h' => explicit = Some(false),
+                    _ => {}
+                }
+            }
+            if value_taking {
+                index += 2;
+                continue;
+            }
+        }
+        index += 1;
+    }
+
+    explicit.unwrap_or_else(|| {
+        paths.is_empty()
+            || paths.len() > 1
+            || paths.iter().any(|path| std::path::Path::new(path).is_dir())
+    })
 }
 
 fn show_line(engine: Engine, extra_args: &[String], stdout_is_tty: bool) -> bool {
@@ -1367,6 +1458,16 @@ mod tests {
             (&["--count-matches", "needle"][..], RgRoute::Counts),
             (&["-o", "needle"][..], RgRoute::OnlyMatching),
             (&["--replace", "hit", "needle"][..], RgRoute::Matches),
+            (
+                &["--replace", "-h", "needle"][..],
+                RgRoute::Exact(ExactReason::Unknown),
+            ),
+            (
+                &["-r", "-h", "needle"][..],
+                RgRoute::Exact(ExactReason::Unknown),
+            ),
+            (&["--regexp", "needle", "src"][..], RgRoute::Matches),
+            (&["--regexp=needle", "src"][..], RgRoute::Matches),
             (&["-C", "2", "needle"][..], RgRoute::Matches),
             (
                 &["--glob", "--future-flag", "needle"][..],
@@ -1396,6 +1497,14 @@ mod tests {
             (
                 &["--future-flag", "needle"][..],
                 RgRoute::Exact(ExactReason::Unknown),
+            ),
+            (
+                &["--count", "--no-filename", "needle"][..],
+                RgRoute::Exact(ExactReason::Structured),
+            ),
+            (
+                &["--no-filename", "--count", "needle"][..],
+                RgRoute::Exact(ExactReason::Structured),
             ),
             (
                 &["--json", "--count", "needle"][..],
@@ -1438,6 +1547,147 @@ mod tests {
     }
 
     #[test]
+    fn rg_shortened_match_declares_a_lossless_omission() {
+        let long_match = format!("prefix {} needle suffix", "x".repeat(100));
+        let raw = format!("a.rs\0{}:{}\n", 7, long_match);
+        let document = rg_document(RgRoute::Matches, &raw, &["needle".into()], &[]).unwrap();
+        let rendered = crate::core::ai_output::render(
+            &document,
+            crate::core::ai_output::BudgetClass::Source,
+        );
+
+        assert_eq!(
+            rendered.omission,
+            Some(Omission {
+                items: 1,
+                groups: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn rg_whitespace_cleanup_declares_a_lossless_omission() {
+        let raw = "a.rs\x007:  needle  \n";
+        let document = rg_document(RgRoute::Matches, raw, &["needle".into()], &[]).unwrap();
+        let rendered = crate::core::ai_output::render(
+            &document,
+            crate::core::ai_output::BudgetClass::Source,
+        );
+
+        assert_eq!(
+            rendered.omission,
+            Some(Omission {
+                items: 1,
+                groups: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn rg_no_filename_baseline_overrides_multiple_paths() {
+        let raw = "a.rs\x007:needle\nb.rs\x007:needle\n";
+        let paths = vec!["a.rs".to_string(), "b.rs".to_string()];
+        let extra_args = vec!["--no-filename".to_string()];
+
+        assert_eq!(
+            rg_faithful_match_baseline(raw, &paths, &extra_args).unwrap(),
+            "needle\nneedle\n"
+        );
+    }
+
+    #[test]
+    fn rg_filename_selectors_follow_argument_order() {
+        let paths = vec!["a.rs".to_string(), "b.rs".to_string()];
+
+        assert!(!rg_show_file(
+            &paths,
+            &["--with-filename".to_string(), "--no-filename".to_string()],
+        ));
+        assert!(rg_show_file(
+            &paths,
+            &["--no-filename".to_string(), "--with-filename".to_string()],
+        ));
+        assert!(!rg_show_file(&paths, &["-Hh".to_string()]));
+        assert!(rg_show_file(&paths, &["-hH".to_string()]));
+    }
+
+    #[test]
+    fn rg_filename_selector_ignores_inline_replace_values() {
+        let raw = "a.rs\x007:-h\nb.rs\x007:-h\n";
+        let paths = vec!["a.rs".to_string(), "b.rs".to_string()];
+        let extra_args = vec!["--replace=-h".to_string()];
+
+        assert_eq!(
+            rg_faithful_match_baseline(raw, &paths, &extra_args).unwrap(),
+            "a.rs:-h\nb.rs:-h\n"
+        );
+
+        let short_args = vec!["-r-h".to_string()];
+        assert_eq!(
+            rg_faithful_match_baseline(raw, &paths, &short_args).unwrap(),
+            "a.rs:-h\nb.rs:-h\n"
+        );
+    }
+
+    #[test]
+    fn rg_default_filename_behavior_ignores_inline_replace_flag_text() {
+        let raw = "a.rs\x007:-h\n";
+        let paths = vec!["a.rs".to_string()];
+        let extra_args = vec!["-r-h".to_string()];
+
+        assert_eq!(
+            rg_faithful_match_baseline(raw, &paths, &extra_args).unwrap(),
+            "-h\n"
+        );
+    }
+
+    #[test]
+    fn rg_budget_omission_does_not_double_count_shortened_matches() {
+        let long_match = format!("prefix {} needle suffix", "x".repeat(100));
+        let raw = (1..=500)
+            .map(|line_number| format!("a.rs\0{line_number}:{long_match}\n"))
+            .collect::<String>();
+        let document = rg_document(RgRoute::Matches, &raw, &["needle".into()], &[]).unwrap();
+        let rendered = crate::core::ai_output::render(
+            &document,
+            crate::core::ai_output::BudgetClass::Source,
+        );
+
+        assert_eq!(
+            rendered.omission,
+            Some(Omission {
+                items: 500,
+                groups: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn rg_json_budget_omission_does_not_double_count_shortened_matches() {
+        let long_match = format!("prefix {} needle suffix", "x".repeat(100));
+        let raw = (1..=500)
+            .map(|line_number| {
+                format!(
+                    "{{\"type\":\"match\",\"data\":{{\"path\":{{\"text\":\"a.rs\"}},\"lines\":{{\"text\":\"{long_match}\\n\"}},\"line_number\":{line_number}}}}}\n"
+                )
+            })
+            .collect::<String>();
+        let document = rg_document(RgRoute::JsonEvents, &raw, &["needle".into()], &[]).unwrap();
+        let rendered = crate::core::ai_output::render(
+            &document,
+            crate::core::ai_output::BudgetClass::Source,
+        );
+
+        assert_eq!(
+            rendered.omission,
+            Some(Omission {
+                items: 500,
+                groups: 1,
+            })
+        );
+    }
+
+    #[test]
     fn rg_json_discards_event_noise_but_keeps_match_text() {
         let raw = concat!(
             "{\"type\":\"begin\",\"data\":{\"path\":{\"text\":\"a.rs\"}}}\n",
@@ -1466,7 +1716,13 @@ mod tests {
 
     #[test]
     fn rg_count_records_are_path_equals_count() {
-        let document = rg_document(RgRoute::Counts, "a.rs\04\nb.rs\01\n", &[], &[]).unwrap();
+        let document = rg_document(
+            RgRoute::Counts,
+            concat!("a.rs\0", "4\n", "b.rs\0", "1\n"),
+            &[],
+            &[],
+        )
+        .unwrap();
         let rendered = crate::core::ai_output::render(
             &document,
             crate::core::ai_output::BudgetClass::Collection,

@@ -97,6 +97,7 @@ pub struct AiRecord {
     pub group: Option<String>,
     source_order: usize,
     represented_items: usize,
+    omitted_items: usize,
 }
 
 impl AiRecord {
@@ -107,6 +108,7 @@ impl AiRecord {
             group: None,
             source_order: 0,
             represented_items: 1,
+            omitted_items: 0,
         }
     }
 
@@ -117,6 +119,14 @@ impl AiRecord {
 
     pub fn representing(mut self, items: usize) -> Self {
         self.represented_items = items.max(1);
+        self
+    }
+
+    /// Marks source items compacted inside this record. They count as omitted
+    /// only when this record is emitted; a budget-dropped record is instead
+    /// accounted for by its full represented-item count.
+    pub fn omitting(mut self, items: usize) -> Self {
+        self.omitted_items = items;
         self
     }
 }
@@ -399,6 +409,7 @@ struct CollapsedRecord {
     text: String,
     source_records: usize,
     represented_items: usize,
+    omitted_items: usize,
 }
 
 pub fn render(document: &AiDocument, budget: BudgetClass) -> RenderedOutput {
@@ -432,9 +443,14 @@ fn render_semantic(document: &AiDocument, budget: BudgetClass) -> RenderedOutput
         emitted += 1;
     }
 
+    let emitted_internal_omissions = records[..emitted]
+        .iter()
+        .map(|record| record.omitted_items)
+        .sum();
     let omission = omission_from(
         document.declared_omission.clone(),
         omitted_summary_items,
+        emitted_internal_omissions,
         &records[emitted..],
     );
     if lines.is_empty() {
@@ -504,6 +520,7 @@ fn collapsed_records(document: &AiDocument) -> Vec<CollapsedRecord> {
         {
             existing.source_records += 1;
             existing.represented_items += record.represented_items;
+            existing.omitted_items += record.omitted_items;
             continue;
         }
 
@@ -512,6 +529,7 @@ fn collapsed_records(document: &AiDocument) -> Vec<CollapsedRecord> {
             text: record.text,
             source_records: 1,
             represented_items: record.represented_items,
+            omitted_items: record.omitted_items,
         });
     }
 
@@ -521,15 +539,16 @@ fn collapsed_records(document: &AiDocument) -> Vec<CollapsedRecord> {
 fn omission_from(
     declared_omission: Option<Omission>,
     omitted_summary_items: usize,
+    emitted_internal_omissions: usize,
     omitted_records: &[CollapsedRecord],
 ) -> Option<Omission> {
     let mut omitted = match declared_omission {
         Some(mut declared) => {
-            declared.items += omitted_summary_items;
+            declared.items += omitted_summary_items + emitted_internal_omissions;
             declared
         }
         None => Omission {
-            items: omitted_summary_items,
+            items: omitted_summary_items + emitted_internal_omissions,
             groups: 0,
         },
     };
@@ -875,7 +894,7 @@ mod tests {
             parser_failed: false,
         };
         let prepared = prepare_emission_with(&raw, "test", rendered, true, |_, _| None);
-        assert_eq!(prepared.as_str(), format!("{raw}\n"));
+        assert_eq!(prepared.as_str(), raw);
         assert!(!prepared.recovery_created());
     }
 

@@ -472,39 +472,62 @@ pub fn get_filter(level: FilterLevel) -> Box<dyn FilterStrategy> {
     }
 }
 
+fn is_structurally_important(line: &str) -> bool {
+    let trimmed = line.trim();
+    FUNC_SIGNATURE.is_match(trimmed)
+        || IMPORT_PATTERN.is_match(trimmed)
+        || trimmed.starts_with("pub ")
+        || trimmed.starts_with("export ")
+        || trimmed == "}"
+        || trimmed == "{"
+}
+
+/// Applies the legacy smart `-m` priority rule while retaining original source
+/// locations for semantic read output.
+pub fn smart_truncate_lines(lines: &[FilteredLine], max_lines: usize) -> Vec<FilteredLine> {
+    if lines.len() <= max_lines {
+        return lines.to_vec();
+    }
+    if max_lines == 0 {
+        return Vec::new();
+    }
+
+    let mut result = Vec::with_capacity(max_lines);
+    let mut kept_lines = 0;
+
+    for line in lines {
+        if is_structurally_important(&line.text) || kept_lines < max_lines / 2 {
+            result.push(line.clone());
+            kept_lines += 1;
+        }
+        if kept_lines >= max_lines - 1 {
+            break;
+        }
+    }
+
+    result
+}
+
 pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> String {
     let lines: Vec<&str> = content.lines().collect();
     if lines.len() <= max_lines {
         return content.to_string();
     }
 
-    let mut result = Vec::with_capacity(max_lines + 1);
-    let mut kept_lines = 0;
-
-    for line in &lines {
-        let trimmed = line.trim();
-
-        // Prioritize structurally important lines so the visible window stays useful.
-        // The old approach interleaved "// ... N lines omitted" markers which AI agents
-        // treated as code, causing parsing confusion and extra retry loops.
-        let is_important = FUNC_SIGNATURE.is_match(trimmed)
-            || IMPORT_PATTERN.is_match(trimmed)
-            || trimmed.starts_with("pub ")
-            || trimmed.starts_with("export ")
-            || trimmed == "}"
-            || trimmed == "{";
-
-        if is_important || kept_lines < max_lines / 2 {
-            result.push((*line).to_string());
-            kept_lines += 1;
-        }
-        // Non-important lines beyond max_lines/2 are silently skipped —
-        // no inline markers that could be mistaken for file content.
-
-        if kept_lines >= max_lines - 1 {
-            break;
-        }
-    }
+    let numbered = lines
+        .iter()
+        .enumerate()
+        .map(|(index, text)| FilteredLine {
+            original_line: index + 1,
+            text: (*text).to_string(),
+        })
+        .collect::<Vec<_>>();
+    let selected = smart_truncate_lines(&numbered, max_lines);
+    let kept_lines = selected.len();
+    let mut result = selected
+        .iter()
+        .map(|line| line.text.clone())
+        .collect::<Vec<_>>();
 
     // Single end-of-output marker: not code syntax, unambiguous to AI agents.
     // Invariant: kept_lines + N == lines.len() (N = lines not shown)
