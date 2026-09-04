@@ -56,8 +56,15 @@ fn short_hash(s: &str) -> String {
 
 /// Get the tee directory, respecting config and env overrides.
 pub(crate) fn get_tee_dir(config: &Config) -> Option<PathBuf> {
+    get_tee_dir_with_env(config, std::env::var_os("RTK_TEE_DIR"))
+}
+
+fn get_tee_dir_with_env(
+    config: &Config,
+    env_override: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
     // Env var override
-    if let Ok(dir) = std::env::var("RTK_TEE_DIR") {
+    if let Some(dir) = env_override {
         return Some(PathBuf::from(dir));
     }
 
@@ -1309,7 +1316,7 @@ directory = "/tmp/rtk-tee"
         let configured = temp.path().join("custom-tee");
         let mut config = Config::default();
         config.tee.directory = Some(configured.clone());
-        assert_eq!(get_tee_dir(&config), Some(configured));
+        assert_eq!(get_tee_dir_with_env(&config, None), Some(configured));
     }
 
     #[test]
