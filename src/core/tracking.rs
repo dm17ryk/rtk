@@ -182,6 +182,28 @@ pub struct HookDecisionRecord {
     pub decision: HookOutcome,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutputTracking {
+    pub contract: String,
+    pub exact_reason: Option<String>,
+    pub omitted_items: usize,
+    pub omitted_groups: usize,
+    pub recovery_created: bool,
+    pub filter_failed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // Used by the pending residual-output reporting surface.
+pub struct ResidualCommandStats {
+    pub rtk_cmd: String,
+    pub count: usize,
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub weighted_savings_pct: f64,
+    pub zero_savings_count: usize,
+    pub exact_count: usize,
+}
+
 /// Aggregated statistics across all recorded commands.
 ///
 /// Provides overall metrics and breakdowns by command and by day.
@@ -305,7 +327,7 @@ type CommandStats = (String, usize, usize, f64, u64);
 /// call. Bump this whenever `run_schema_migrations` gains a new statement; a stale
 /// `user_version` triggers exactly one re-run of the full migration sequence, then
 /// the pragma is updated so subsequent opens skip straight past it.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Create all tables/indexes, run column migrations, and stamp `user_version` to
 /// `SCHEMA_VERSION` for the on-disk tracker DB.
@@ -323,7 +345,13 @@ fn run_schema_migrations(conn: &Connection) -> Result<()> {
             input_tokens INTEGER NOT NULL,
             output_tokens INTEGER NOT NULL,
             saved_tokens INTEGER NOT NULL,
-            savings_pct REAL NOT NULL
+            savings_pct REAL NOT NULL,
+            output_contract TEXT NOT NULL DEFAULT 'legacy',
+            exact_reason TEXT,
+            omitted_items INTEGER NOT NULL DEFAULT 0,
+            omitted_groups INTEGER NOT NULL DEFAULT 0,
+            recovery_created INTEGER NOT NULL DEFAULT 0,
+            filter_failed INTEGER NOT NULL DEFAULT 0
         )",
         [],
     )?;
@@ -341,6 +369,27 @@ fn run_schema_migrations(conn: &Connection) -> Result<()> {
     // Migration: add project_path column with DEFAULT '' for new rows // changed: added DEFAULT
     let _ = conn.execute(
         "ALTER TABLE commands ADD COLUMN project_path TEXT DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE commands ADD COLUMN output_contract TEXT NOT NULL DEFAULT 'legacy'",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE commands ADD COLUMN exact_reason TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE commands ADD COLUMN omitted_items INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE commands ADD COLUMN omitted_groups INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE commands ADD COLUMN recovery_created INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE commands ADD COLUMN filter_failed INTEGER NOT NULL DEFAULT 0",
         [],
     );
     // One-time migration: normalize NULLs from pre-default schema // changed: guarded with EXISTS
@@ -473,6 +522,13 @@ impl Tracker {
         })
     }
 
+    #[cfg(test)]
+    fn new_at_path_for_test(path: &std::path::Path) -> Result<Self> {
+        let conn = Connection::open(path)?;
+        run_schema_migrations(&conn)?;
+        Ok(Self { conn })
+    }
+
     /// Create an isolated in-memory tracker for tests.
     ///
     /// Runs the same `run_schema_migrations` the real on-disk `Tracker::new()`
@@ -515,6 +571,28 @@ impl Tracker {
         output_tokens: usize,
         exec_time_ms: u64,
     ) -> Result<()> {
+        self.record_with_output(
+            original_cmd,
+            rtk_cmd,
+            input_tokens,
+            output_tokens,
+            exec_time_ms,
+            OutputTracking {
+                contract: "legacy".into(),
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn record_with_output(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input_tokens: usize,
+        output_tokens: usize,
+        exec_time_ms: u64,
+        tracking: OutputTracking,
+    ) -> Result<()> {
         let saved = input_tokens.saturating_sub(output_tokens);
         let pct = if input_tokens > 0 {
             (saved as f64 / input_tokens as f64) * 100.0
@@ -524,22 +602,35 @@ impl Tracker {
 
         let project_path = current_project_path_string(); // added: record cwd
 
-        self.conn.execute(
-            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", // added: project_path
-            params![
-                Utc::now().to_rfc3339(),
-                original_cmd,
-                rtk_cmd,
-                project_path, // added
-                input_tokens as i64,
-                output_tokens as i64,
-                saved as i64,
-                pct,
-                exec_time_ms as i64
-            ],
-        )
-        .inspect_err(|e| warn_if_missing_table("record", e))?;
+        self.conn
+            .execute(
+                "INSERT INTO commands (
+                timestamp, original_cmd, rtk_cmd, project_path, input_tokens,
+                output_tokens, saved_tokens, savings_pct, exec_time_ms,
+                output_contract, exact_reason, omitted_items, omitted_groups,
+                recovery_created, filter_failed
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
+             )",
+                params![
+                    Utc::now().to_rfc3339(),
+                    original_cmd,
+                    rtk_cmd,
+                    project_path, // added
+                    input_tokens as i64,
+                    output_tokens as i64,
+                    saved as i64,
+                    pct,
+                    exec_time_ms as i64,
+                    tracking.contract,
+                    tracking.exact_reason,
+                    tracking.omitted_items as i64,
+                    tracking.omitted_groups as i64,
+                    tracking.recovery_created,
+                    tracking.filter_failed,
+                ],
+            )
+            .inspect_err(|e| warn_if_missing_table("record", e))?;
 
         self.cleanup_old()?;
         Ok(())
@@ -903,6 +994,53 @@ impl Tracker {
                 row.get::<_, f64>(3)?,
                 row.get::<_, f64>(4)? as u64,
             ))
+        })?;
+
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    #[allow(dead_code)] // Used by the pending residual-output reporting surface.
+    pub fn get_residual_by_command(
+        &self,
+        project_path: Option<&str>,
+    ) -> Result<Vec<ResidualCommandStats>> {
+        let (project_exact, project_glob) = project_filter_params(project_path);
+        let mut statement = self.conn.prepare(
+            "SELECT
+                rtk_cmd,
+                COUNT(*),
+                COALESCE(SUM(input_tokens), 0),
+                COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(CASE
+                    WHEN input_tokens > 0 AND saved_tokens = 0 THEN 1 ELSE 0
+                END), 0),
+                COALESCE(SUM(CASE
+                    WHEN output_contract = 'exact' THEN 1 ELSE 0
+                END), 0)
+             FROM commands
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+             GROUP BY rtk_cmd
+             ORDER BY SUM(output_tokens) DESC, rtk_cmd ASC",
+        )?;
+        let rows = statement.query_map(params![project_exact, project_glob], |row| {
+            let input_tokens = row.get::<_, i64>(2)? as usize;
+            let output_tokens = row.get::<_, i64>(3)? as usize;
+            let saved_tokens = input_tokens.saturating_sub(output_tokens);
+            let weighted_savings_pct = if input_tokens > 0 {
+                saved_tokens as f64 / input_tokens as f64 * 100.0
+            } else {
+                0.0
+            };
+
+            Ok(ResidualCommandStats {
+                rtk_cmd: row.get(0)?,
+                count: row.get::<_, i64>(1)? as usize,
+                input_tokens,
+                output_tokens,
+                weighted_savings_pct,
+                zero_savings_count: row.get::<_, i64>(4)? as usize,
+                exact_count: row.get::<_, i64>(5)? as usize,
+            })
         })?;
 
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1655,8 +1793,12 @@ pub fn record_parse_failure_silent(raw_command: &str, error_message: &str, succe
 /// assert_eq!(estimate_tokens("hello world"), 3); // 11 chars = ceil(2.75) = 3
 /// ```
 pub fn estimate_tokens(text: &str) -> usize {
-    // ~4 chars per token on average
-    (text.len() as f64 / 4.0).ceil() as usize
+    estimate_tokens_from_bytes(text.len())
+}
+
+/// Estimate tokens from a byte count when fail-open output is not retained.
+pub fn estimate_tokens_from_bytes(byte_count: usize) -> usize {
+    byte_count.div_ceil(4)
 }
 
 /// Helper struct for timing command execution
@@ -1727,17 +1869,68 @@ impl TimedExecution {
     /// timer.track("ls -la", "rtk ls", input, output);
     /// ```
     pub fn track(&self, original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
-        let elapsed_ms = self.start.elapsed().as_millis() as u64;
+        self.track_output(
+            original_cmd,
+            rtk_cmd,
+            input,
+            output,
+            OutputTracking {
+                contract: "legacy".into(),
+                ..Default::default()
+            },
+        );
+    }
+
+    pub fn track_output(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input: &str,
+        output: &str,
+        tracking: OutputTracking,
+    ) {
         let input_tokens = estimate_tokens(input);
         let output_tokens = estimate_tokens(output);
 
+        self.track_output_tokens(original_cmd, rtk_cmd, input_tokens, output_tokens, tracking);
+    }
+
+    pub fn track_output_tokens(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input_tokens: usize,
+        output_tokens: usize,
+        tracking: OutputTracking,
+    ) {
+        let elapsed_ms = self.start.elapsed().as_millis() as u64;
+
         if let Ok(tracker) = Tracker::new() {
-            let _ = tracker.record(
+            let _ = tracker.record_with_output(
                 original_cmd,
                 rtk_cmd,
                 input_tokens,
                 output_tokens,
                 elapsed_ms,
+                tracking,
+            );
+        }
+    }
+
+    pub fn track_exact(&self, original_cmd: &str, rtk_cmd: &str, reason: &str) {
+        let elapsed_ms = self.start.elapsed().as_millis() as u64;
+        if let Ok(tracker) = Tracker::new() {
+            let _ = tracker.record_with_output(
+                original_cmd,
+                rtk_cmd,
+                0,
+                0,
+                elapsed_ms,
+                OutputTracking {
+                    contract: "exact".into(),
+                    exact_reason: Some(reason.into()),
+                    ..Default::default()
+                },
             );
         }
     }
@@ -1803,6 +1996,222 @@ mod tests {
     /// tests using separate locals don't actually serialize against each other
     /// and can race on the same global env var under parallel `cargo test`.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn command_column(
+        tracker: &Tracker,
+        column_name: &str,
+    ) -> Option<(String, bool, Option<String>)> {
+        let mut statement = tracker.conn.prepare("PRAGMA table_info(commands)").unwrap();
+        let columns = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)? != 0,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        columns
+            .into_iter()
+            .find_map(|(name, ty, not_null, default)| {
+                (name == column_name).then_some((ty, not_null, default))
+            })
+    }
+
+    fn assert_output_tracking_columns(tracker: &Tracker) {
+        assert_eq!(
+            command_column(tracker, "output_contract"),
+            Some(("TEXT".into(), true, Some("'legacy'".into())))
+        );
+        assert_eq!(
+            command_column(tracker, "exact_reason"),
+            Some(("TEXT".into(), false, None))
+        );
+        for name in [
+            "omitted_items",
+            "omitted_groups",
+            "recovery_created",
+            "filter_failed",
+        ] {
+            assert_eq!(
+                command_column(tracker, name),
+                Some(("INTEGER".into(), true, Some("0".into()))),
+                "unexpected schema for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn in_memory_schema_has_output_tracking_columns() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        assert_output_tracking_columns(&tracker);
+    }
+
+    #[test]
+    fn migrates_output_tracking_columns() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("pre-output-tracking.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE commands (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                original_cmd TEXT NOT NULL,
+                rtk_cmd TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                saved_tokens INTEGER NOT NULL,
+                savings_pct REAL NOT NULL,
+                exec_time_ms INTEGER DEFAULT 0,
+                project_path TEXT DEFAULT ''
+            );
+            INSERT INTO commands (
+                timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens,
+                saved_tokens, savings_pct, exec_time_ms, project_path
+            ) VALUES (
+                '2026-09-02T00:00:00Z', 'legacy command', 'rtk legacy',
+                100, 25, 75, 75.0, 5, 'D:\\src\\rtk'
+            );",
+        )
+        .unwrap();
+        drop(conn);
+
+        let tracker = Tracker::new_at_path_for_test(&db_path).unwrap();
+        assert_output_tracking_columns(&tracker);
+        let retained: (String, i64) = tracker
+            .conn
+            .query_row(
+                "SELECT original_cmd, input_tokens FROM commands WHERE rtk_cmd = 'rtk legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(retained, ("legacy command".into(), 100));
+    }
+
+    #[test]
+    fn record_with_output_persists_emission_metadata() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        tracker
+            .record_with_output(
+                "cargo test",
+                "rtk cargo test",
+                1_000,
+                300,
+                12,
+                OutputTracking {
+                    contract: "lossless".into(),
+                    exact_reason: Some("already-compact".into()),
+                    omitted_items: 17,
+                    omitted_groups: 3,
+                    recovery_created: true,
+                    filter_failed: true,
+                },
+            )
+            .unwrap();
+
+        let stored: (String, Option<String>, i64, i64, bool, bool) = tracker
+            .conn
+            .query_row(
+                "SELECT output_contract, exact_reason, omitted_items, omitted_groups,
+                        recovery_created, filter_failed
+                 FROM commands WHERE rtk_cmd = 'rtk cargo test'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            (
+                "lossless".into(),
+                Some("already-compact".into()),
+                17,
+                3,
+                true,
+                true
+            )
+        );
+    }
+
+    #[test]
+    fn residual_stats_rank_by_total_output_tokens() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        tracker.record("small", "rtk small", 1_000, 10, 1).unwrap();
+        tracker.record("large", "rtk large", 1_000, 400, 1).unwrap();
+        tracker.record("large", "rtk large", 1_000, 400, 1).unwrap();
+
+        let stats = tracker.get_residual_by_command(None).unwrap();
+        assert_eq!(stats[0].rtk_cmd, "rtk large");
+        assert_eq!(stats[0].output_tokens, 800);
+        assert_eq!(stats[0].weighted_savings_pct, 60.0);
+    }
+
+    #[test]
+    fn residual_stats_compute_weighted_savings_from_token_sums() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        tracker.record("mixed", "rtk mixed", 1_000, 100, 1).unwrap();
+        tracker.record("mixed", "rtk mixed", 100, 90, 1).unwrap();
+
+        let stats = tracker.get_residual_by_command(None).unwrap();
+        let mixed = stats.iter().find(|row| row.rtk_cmd == "rtk mixed").unwrap();
+        assert_eq!(mixed.input_tokens, 1_100);
+        assert_eq!(mixed.output_tokens, 190);
+        assert!((mixed.weighted_savings_pct - 82.727_272_727).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn residual_stats_count_exact_and_zero_savings_rows_separately() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        tracker
+            .record_with_output(
+                "status",
+                "rtk status",
+                0,
+                0,
+                1,
+                OutputTracking {
+                    contract: "exact".into(),
+                    exact_reason: Some("structured".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        tracker.record("status", "rtk status", 100, 100, 1).unwrap();
+
+        let stats = tracker.get_residual_by_command(None).unwrap();
+        let status = stats
+            .iter()
+            .find(|row| row.rtk_cmd == "rtk status")
+            .unwrap();
+        assert_eq!(status.count, 2);
+        assert_eq!(status.exact_count, 1);
+        assert_eq!(status.zero_savings_count, 1);
+        assert_eq!(status.weighted_savings_pct, 0.0);
+    }
+
+    #[test]
+    fn legacy_zero_token_passthrough_is_not_reported_as_full_savings() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        tracker.record("tag", "rtk tag", 0, 0, 1).unwrap();
+
+        let stats = tracker.get_residual_by_command(None).unwrap();
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].weighted_savings_pct, 0.0);
+        assert_eq!(stats[0].zero_savings_count, 0);
+        assert_eq!(stats[0].exact_count, 0);
+    }
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
@@ -1957,6 +2366,86 @@ mod tests {
         // savings_pct should be 0 for passthrough
         assert_eq!(pt.savings_pct, 0.0);
         assert_eq!(pt.saved_tokens, 0);
+
+        drop(tracker);
+        env::remove_var("RTK_DB_PATH");
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn timed_execution_track_output_records_metadata() {
+        use std::env;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let db_path = env::temp_dir().join(format!(
+            "rtk_test_timed_output_metadata_{}.db",
+            std::process::id()
+        ));
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
+        env::set_var("RTK_DB_PATH", &db_path);
+
+        let original_cmd = format!("semantic_track_test_{}", std::process::id());
+        let timer = TimedExecution::start();
+        timer.track_output(
+            &original_cmd,
+            "rtk semantic-track",
+            "raw command output",
+            "short",
+            OutputTracking {
+                contract: "ai_owned".into(),
+                omitted_items: 4,
+                recovery_created: true,
+                filter_failed: true,
+                ..Default::default()
+            },
+        );
+
+        let tracker = Tracker::new().unwrap();
+        let stored: (String, i64, bool, bool) = tracker
+            .conn
+            .query_row(
+                "SELECT output_contract, omitted_items, recovery_created, filter_failed
+                 FROM commands WHERE original_cmd = ?1 ORDER BY id DESC LIMIT 1",
+                params![original_cmd],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, ("ai_owned".into(), 4, true, true));
+
+        drop(tracker);
+        env::remove_var("RTK_DB_PATH");
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn timed_execution_track_exact_records_reason() {
+        use std::env;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let db_path = env::temp_dir().join(format!(
+            "rtk_test_timed_exact_reason_{}.db",
+            std::process::id()
+        ));
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
+        env::set_var("RTK_DB_PATH", &db_path);
+
+        let original_cmd = format!("exact_track_test_{}", std::process::id());
+        let timer = TimedExecution::start();
+        timer.track_exact(&original_cmd, "rtk exact-track", "structured");
+
+        let tracker = Tracker::new().unwrap();
+        let stored: (String, Option<String>, i64, i64) = tracker
+            .conn
+            .query_row(
+                "SELECT output_contract, exact_reason, input_tokens, output_tokens
+                 FROM commands WHERE original_cmd = ?1 ORDER BY id DESC LIMIT 1",
+                params![original_cmd],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, ("exact".into(), Some("structured".into()), 0, 0));
 
         drop(tracker);
         env::remove_var("RTK_DB_PATH");

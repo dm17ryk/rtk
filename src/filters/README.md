@@ -9,6 +9,10 @@ Files are concatenated alphabetically by `build.rs` into a single TOML blob embe
 
 TOML filters strip noise lines — they don't reformat output. The filtered result must still look like real command output (see [Design Philosophy](../../CONTRIBUTING.md#design-philosophy)). For the full TOML-vs-Rust decision criteria, see [CONTRIBUTING.md](../../CONTRIBUTING.md#toml-vs-rust-which-one).
 
+TOML is intentionally **line-oriented and migration-compatible**. `apply_filter()` keeps the existing string-to-string API output-compatible, while `apply_filter_with_info()` also returns exact loss metadata: the number of omitted items and groups, plus tail-recovery information when the omitted suffix can be addressed directly. New semantic parsers belong in Rust command modules; the TOML DSL remains the compatibility path for predictable line filtering.
+
+At runtime, the fallback route wraps the filtered string in an `AiDocument`, attaches the exact omission counts, renders it under the collection budget, and passes it to the same shared lossless emitter used by semantic Rust filters. Lossy output is emitted atomically only after a private, complete recovery artifact is ready. If recovery cannot be guaranteed, or the compact output plus its recovery command would be worse than the native output, RTK emits the native output instead. The child command's exit code remains authoritative throughout.
+
 TOML works well for commands with **predictable, line-by-line text output** where regex filtering achieves 60%+ savings:
 - Install/update logs (brew, composer, poetry) — strip `Using ...` / `Already installed` lines
 - System monitoring (df, ps, systemctl) — keep essential rows, drop headers/decorations
@@ -92,8 +96,11 @@ flowchart TD
         R["TomlFilterRegistry::load()\n1. .rtk/filters.toml\n2. ~/.config/rtk/filters.toml\n3. BUILTIN_TOML\n4. passthrough"] --> S
         S{"match_command\nmatches?"} -->|"no match"| T[["exec raw (passthrough)"]]
         S -->|"match"| U["exec command\ncapture stdout"]
-        U --> V["8-stage pipeline\nstrip_ansi → replace → match_output\n→ strip/keep_lines → truncate\n→ tail_lines → max_lines → on_empty"]
-        V --> W[["print filtered output + exit code"]]
+        U --> V["8-stage line pipeline\nstrip_ansi → replace → match_output\n→ strip/keep_lines → truncate\n→ tail_lines → max_lines → on_empty"]
+        V --> X["filtered string + exact Lossiness\nomitted items/groups + tail metadata"]
+        X --> Y["AiDocument::legacy\n+ Collection budget rendering"]
+        Y --> Z["shared lossless emitter\nrecoverable + never-worse guard"]
+        Z --> W[["stdout + output tracking\nnative exit code"]]
     end
 
     G --> H & J & L & R

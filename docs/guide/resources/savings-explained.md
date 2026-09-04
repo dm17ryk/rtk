@@ -75,11 +75,26 @@ If you need exact counts, run the raw and filtered output through your model's o
 
 `Save%` is the meaningful number. It is a byte ratio, and it is accurate as a ratio.
 
+## Residual output and weighted savings
+
+The migration dashboard prioritizes commands by the filtered output that still reaches the agent. For captured routes, **residual tokens** are the sum of the estimated output tokens:
+
+```text
+residual_tokens = sum(output_tokens)
+weighted_savings_pct = 100 * (1 - sum(output_tokens) / sum(input_tokens))
+```
+
+The weighted percentage is computed from the token sums, not by averaging percentages from individual runs. This gives high-volume output its proper influence and avoids a tiny command counting as much as a large one.
+
+Exact routes are different. Structured, interactive, binary, streaming, sensitive, or otherwise unknown output uses native passthrough, so RTK deliberately does not capture a residual size. The tracker retains each exact-route reason for a future surfaced aggregation, but the current `rtk gain` output does not yet show a per-reason breakdown. Their unavailable residual sizes do not become captured zero-savings output and therefore do not dilute the weighted efficiency computed from filtered-route token sums.
+
+As elsewhere in the dashboard, both `input_tokens` and `output_tokens` use the `bytes / 4` estimate. Residual totals and weighted percentages are therefore useful prioritization signals, not tokenizer- or billing-exact measurements.
+
 ## What RTK does not reduce
 
 - **Output tokens.** RTK never touches what the model writes.
 - **Your prompt, the system prompt, or conversation history.** These are input tokens RTK has no visibility into.
-- **Commands with no matching filter.** These pass through untouched and are tracked at 0% savings. See `rtk gain --history`.
+- **Exact command routes.** These pass through untouched and retain native I/O semantics. Their reason is persisted for pending reporting, but the current `rtk gain` views do not surface a per-reason breakdown because captured size is unavailable. See `rtk gain --history` for the currently exposed history fields.
 
 ## See also
 

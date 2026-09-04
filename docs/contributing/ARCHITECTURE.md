@@ -36,6 +36,30 @@
 4. **Fail-Safe**: If filtering fails, fall back to original output
 5. **Transparent**: Users can always see raw output with `-v` flags
 
+### AI Output Contract
+
+RTK separates command routes by the safety of transforming their output:
+
+- **Semantic**: safe human-readable text is parsed into an `AiDocument` and rendered deterministically under one of five `BudgetClass` limits: acknowledgement (128 estimated tokens), state (512), collection (1,024), diagnostic (2,048), or source (4,096).
+- **Legacy**: existing string filters remain output-compatible through `run_filtered()` while their command families await migration. New filtered routes must not use this API, and direct stdout is migration debt.
+- **Exact**: structured, interactive, binary, streaming, sensitive, and unknown output bypasses capture through `run_passthrough_with_reason(..., ExactReason)`. Native I/O is preserved and the reason is recorded.
+
+The semantic data flow places document construction, budget rendering, recovery, and tracking between command-specific filters and stdout:
+
+```text
+native stdout/stderr
+        |
+        v
+command parser/filter --> AiDocument --> budget renderer --> lossless emitter --> stdout
+                              |                |                   |
+                              |         exact omission counts      |
+                              +----------------+-------------------+
+                                               v
+                                      output-contract tracking
+```
+
+Parser failures are converted into a bounded recoverable `AiDocument`. For any lossy rendering, the emitter privately prepares a complete recovery artifact before exposing its command, commits the display atomically, and applies a final never-worse comparison. Native output is the fallback if bounded recovery cannot be guaranteed. These output decisions never override the child process's native exit status.
+
 ### Hook Architecture (v0.9.5+)
 
 > For the hook interception diagram and agent-specific JSON formats, see [TECHNICAL.md](TECHNICAL.md#32-hook-interception-command-rewriting) and [hooks/README.md](hooks/README.md).
@@ -96,27 +120,27 @@ Output captured:
 
          ↓
 
-Phase 4: FILTER
-───────────────
-git::format_git_output(stdout, "log", verbose)
+Phase 4: PARSE + RENDER
+───────────────────────
+parser(stdout) -> AiDocument {
+  status, facts, records, declared omissions
+}
 
-Strategy: Stats Extraction
-  • Count commits: 5
-  • Extract stats: +142/-89
-  • Compress: "5 commits, +142/-89"
-
-Filtered: 20 chars (96% reduction)
+render(document, BudgetClass::Collection)
+  • deterministic priority and ordering
+  • bounded at 1,024 estimated tokens
+  • exact omitted item/group counts
 
          ↓
 
-Phase 5: PRINT
-──────────────
-if verbose > 0 {
-    eprintln!("Git log summary:");  // Debug
-}
-println!("{}", colored_output);     // User output
+Phase 5: RECOVER + EMIT
+───────────────────────
+prepare_emission(raw, slug, rendered)
+  • lossless output: emit directly
+  • lossy output: privately reserve complete raw recovery
+  • final guard: use raw if compact + recovery is worse
 
-Terminal shows: "5 commits, +142/-89 ✓"
+emit_prepared(...) writes one selected representation to stdout
 
          ↓
 
@@ -126,7 +150,13 @@ tracking::track(
     original_cmd: "git log --oneline -5",
     rtk_cmd: "rtk git log --oneline -5",
     input: &raw_output,    // 500 chars
-    output: &filtered      // 20 chars
+    output: &emitted,      // exact bytes shown to the agent
+    contract: "ai_owned",
+    exact_reason: null,
+    omitted_items,
+    omitted_groups,
+    recovery_created,
+    filter_failed
 )
 
   ↓
@@ -137,7 +167,7 @@ SQLite INSERT:
   • savings_pct: 96.0
   • timestamp: now()
 
-Database: ~/.local/share/rtk/history.db
+The native child exit code is returned unchanged after tracking.
 ```
 
 ### Verbosity Levels
@@ -646,6 +676,14 @@ Flow:
    saved_tokens  = input_tokens - output_tokens
    savings_pct   = (saved / input) × 100.0
 
+   Residual rankings aggregate by command:
+   residual_tokens      = sum(output_tokens)
+   weighted_savings_pct = 100 × (1 - sum(output_tokens) / sum(input_tokens))
+
+   Exact routes do not have a captured residual size and do not dilute
+   filtered-route efficiency. ExactReason is persisted for future surfaced
+   aggregation; current gain views do not show a per-reason breakdown.
+
          ↓
 
 3. RECORD (tracking.rs:48-59)
@@ -658,8 +696,12 @@ Flow:
        output_tokens,  -- 5
        saved_tokens,   -- 120
        savings_pct,    -- 96.0
-       exec_time_ms    -- 15 (execution duration in milliseconds)
-   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       exec_time_ms,   -- 15 (execution duration in milliseconds)
+       output_contract,-- ai_owned, legacy, or exact
+       exact_reason,   -- structured/interactive/binary/streaming/sensitive/unknown
+       omitted_items, omitted_groups,
+       recovery_created, filter_failed
+   ) VALUES (...)
 
          ↓
 

@@ -1,5 +1,6 @@
 //! Building blocks shared across all RTK modules.
 
+pub mod ai_output;
 pub mod args_utils;
 pub mod config;
 pub mod constants;

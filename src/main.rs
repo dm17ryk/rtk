@@ -106,8 +106,11 @@ enum Commands {
     /// Read file with intelligent filtering
     Read {
         /// Files to read (supports multiple, like cat)
-        #[arg(required = true, num_args = 1..)]
+        #[arg(required_unless_present = "recovery", num_args = 1.., conflicts_with = "recovery")]
         files: Vec<PathBuf>,
+        /// Read a private lossless artifact by its shell-neutral recovery ID
+        #[arg(long, value_name = "ID", conflicts_with = "files")]
+        recovery: Option<String>,
         /// Filter: none (default, full content), minimal, aggressive
         #[arg(short, long, default_value = "none")]
         level: core::filter::FilterLevel,
@@ -1511,6 +1514,28 @@ fn run_bunx_tool(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
     }
 }
 
+fn toml_document(
+    filtered: &str,
+    loss: &core::toml_filter::Lossiness,
+) -> core::ai_output::AiDocument {
+    let document = core::ai_output::AiDocument::legacy(filtered);
+    match loss {
+        core::toml_filter::Lossiness::None => document,
+        core::toml_filter::Lossiness::Tail {
+            omitted_items,
+            omitted_groups,
+            ..
+        }
+        | core::toml_filter::Lossiness::Whole {
+            omitted_items,
+            omitted_groups,
+        } => document.with_omission(core::ai_output::Omission {
+            items: *omitted_items,
+            groups: *omitted_groups,
+        }),
+    }
+}
+
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -1588,40 +1613,29 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                 } else {
                     stdout_raw.to_string()
                 };
-                let success = output.status.success();
                 let (filtered, loss) =
                     core::toml_filter::apply_filter_with_info(filter, &combined_raw);
-                let lossy = !matches!(loss, core::toml_filter::Lossiness::None);
+                let rendered = core::ai_output::render(
+                    &toml_document(&filtered, &loss),
+                    core::ai_output::BudgetClass::Collection,
+                );
+                let prepared =
+                    core::ai_output::prepare_emission(&combined_raw, &raw_command, rendered, true);
+                let shown = prepared.as_str().to_string();
+                let emission_meta = prepared.meta();
+                core::runner::emit_prepared(&prepared);
 
-                let hint = if !success {
-                    core::tee::tee_and_hint(&combined_raw, &raw_command, exit_code)
-                } else {
-                    match &loss {
-                        core::toml_filter::Lossiness::None => None,
-                        core::toml_filter::Lossiness::Tail {
-                            tee_payload,
-                            tail_offset,
-                        } => {
-                            core::tee::force_tee_tail_hint(tee_payload, &raw_command, *tail_offset)
-                        }
-                        core::toml_filter::Lossiness::Whole => {
-                            core::tee::force_tee_hint(&combined_raw, &raw_command)
-                        }
-                    }
-                };
-
-                // Never emit an unrecoverable truncation marker: fall back to full raw.
-                let shown = if lossy && hint.is_none() {
-                    core::runner::emit_guarded(&combined_raw, None, &combined_raw)
-                } else {
-                    core::runner::emit_guarded(&filtered, hint.as_deref(), &combined_raw)
-                };
-
-                timer.track(
+                timer.track_output(
                     &raw_command,
                     &format!("rtk:toml {}", raw_command),
                     &combined_raw,
                     &shown,
+                    core::runner::output_tracking_from_emission(
+                        core::ai_output::OutputContract::AiOwned(
+                            core::ai_output::BudgetClass::Collection,
+                        ),
+                        emission_meta,
+                    ),
                 );
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
 
@@ -1645,7 +1659,11 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
 
         match status {
             Ok(s) => {
-                timer.track_passthrough(&raw_command, &format!("rtk fallback: {}", raw_command));
+                timer.track_exact(
+                    &raw_command,
+                    &format!("rtk fallback: {}", raw_command),
+                    core::ai_output::ExactReason::Unknown.as_str(),
+                );
 
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
 
@@ -1899,40 +1917,64 @@ fn run_cli() -> Result<i32> {
         // ISSUE #989: support multiple files (cat file1 file2 → rtk read file1 file2)
         Commands::Read {
             files,
+            recovery,
             level,
             max_lines,
             tail_lines,
             line_numbers,
         } => {
-            let mut had_error = false;
-            let mut stdin_seen = false;
-            for file in &files {
-                let result = if file == Path::new("-") {
-                    if stdin_seen {
-                        eprintln!("rtk: warning: stdin specified more than once");
-                        continue;
-                    }
-                    stdin_seen = true;
-                    read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)
-                } else {
-                    read::run(
-                        file,
+            if let Some(identifier) = recovery {
+                match core::tee::resolve_lossless_recovery(&identifier) {
+                    Some(file) => match read::run(
+                        &file,
                         level,
                         max_lines,
                         tail_lines,
                         line_numbers,
                         cli.verbose,
-                    )
-                };
-                if let Err(e) = result {
-                    eprintln!("cat: {}: {}", file.display(), e.root_cause());
-                    had_error = true;
+                    ) {
+                        Ok(()) => 0,
+                        Err(error) => {
+                            eprintln!("rtk: recovery {}: {}", identifier, error.root_cause());
+                            1
+                        }
+                    },
+                    None => {
+                        eprintln!("rtk: recovery artifact not found: {}", identifier);
+                        1
+                    }
                 }
-            }
-            if had_error {
-                1
             } else {
-                0
+                let mut had_error = false;
+                let mut stdin_seen = false;
+                for file in &files {
+                    let result = if file == Path::new("-") {
+                        if stdin_seen {
+                            eprintln!("rtk: warning: stdin specified more than once");
+                            continue;
+                        }
+                        stdin_seen = true;
+                        read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)
+                    } else {
+                        read::run(
+                            file,
+                            level,
+                            max_lines,
+                            tail_lines,
+                            line_numbers,
+                            cli.verbose,
+                        )
+                    };
+                    if let Err(e) = result {
+                        eprintln!("cat: {}: {}", file.display(), e.root_cause());
+                        had_error = true;
+                    }
+                }
+                if had_error {
+                    1
+                } else {
+                    0
+                }
             }
         }
 
@@ -3178,6 +3220,43 @@ mod tests {
     use super::*;
     use clap::Parser;
     use std::cell::Cell;
+
+    #[test]
+    fn lossy_toml_document_preserves_text_and_exact_counts() {
+        let loss = core::toml_filter::Lossiness::Whole {
+            omitted_items: 299,
+            omitted_groups: 0,
+        };
+        let rendered = core::ai_output::render(
+            &toml_document("line", &loss),
+            core::ai_output::BudgetClass::Collection,
+        );
+        assert_eq!(rendered.text, "line");
+        assert_eq!(
+            rendered.omission,
+            Some(core::ai_output::Omission {
+                items: 299,
+                groups: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn read_accepts_a_shell_neutral_recovery_identifier_without_a_path() {
+        let identifier = "123_0_cargo_test.lossless.log";
+        let cli =
+            Cli::try_parse_from(["rtk", "read", "-l", "none", "--recovery", identifier]).unwrap();
+
+        match cli.command {
+            Commands::Read {
+                files, recovery, ..
+            } => {
+                assert!(files.is_empty());
+                assert_eq!(recovery.as_deref(), Some(identifier));
+            }
+            _ => panic!("expected read command"),
+        }
+    }
 
     #[test]
     fn test_git_commit_single_message() {

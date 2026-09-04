@@ -259,12 +259,35 @@ pub struct StreamResult {
     pub raw_stdout: String,
     pub raw_stderr: String,
     pub filtered: String,
+    /// True only when every captured byte was retained for semantic parsing.
+    /// False means capture failed open and the native byte stream was replayed.
+    pub capture_complete: bool,
+    raw_stdout_bytes: Vec<u8>,
+    raw_stderr_bytes: Vec<u8>,
+    observed_output_bytes: usize,
 }
 
 impl StreamResult {
     #[cfg(test)]
     pub fn success(&self) -> bool {
         self.exit_code == 0
+    }
+
+    pub fn write_captured_stdout(&self) -> io::Result<()> {
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(&self.raw_stdout_bytes)?;
+        stdout.flush()
+    }
+
+    pub fn write_captured_stderr(&self) -> io::Result<()> {
+        let mut stderr = io::stderr().lock();
+        stderr.write_all(&self.raw_stderr_bytes)?;
+        stderr.flush()
+    }
+
+    /// Native stdout and stderr bytes observed before a capture failed open.
+    pub fn observed_output_bytes(&self) -> usize {
+        self.observed_output_bytes
     }
 }
 
@@ -284,6 +307,166 @@ pub fn status_to_exit_code(status: std::process::ExitStatus) -> i32 {
 
 // ISSUE #897: ChildGuard RAII prevents zombie processes that caused kernel panic
 pub const RAW_CAP: usize = 10_485_760; // 10 MiB
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapturedStream {
+    Stdout,
+    Stderr,
+}
+
+struct CaptureChunk {
+    stream: CapturedStream,
+    bytes: Vec<u8>,
+}
+
+struct CompleteCapture {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Retains an ordered capture only while both streams remain within the
+/// semantic-memory limit. The first overflow atomically replays everything
+/// already retained and permanently forwards all subsequent chunks, so a
+/// truncated buffer is never exposed as complete semantic input.
+struct CaptureAccumulator {
+    per_stream_cap: usize,
+    stdout_len: usize,
+    stderr_len: usize,
+    observed_bytes: usize,
+    chunks: Vec<CaptureChunk>,
+    replaying: bool,
+}
+
+impl CaptureAccumulator {
+    fn new(per_stream_cap: usize) -> Self {
+        Self {
+            per_stream_cap,
+            stdout_len: 0,
+            stderr_len: 0,
+            observed_bytes: 0,
+            chunks: Vec::new(),
+            replaying: false,
+        }
+    }
+
+    fn push<F>(&mut self, stream: CapturedStream, bytes: Vec<u8>, replay: &mut F) -> io::Result<()>
+    where
+        F: FnMut(CapturedStream, &[u8]) -> io::Result<()>,
+    {
+        self.observed_bytes = self.observed_bytes.saturating_add(bytes.len());
+        if self.replaying {
+            return replay(stream, &bytes);
+        }
+
+        let retained = match stream {
+            CapturedStream::Stdout => self.stdout_len,
+            CapturedStream::Stderr => self.stderr_len,
+        };
+        if retained.saturating_add(bytes.len()) > self.per_stream_cap {
+            self.replaying = true;
+            for chunk in self.chunks.drain(..) {
+                replay(chunk.stream, &chunk.bytes)?;
+            }
+            replay(stream, &bytes)?;
+            return Ok(());
+        }
+
+        match stream {
+            CapturedStream::Stdout => self.stdout_len += bytes.len(),
+            CapturedStream::Stderr => self.stderr_len += bytes.len(),
+        }
+        self.chunks.push(CaptureChunk { stream, bytes });
+        Ok(())
+    }
+
+    fn fail_open<F>(&mut self, replay: &mut F) -> io::Result<()>
+    where
+        F: FnMut(CapturedStream, &[u8]) -> io::Result<()>,
+    {
+        if self.replaying {
+            return Ok(());
+        }
+        self.replaying = true;
+        for chunk in self.chunks.drain(..) {
+            replay(chunk.stream, &chunk.bytes)?;
+        }
+        Ok(())
+    }
+
+    fn is_complete(&self) -> bool {
+        !self.replaying
+    }
+
+    fn observed_bytes(&self) -> usize {
+        self.observed_bytes
+    }
+
+    fn into_complete(self) -> Option<CompleteCapture> {
+        if self.replaying {
+            return None;
+        }
+        let mut stdout = Vec::with_capacity(self.stdout_len);
+        let mut stderr = Vec::with_capacity(self.stderr_len);
+        for chunk in self.chunks {
+            match chunk.stream {
+                CapturedStream::Stdout => stdout.extend_from_slice(&chunk.bytes),
+                CapturedStream::Stderr => stderr.extend_from_slice(&chunk.bytes),
+            }
+        }
+        Some(CompleteCapture { stdout, stderr })
+    }
+}
+
+enum CaptureMessage {
+    Chunk(CaptureChunk),
+    ReadFailed(CapturedStream, io::Error),
+}
+
+const CAPTURE_QUEUE_DEPTH: usize = 8;
+
+fn capture_channel() -> (
+    mpsc::SyncSender<CaptureMessage>,
+    mpsc::Receiver<CaptureMessage>,
+) {
+    mpsc::sync_channel(CAPTURE_QUEUE_DEPTH)
+}
+
+fn spawn_capture_thread<R: Read + Send + 'static>(
+    mut reader: R,
+    stream: CapturedStream,
+    sender: mpsc::SyncSender<CaptureMessage>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    let chunk = CaptureChunk {
+                        stream,
+                        bytes: buffer[..read].to_vec(),
+                    };
+                    if sender.send(CaptureMessage::Chunk(chunk)).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(CaptureMessage::ReadFailed(stream, error));
+                    break;
+                }
+            }
+        }
+    })
+}
+
+fn decode_captured_lines(bytes: &[u8]) -> String {
+    let mut decoded = String::new();
+    for line in read_lines_lossy(bytes) {
+        decoded.push_str(&line);
+        decoded.push('\n');
+    }
+    decoded
+}
 
 pub fn run_streaming(
     cmd: &mut Command,
@@ -308,6 +491,10 @@ pub fn run_streaming(
             raw_stdout: String::new(),
             raw_stderr: String::new(),
             filtered: String::new(),
+            capture_complete: true,
+            raw_stdout_bytes: Vec::new(),
+            raw_stderr_bytes: Vec::new(),
+            observed_output_bytes: 0,
         });
     }
 
@@ -330,6 +517,7 @@ pub fn run_streaming(
     }
 
     let is_streaming = matches!(stdout_mode, FilterMode::Streaming(_));
+    let is_capture_only = matches!(stdout_mode, FilterMode::CaptureOnly);
 
     let mut child = ChildGuard(cmd.spawn().context("Failed to spawn process")?);
 
@@ -363,9 +551,13 @@ pub fn run_streaming(
     let stderr = child.0.stderr.take().context("No child stderr handle")?;
     let mut raw_stdout = String::new();
     let mut raw_stderr = String::new();
+    let mut raw_stdout_bytes = Vec::new();
+    let mut raw_stderr_bytes = Vec::new();
+    let mut observed_output_bytes = 0;
     let mut filtered = String::new();
     let mut capped_out = false;
     let mut capped_err = false;
+    let mut capture_complete = true;
     let mut saved_filter: Option<Box<dyn StreamFilter + '_>> = None;
     let mut filter_fd_is_stderr = false;
 
@@ -451,6 +643,54 @@ pub fn run_streaming(
 
         stdout_thread.join().ok();
         stderr_thread.join().ok();
+    } else if is_capture_only {
+        let (sender, receiver) = capture_channel();
+        let stdout_thread = spawn_capture_thread(stdout, CapturedStream::Stdout, sender.clone());
+        let stderr_thread = spawn_capture_thread(stderr, CapturedStream::Stderr, sender);
+        let stdout_handle = io::stdout();
+        let mut native_stdout = stdout_handle.lock();
+        let stderr_handle = io::stderr();
+        let mut native_stderr = stderr_handle.lock();
+        let mut capture = CaptureAccumulator::new(RAW_CAP);
+
+        {
+            let mut replay = |stream: CapturedStream, bytes: &[u8]| match stream {
+                CapturedStream::Stdout => native_stdout.write_all(bytes),
+                CapturedStream::Stderr => native_stderr.write_all(bytes),
+            };
+            for message in receiver {
+                match message {
+                    CaptureMessage::Chunk(chunk) => {
+                        capture.push(chunk.stream, chunk.bytes, &mut replay)?;
+                    }
+                    CaptureMessage::ReadFailed(stream, error) => {
+                        eprintln!("[rtk] warning: {stream:?} capture failed: {error}");
+                        capture.fail_open(&mut replay)?;
+                    }
+                }
+            }
+            if stdout_thread.join().is_err() {
+                eprintln!("[rtk] warning: stdout reader thread panicked");
+                capture.fail_open(&mut replay)?;
+            }
+            if stderr_thread.join().is_err() {
+                eprintln!("[rtk] warning: stderr reader thread panicked");
+                capture.fail_open(&mut replay)?;
+            }
+        }
+
+        capture_complete = capture.is_complete();
+        observed_output_bytes = capture.observed_bytes();
+        if let Some(complete) = capture.into_complete() {
+            raw_stdout = decode_captured_lines(&complete.stdout);
+            raw_stderr = decode_captured_lines(&complete.stderr);
+            filtered = raw_stdout.clone();
+            raw_stdout_bytes = complete.stdout;
+            raw_stderr_bytes = complete.stderr;
+        } else {
+            native_stdout.flush()?;
+            native_stderr.flush()?;
+        }
     } else {
         let stderr_thread = std::thread::spawn(move || -> String {
             let mut raw_err = String::new();
@@ -519,6 +759,9 @@ pub fn run_streaming(
             eprintln!("[rtk] warning: stderr reader thread panicked: {:?}", e);
             String::new()
         });
+        capture_complete = !(capped_out || capped_err);
+        raw_stdout_bytes = raw_stdout.as_bytes().to_vec();
+        raw_stderr_bytes = raw_stderr.as_bytes().to_vec();
     }
     if let Some(t) = stdin_thread {
         t.join().ok();
@@ -550,6 +793,10 @@ pub fn run_streaming(
         raw_stdout,
         raw_stderr,
         filtered,
+        capture_complete,
+        raw_stdout_bytes,
+        raw_stderr_bytes,
+        observed_output_bytes,
     })
 }
 
@@ -736,6 +983,176 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn semantic_capture_queue_applies_backpressure() {
+        let (sender, _receiver) = capture_channel();
+        for _ in 0..CAPTURE_QUEUE_DEPTH {
+            sender
+                .try_send(CaptureMessage::Chunk(CaptureChunk {
+                    stream: CapturedStream::Stdout,
+                    bytes: vec![b'x'],
+                }))
+                .unwrap();
+        }
+
+        assert!(matches!(
+            sender.try_send(CaptureMessage::Chunk(CaptureChunk {
+                stream: CapturedStream::Stdout,
+                bytes: vec![b'x'],
+            })),
+            Err(mpsc::TrySendError::Full(_))
+        ));
+    }
+
+    #[test]
+    fn capture_over_raw_cap_stdout_replays_every_byte_and_disables_semantics() {
+        let mut capture = CaptureAccumulator::new(RAW_CAP);
+        let first = vec![b'a'; RAW_CAP];
+        let tail = b"stdout-tail".to_vec();
+        let mut replayed = Vec::new();
+
+        capture
+            .push(CapturedStream::Stdout, first, &mut |stream, bytes| {
+                replayed.push((stream, bytes.to_vec()));
+                Ok(())
+            })
+            .unwrap();
+        capture
+            .push(
+                CapturedStream::Stdout,
+                tail.clone(),
+                &mut |stream, bytes| {
+                    replayed.push((stream, bytes.to_vec()));
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert!(!capture.is_complete());
+        assert!(capture.into_complete().is_none());
+        assert_eq!(replayed.len(), 2);
+        assert_eq!(replayed[0].0, CapturedStream::Stdout);
+        assert_eq!(replayed[0].1.len(), RAW_CAP);
+        assert!(replayed[0].1.iter().all(|byte| *byte == b'a'));
+        assert_eq!(replayed[1], (CapturedStream::Stdout, tail));
+    }
+
+    #[test]
+    fn capture_over_raw_cap_stderr_replays_every_byte_and_disables_semantics() {
+        let mut capture = CaptureAccumulator::new(RAW_CAP);
+        let first = vec![b'e'; RAW_CAP];
+        let tail = b"stderr-tail".to_vec();
+        let mut replayed = Vec::new();
+
+        capture
+            .push(CapturedStream::Stderr, first, &mut |stream, bytes| {
+                replayed.push((stream, bytes.to_vec()));
+                Ok(())
+            })
+            .unwrap();
+        capture
+            .push(
+                CapturedStream::Stderr,
+                tail.clone(),
+                &mut |stream, bytes| {
+                    replayed.push((stream, bytes.to_vec()));
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert!(!capture.is_complete());
+        assert!(capture.into_complete().is_none());
+        assert_eq!(replayed.len(), 2);
+        assert_eq!(replayed[0].0, CapturedStream::Stderr);
+        assert_eq!(replayed[0].1.len(), RAW_CAP);
+        assert!(replayed[0].1.iter().all(|byte| *byte == b'e'));
+        assert_eq!(replayed[1], (CapturedStream::Stderr, tail));
+    }
+
+    #[test]
+    fn capture_one_line_over_raw_cap_is_replayed_whole() {
+        let mut capture = CaptureAccumulator::new(RAW_CAP);
+        let one_long_line = vec![b'L'; RAW_CAP + 1];
+        let mut replayed = Vec::new();
+
+        capture
+            .push(
+                CapturedStream::Stdout,
+                one_long_line,
+                &mut |stream, bytes| {
+                    replayed.push((stream, bytes.to_vec()));
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert!(!capture.is_complete());
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].0, CapturedStream::Stdout);
+        assert_eq!(replayed[0].1.len(), RAW_CAP + 1);
+        assert!(replayed[0].1.iter().all(|byte| *byte == b'L'));
+    }
+
+    #[test]
+    fn capture_fail_open_replays_mixed_streams_in_observed_order() {
+        let mut capture = CaptureAccumulator::new(4);
+        let mut replayed = Vec::new();
+        for (stream, bytes) in [
+            (CapturedStream::Stdout, b"out".to_vec()),
+            (CapturedStream::Stderr, b"err".to_vec()),
+            (CapturedStream::Stdout, b"overflow".to_vec()),
+            (CapturedStream::Stderr, b"after".to_vec()),
+        ] {
+            capture
+                .push(stream, bytes, &mut |stream, bytes| {
+                    replayed.push((stream, bytes.to_vec()));
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        assert_eq!(
+            replayed,
+            vec![
+                (CapturedStream::Stdout, b"out".to_vec()),
+                (CapturedStream::Stderr, b"err".to_vec()),
+                (CapturedStream::Stdout, b"overflow".to_vec()),
+                (CapturedStream::Stderr, b"after".to_vec()),
+            ]
+        );
+        assert!(!capture.is_complete());
+        assert!(capture.into_complete().is_none());
+    }
+
+    #[test]
+    fn capture_read_failure_keeps_count_for_bytes_seen_before_fail_open() {
+        let mut capture = CaptureAccumulator::new(64);
+        let bytes = b"read-before-error".to_vec();
+        let mut replayed = Vec::new();
+
+        capture
+            .push(
+                CapturedStream::Stdout,
+                bytes.clone(),
+                &mut |stream, bytes| {
+                    replayed.push((stream, bytes.to_vec()));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        capture
+            .fail_open(&mut |stream, bytes| {
+                replayed.push((stream, bytes.to_vec()));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(capture.observed_bytes(), bytes.len());
+        assert_eq!(replayed, vec![(CapturedStream::Stdout, bytes)]);
+        assert!(!capture.is_complete());
+    }
+
+    #[test]
     fn test_exit_code_zero() {
         let status = success_command().status().unwrap();
         assert_eq!(status_to_exit_code(status), 0);
@@ -809,8 +1226,15 @@ pub(crate) mod tests {
             raw_stdout: String::new(),
             raw_stderr: String::new(),
             filtered: String::new(),
+            capture_complete: true,
+            raw_stdout_bytes: Vec::new(),
+            raw_stderr_bytes: Vec::new(),
+            observed_output_bytes: 0,
         };
         assert!(r.success());
+        assert!(r.capture_complete);
+        r.write_captured_stdout().unwrap();
+        r.write_captured_stderr().unwrap();
     }
 
     #[test]
@@ -821,6 +1245,10 @@ pub(crate) mod tests {
             raw_stdout: String::new(),
             raw_stderr: String::new(),
             filtered: String::new(),
+            capture_complete: true,
+            raw_stdout_bytes: Vec::new(),
+            raw_stderr_bytes: Vec::new(),
+            observed_output_bytes: 0,
         };
         assert!(!r.success());
     }
@@ -833,6 +1261,10 @@ pub(crate) mod tests {
             raw_stdout: String::new(),
             raw_stderr: String::new(),
             filtered: String::new(),
+            capture_complete: true,
+            raw_stdout_bytes: Vec::new(),
+            raw_stderr_bytes: Vec::new(),
+            observed_output_bytes: 0,
         };
         assert!(!r.success());
     }
@@ -914,7 +1346,7 @@ pub(crate) mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn test_run_streaming_raw_cap_at_10mb() {
+    fn test_run_streaming_stdout_over_cap_never_exposes_truncated_semantic_input() {
         // nosemgrep: interpreter-execution
         let mut cmd = Command::new("sh");
         // ~11 MiB of 80-char lines (fast: fewer lines than `yes | head -6M`)
@@ -923,20 +1355,14 @@ pub(crate) mod tests {
             "dd if=/dev/zero bs=1024 count=11264 2>/dev/null | tr '\\0' 'a' | fold -w 80",
         ]);
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
-        assert!(
-            result.raw.len() <= 10_485_760 + 100,
-            "raw should be capped at ~10 MiB, got {} bytes",
-            result.raw.len()
-        );
-        assert!(
-            result.raw.len() > 1_000_000,
-            "Should have captured significant data"
-        );
+        assert!(!result.capture_complete);
+        assert!(result.raw.is_empty());
+        assert!(result.raw_stdout.is_empty());
     }
 
     #[cfg(not(windows))]
     #[test]
-    fn test_run_streaming_stderr_cap_at_10mb() {
+    fn test_run_streaming_stderr_over_cap_never_exposes_truncated_semantic_input() {
         // nosemgrep: interpreter-execution
         let mut cmd = Command::new("sh");
         // ~11 MiB on stderr, nothing on stdout
@@ -945,12 +1371,9 @@ pub(crate) mod tests {
             "dd if=/dev/zero bs=1024 count=11264 2>/dev/null | tr '\\0' 'a' | fold -w 80 1>&2",
         ]);
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
-        // raw = raw_stdout + raw_stderr; stdout is empty so raw ≈ stderr size
-        assert!(
-            result.raw.len() <= RAW_CAP + 200,
-            "stderr in raw should be capped at ~10 MiB, got {} bytes",
-            result.raw.len()
-        );
+        assert!(!result.capture_complete);
+        assert!(result.raw.is_empty());
+        assert!(result.raw_stderr.is_empty());
     }
 
     #[test]
