@@ -36,6 +36,13 @@ impl std::fmt::Display for FilterLevel {
 
 pub trait FilterStrategy {
     fn filter(&self, content: &str, lang: &Language) -> String;
+    fn filter_lines(&self, content: &str, lang: &Language) -> Vec<FilteredLine>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilteredLine {
+    pub original_line: usize,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +158,17 @@ impl FilterStrategy for NoFilter {
     fn filter(&self, content: &str, _lang: &Language) -> String {
         content.to_string()
     }
+
+    fn filter_lines(&self, content: &str, _lang: &Language) -> Vec<FilteredLine> {
+        content
+            .lines()
+            .enumerate()
+            .map(|(index, text)| FilteredLine {
+                original_line: index + 1,
+                text: text.to_string(),
+            })
+            .collect()
+    }
 }
 
 pub struct MinimalFilter;
@@ -224,6 +242,92 @@ impl FilterStrategy for MinimalFilter {
         // Normalize multiple blank lines to max 2
         let result = MULTIPLE_BLANK_LINES.replace_all(&result, "\n\n");
         result.trim().to_string()
+    }
+
+    fn filter_lines(&self, content: &str, lang: &Language) -> Vec<FilteredLine> {
+        let patterns = lang.comment_patterns();
+        let mut result = Vec::new();
+        let mut in_block_comment = false;
+        let mut in_docstring = false;
+
+        for (index, line) in content.lines().enumerate() {
+            let original_line = index + 1;
+            let trimmed = line.trim();
+
+            if let (Some(start), Some(end)) = (patterns.block_start, patterns.block_end) {
+                if !in_docstring
+                    && trimmed.contains(start)
+                    && !trimmed.starts_with(patterns.doc_block_start.unwrap_or("###"))
+                {
+                    in_block_comment = true;
+                }
+                if in_block_comment {
+                    if trimmed.contains(end) {
+                        in_block_comment = false;
+                    }
+                    continue;
+                }
+            }
+
+            if *lang == Language::Python && trimmed.starts_with("\"\"\"") {
+                in_docstring = !in_docstring;
+                result.push(FilteredLine {
+                    original_line,
+                    text: line.to_string(),
+                });
+                continue;
+            }
+
+            if in_docstring {
+                result.push(FilteredLine {
+                    original_line,
+                    text: line.to_string(),
+                });
+                continue;
+            }
+
+            if let Some(line_comment) = patterns.line {
+                if trimmed.starts_with(line_comment) {
+                    if patterns
+                        .doc_line
+                        .is_some_and(|doc| trimmed.starts_with(doc))
+                    {
+                        result.push(FilteredLine {
+                            original_line,
+                            text: line.to_string(),
+                        });
+                    }
+                    continue;
+                }
+            }
+
+            if trimmed.is_empty() {
+                if !result.is_empty()
+                    && result
+                        .last()
+                        .is_some_and(|previous| !previous.text.trim().is_empty())
+                {
+                    result.push(FilteredLine {
+                        original_line,
+                        text: String::new(),
+                    });
+                }
+                continue;
+            }
+
+            result.push(FilteredLine {
+                original_line,
+                text: line.to_string(),
+            });
+        }
+
+        while result
+            .last()
+            .is_some_and(|line| line.text.trim().is_empty())
+        {
+            result.pop();
+        }
+        result
     }
 }
 
@@ -306,6 +410,57 @@ impl FilterStrategy for AggressiveFilter {
         }
 
         result.trim().to_string()
+    }
+
+    fn filter_lines(&self, content: &str, lang: &Language) -> Vec<FilteredLine> {
+        if *lang == Language::Data {
+            return MinimalFilter.filter_lines(content, lang);
+        }
+
+        let minimal = MinimalFilter.filter_lines(content, lang);
+        let mut result = Vec::new();
+        let mut brace_depth = 0;
+        let mut in_impl_body = false;
+
+        for line in minimal {
+            let trimmed = line.text.trim();
+
+            if IMPORT_PATTERN.is_match(trimmed) || FUNC_SIGNATURE.is_match(trimmed) {
+                in_impl_body = FUNC_SIGNATURE.is_match(trimmed);
+                if in_impl_body {
+                    brace_depth = 0;
+                }
+                result.push(line);
+                continue;
+            }
+
+            let open_braces = trimmed.matches('{').count();
+            let close_braces = trimmed.matches('}').count();
+
+            if in_impl_body {
+                brace_depth += open_braces as i32;
+                brace_depth -= close_braces as i32;
+                if brace_depth <= 1 && (trimmed == "{" || trimmed == "}" || trimmed.ends_with('{'))
+                {
+                    result.push(line.clone());
+                }
+                if brace_depth <= 0 {
+                    in_impl_body = false;
+                }
+                continue;
+            }
+
+            if trimmed.starts_with("const ")
+                || trimmed.starts_with("static ")
+                || trimmed.starts_with("let ")
+                || trimmed.starts_with("pub const ")
+                || trimmed.starts_with("pub static ")
+            {
+                result.push(line);
+            }
+        }
+
+        result
     }
 }
 
@@ -465,6 +620,30 @@ fn main() {
         let result = filter.filter(code, &Language::Rust);
         assert!(!result.contains("// This is a comment"));
         assert!(result.contains("fn main()"));
+    }
+
+    #[test]
+    fn minimal_filter_lines_retains_original_line_numbers() {
+        let input = "// ignored\nfn kept() {}\n\n// ignored too\nlet value = 1;\n";
+        let lines = MinimalFilter.filter_lines(input, &Language::Rust);
+
+        assert_eq!(
+            lines,
+            vec![
+                FilteredLine {
+                    original_line: 2,
+                    text: "fn kept() {}".into(),
+                },
+                FilteredLine {
+                    original_line: 3,
+                    text: "".into(),
+                },
+                FilteredLine {
+                    original_line: 5,
+                    text: "let value = 1;".into(),
+                },
+            ]
+        );
     }
 
     // --- truncation accuracy ---
