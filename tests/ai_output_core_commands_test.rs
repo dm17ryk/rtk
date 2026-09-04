@@ -164,6 +164,9 @@ fn core_command_fixtures_are_ai_owned_smaller_and_recoverable() {
         .collect::<String>();
     std::fs::write(&matches, &match_text).unwrap();
     let matches = matches.to_str().unwrap();
+    if Command::new("rg").arg("--version").status().is_err() {
+        return;
+    }
     let native = Command::new("rg")
         .args(["NEEDLE", matches])
         .output()
