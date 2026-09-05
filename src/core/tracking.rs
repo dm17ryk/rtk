@@ -218,13 +218,19 @@ pub struct GainSummary {
     pub total_output: usize,
     /// Total tokens saved (input - output)
     pub total_saved: usize,
-    /// Average savings percentage across all commands
+    /// Weighted savings percentage across all recorded commands, including
+    /// exact/proxy executions.
     pub avg_savings_pct: f64,
+    /// Weighted savings percentage for commands RTK filtered or otherwise
+    /// supported. Exact/proxy executions are excluded.
+    pub supported_avg_savings_pct: f64,
     /// Total execution time across all commands (milliseconds)
     pub total_time_ms: u64,
     /// Average execution time per command (milliseconds)
     pub avg_time_ms: u64,
-    /// Top 10 commands by tokens saved: (cmd, count, saved, avg_pct, avg_time_ms)
+    /// Commands by tokens saved: (cmd, count, saved, avg_pct, avg_time_ms).
+    /// The default summary keeps the historical top-10 limit; callers that
+    /// render their own viewport can request all command groups.
     pub by_command: Vec<(String, usize, usize, f64, u64)>,
     /// Last 30 days of activity: (date, saved_tokens)
     pub by_day: Vec<(String, usize)>,
@@ -911,15 +917,29 @@ impl Tracker {
     /// When `project_path` is `Some`, matches the exact working directory
     /// or any subdirectory (prefix match with path separator).
     pub fn get_summary_filtered(&self, project_path: Option<&str>) -> Result<GainSummary> {
+        self.get_summary_filtered_with_command_limit(project_path, Some(10))
+    }
+
+    /// Get summary statistics with an optional command-result limit.
+    ///
+    /// `Some(n)` preserves the historical top-command behavior. `None` is
+    /// used by the dashboard, which applies its own terminal-height limit.
+    pub fn get_summary_filtered_with_command_limit(
+        &self,
+        project_path: Option<&str>,
+        command_limit: Option<usize>,
+    ) -> Result<GainSummary> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut total_commands = 0usize;
         let mut total_input = 0usize;
         let mut total_output = 0usize;
         let mut total_saved = 0usize;
+        let mut supported_input = 0usize;
+        let mut supported_saved = 0usize;
         let mut total_time_ms = 0u64;
 
         let mut stmt = self.conn.prepare(
-            "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms
+            "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms, output_contract
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)", // added: project filter
         )?;
@@ -931,20 +951,30 @@ impl Tracker {
                 row.get::<_, i64>(1)? as usize,
                 row.get::<_, i64>(2)? as usize,
                 row.get::<_, i64>(3)? as u64,
+                row.get::<_, String>(4)?,
             ))
         })?;
 
         for row in rows {
-            let (input, output, saved, time_ms) = row?;
+            let (input, output, saved, time_ms, contract) = row?;
             total_commands += 1;
             total_input += input;
             total_output += output;
             total_saved += saved;
+            if contract != "exact" {
+                supported_input += input;
+                supported_saved += saved;
+            }
             total_time_ms += time_ms;
         }
 
         let avg_savings_pct = if total_input > 0 {
             (total_saved as f64 / total_input as f64) * 100.0
+        } else {
+            0.0
+        };
+        let supported_avg_savings_pct = if supported_input > 0 {
+            (supported_saved as f64 / supported_input as f64) * 100.0
         } else {
             0.0
         };
@@ -955,7 +985,7 @@ impl Tracker {
             0
         };
 
-        let by_command = self.get_by_command(project_path)?; // added: pass project filter
+        let by_command = self.get_by_command(project_path, command_limit)?; // added: pass project filter
         let by_day = self.get_by_day(project_path)?; // added: pass project filter
 
         Ok(GainSummary {
@@ -964,6 +994,7 @@ impl Tracker {
             total_output,
             total_saved,
             avg_savings_pct,
+            supported_avg_savings_pct,
             total_time_ms,
             avg_time_ms,
             by_command,
@@ -974,16 +1005,20 @@ impl Tracker {
     fn get_by_command(
         &self,
         project_path: Option<&str>, // added
+        command_limit: Option<usize>,
     ) -> Result<Vec<CommandStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
-        let mut stmt = self.conn.prepare(
+        let limit_clause = command_limit
+            .map(|limit| format!(" LIMIT {limit}"))
+            .unwrap_or_default();
+        let query = format!(
             "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY rtk_cmd
-             ORDER BY SUM(saved_tokens) DESC
-             LIMIT 10", // added: project filter in WHERE
-        )?;
+             ORDER BY SUM(saved_tokens) DESC{limit_clause}"
+        );
+        let mut stmt = self.conn.prepare(&query)?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
@@ -2675,6 +2710,46 @@ mod tests {
             failures.total, 0,
             "parse_failures table should be empty after reset"
         );
+    }
+
+    #[test]
+    fn summary_separates_global_and_supported_efficiency_and_can_load_all_commands() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        tracker
+            .record("supported", "rtk supported", 100, 20, 1)
+            .unwrap();
+        tracker
+            .record_with_output(
+                "proxy",
+                "rtk proxy",
+                100,
+                100,
+                1,
+                OutputTracking {
+                    contract: "exact".into(),
+                    exact_reason: Some("proxy".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        for index in 0..12 {
+            tracker
+                .record(
+                    &format!("command {index}"),
+                    &format!("rtk command-{index}"),
+                    10,
+                    5,
+                    1,
+                )
+                .unwrap();
+        }
+
+        let summary = tracker
+            .get_summary_filtered_with_command_limit(None, None)
+            .unwrap();
+        assert!((summary.avg_savings_pct - 43.75).abs() < f64::EPSILON);
+        assert!((summary.supported_avg_savings_pct - (140.0 / 220.0 * 100.0)).abs() < 0.000_001);
+        assert_eq!(summary.by_command.len(), 14);
     }
 
     #[test]

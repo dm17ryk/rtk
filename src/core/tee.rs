@@ -444,7 +444,29 @@ pub(crate) fn reserve_lossless_tee_file(
     max_file_size: usize,
     max_files: usize,
 ) -> Option<LosslessTeeReservation> {
-    if raw.len() > max_file_size || raw.is_empty() || max_files == 0 {
+    reserve_lossless_tee_file_with_limit(raw, command_slug, tee_dir, Some(max_file_size), max_files)
+}
+
+/// Reserve a complete lossless artifact without applying the truncating tee
+/// size limit. Semantic emitters use this when the configured ordinary tee
+/// limit would otherwise force an unbounded raw-output fallback.
+pub(crate) fn reserve_lossless_tee_file_unbounded(
+    raw: &str,
+    command_slug: &str,
+    tee_dir: &std::path::Path,
+    max_files: usize,
+) -> Option<LosslessTeeReservation> {
+    reserve_lossless_tee_file_with_limit(raw, command_slug, tee_dir, None, max_files)
+}
+
+fn reserve_lossless_tee_file_with_limit(
+    raw: &str,
+    command_slug: &str,
+    tee_dir: &std::path::Path,
+    max_file_size: Option<usize>,
+    max_files: usize,
+) -> Option<LosslessTeeReservation> {
+    if raw.is_empty() || max_files == 0 || max_file_size.is_some_and(|limit| raw.len() > limit) {
         return None;
     }
     create_tee_dir(tee_dir)?;
@@ -493,13 +515,20 @@ pub fn reserve_lossless_tee(raw: &str, command_slug: &str) -> Option<LosslessTee
     }
     let tee_dir = get_tee_dir(&config)?;
     let max_files = lossless_tee_max_files_for_test(config.tee.max_files);
-    reserve_lossless_tee_file(
+    let bounded = reserve_lossless_tee_file(
         raw,
         command_slug,
         &tee_dir,
         config.tee.max_file_size,
         max_files,
-    )
+    );
+    if bounded.is_some() || raw.len() <= config.tee.max_file_size {
+        bounded
+    } else {
+        // A lossless artifact cannot honor the ordinary truncation limit: a
+        // truncated file would make the emitted recovery command misleading.
+        reserve_lossless_tee_file_unbounded(raw, command_slug, &tee_dir, max_files)
+    }
 }
 
 fn resolve_lossless_recovery_file(identifier: &str, tee_dir: &std::path::Path) -> Option<PathBuf> {

@@ -898,6 +898,35 @@ mod tests {
         assert!(!prepared.recovery_created());
     }
 
+    #[test]
+    fn oversized_lossy_emission_uses_complete_recovery_instead_of_raw_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let raw = "native output 漢字🙂\n".repeat(1_000);
+        let rendered = RenderedOutput {
+            text: "short".to_string(),
+            omission: Some(Omission {
+                items: 1,
+                groups: 0,
+            }),
+            parser_failed: false,
+        };
+
+        let prepared = prepare_emission_with(&raw, "rg", rendered, true, |raw, slug| {
+            crate::core::tee::reserve_lossless_tee_file_unbounded(raw, slug, temp.path(), 20)
+        });
+
+        assert!(prepared.recovery_created());
+        assert!(prepared
+            .as_str()
+            .contains("recover=rtk read -l none --recovery "));
+        let artifact = match &prepared {
+            PreparedEmission::Recovered { commit, .. } => commit.path().to_path_buf(),
+            PreparedEmission::Plain { .. } => panic!("expected a recovery artifact"),
+        };
+        drop(prepared);
+        assert_eq!(std::fs::read_to_string(artifact).unwrap(), raw);
+    }
+
     fn long_record(path: &str) -> String {
         format!("{path}:1 match={}", "v".repeat(260))
     }

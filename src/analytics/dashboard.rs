@@ -254,7 +254,7 @@ fn draw_overview(frame: &mut Frame, data: &DashboardData, area: Rect) {
         .split(area);
     let summary = &data.summary;
     let display = summary_display(summary);
-    let bar_width = chunks[0].width.saturating_sub(26).min(60) as usize;
+    let bar_width = chunks[0].width.saturating_sub(34).min(60) as usize;
     let stats = vec![
         Line::from(vec![
             metric_span("Commands: ", display.commands),
@@ -273,19 +273,8 @@ fn draw_overview(frame: &mut Frame, data: &DashboardData, area: Rect) {
             metric_span("Average: ", display.average_time),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "  Efficiency: ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("[{}]", bar(summary.avg_savings_pct, bar_width)),
-                Style::default().fg(Color::Green),
-            ),
-            Span::raw(format!(" {:.1}%", summary.avg_savings_pct)),
-        ]),
+        efficiency_line("global", summary.avg_savings_pct, bar_width),
+        efficiency_line("supported", summary.supported_avg_savings_pct, bar_width),
     ];
     frame.render_widget(
         Paragraph::new(stats).block(panel("Savings Overview")),
@@ -512,6 +501,22 @@ fn metric_span(label: &'static str, value: String) -> Span<'static> {
     )
 }
 
+fn efficiency_line(scope: &'static str, pct: f64, bar_width: usize) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("  Efficiency ({scope}): "),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("[{}]", bar(pct, bar_width)),
+            Style::default().fg(Color::Green),
+        ),
+        Span::raw(format!(" {:.1}%", pct)),
+    ])
+}
+
 fn health_line(label: &'static str, value: &str, color: Color) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("  {label}"), Style::default().fg(Color::Cyan)),
@@ -542,6 +547,14 @@ fn plain_dashboard_text(data: &DashboardData, project: bool) -> String {
         format!(
             "Execution:     {} total / {} average",
             display.total_time, display.average_time
+        ),
+        format!(
+            "Efficiency (global):    {:.1}%",
+            data.summary.avg_savings_pct
+        ),
+        format!(
+            "Efficiency (supported): {:.1}%",
+            data.summary.supported_avg_savings_pct
         ),
         String::new(),
         "Highest impact commands:".to_string(),
@@ -575,7 +588,7 @@ impl DashboardData {
         let tracker = Tracker::new().context("Failed to initialize tracking database")?;
         let project_path = project.then(current_project_path_string);
         let summary = tracker
-            .get_summary_filtered(project_path.as_deref())
+            .get_summary_filtered_with_command_limit(project_path.as_deref(), None)
             .context("Failed to load dashboard statistics")?;
         Ok(Self {
             summary,
@@ -647,6 +660,7 @@ mod tests {
                 total_output: 20,
                 total_saved: 80,
                 avg_savings_pct: 80.0,
+                supported_avg_savings_pct: 80.0,
                 total_time_ms: 50,
                 avg_time_ms: 25,
                 by_command: vec![
@@ -755,6 +769,47 @@ mod tests {
         assert!(activity.contains("Daily Activity"));
         assert!(!activity.contains("Savings Overview"));
         assert!(!activity.contains("Highest Impact Commands"));
+    }
+
+    #[test]
+    fn overview_shows_global_and_supported_efficiency() {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| draw(frame, 0, &fixture(), None))
+            .expect("overview frame");
+        let rendered = backend_text(&terminal);
+
+        assert!(rendered.contains("Efficiency (global)"));
+        assert!(rendered.contains("Efficiency (supported)"));
+    }
+
+    #[test]
+    fn commands_and_activity_use_all_available_rows() {
+        let mut data = fixture();
+        data.summary.by_command = (0..20)
+            .map(|index| (format!("rtk command-{index}"), 1, 20, 20.0, 25))
+            .collect();
+
+        let backend = TestBackend::new(110, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| draw(frame, 1, &data, None))
+            .expect("commands frame");
+        let commands = backend_text(&terminal);
+        assert!(commands.contains("rtk command-15"));
+        assert!(!commands.contains("rtk command-16"));
+
+        data.summary.by_day = (0..20)
+            .map(|index| (format!("2026-08-{index:02}"), index + 1))
+            .collect();
+        terminal
+            .draw(|frame| draw(frame, 2, &data, None))
+            .expect("activity frame");
+        let activity = backend_text(&terminal);
+        assert!(activity.contains("2026-08-19"));
+        assert!(!activity.contains("2026-08-03"));
     }
 
     #[test]
