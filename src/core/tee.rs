@@ -1047,8 +1047,12 @@ mod tests {
             reserve_lossless_tee_file("complete raw output", "cargo test", &directory, 1_024, 20)
                 .unwrap();
         let identifier = reservation.recovery_identifier().to_string();
-        let expected = reservation.committed_path.clone();
         reservation.commit_hint().unwrap();
+        // Resolution canonicalizes both sides; this matters on macOS (`/tmp`
+        // is commonly a symlink) and Windows (the temp path may use an 8.3
+        // alias).
+        let expected =
+            normalize_canonical_path(directory.join(&identifier).canonicalize().unwrap());
 
         assert_eq!(
             resolve_lossless_recovery_file(&identifier, &directory),
