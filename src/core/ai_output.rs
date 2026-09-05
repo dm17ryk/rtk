@@ -259,6 +259,10 @@ pub struct EmissionMeta {
     pub recovery_created: bool,
     pub parser_failed: bool,
     pub used_raw_fallback: bool,
+    /// Stable runtime error kind, when emission could not complete its normal
+    /// recovery/filtering contract. Kept as a string literal so it can be
+    /// persisted without allocating on the hot path.
+    pub runtime_error: Option<&'static str>,
 }
 
 impl PreparedEmission {
@@ -303,7 +307,7 @@ pub fn prepare_emission_with_baseline(
         command_slug,
         rendered,
         trailing_newline,
-        crate::core::tee::reserve_lossless_tee,
+        crate::core::tee::reserve_lossless_tee_for_emission,
     )
 }
 
@@ -315,7 +319,13 @@ fn prepare_emission_with<F>(
     reserve: F,
 ) -> PreparedEmission
 where
-    F: FnOnce(&str, &str) -> Option<crate::core::tee::LosslessTeeReservation>,
+    F: FnOnce(
+        &str,
+        &str,
+    ) -> Result<
+        crate::core::tee::LosslessTeeReservation,
+        crate::core::tee::LosslessTeeReservationError,
+    >,
 {
     prepare_emission_with_fallback(raw, raw, command_slug, rendered, trailing_newline, reserve)
 }
@@ -329,9 +339,16 @@ fn prepare_emission_with_fallback<F>(
     reserve: F,
 ) -> PreparedEmission
 where
-    F: FnOnce(&str, &str) -> Option<crate::core::tee::LosslessTeeReservation>,
+    F: FnOnce(
+        &str,
+        &str,
+    ) -> Result<
+        crate::core::tee::LosslessTeeReservation,
+        crate::core::tee::LosslessTeeReservationError,
+    >,
 {
     let parser_failed = rendered.parser_failed;
+    let parser_error = parser_failed.then_some("filter_failed");
     let raw_fallback = frame_payload(fallback_baseline, trailing_newline);
     let Some(omission) = rendered.omission else {
         let candidate = frame_payload(&rendered.text, trailing_newline);
@@ -347,20 +364,56 @@ where
             meta: EmissionMeta {
                 parser_failed,
                 used_raw_fallback,
+                runtime_error: parser_error,
                 ..EmissionMeta::default()
             },
         };
     };
 
-    let Some(reservation) = reserve(raw, command_slug) else {
-        return PreparedEmission::Plain {
-            output: raw_fallback,
-            meta: EmissionMeta {
-                parser_failed,
-                used_raw_fallback: true,
-                ..EmissionMeta::default()
-            },
-        };
+    let reservation = match reserve(raw, command_slug) {
+        Ok(reservation) => reservation,
+        Err(crate::core::tee::LosslessTeeReservationError::Oversized) => {
+            let body = rendered.text.trim_end_matches(['\r', '\n']);
+            let compact = frame_payload(
+                &format!(
+                    "{body}\nomitted items={} groups={} recovery=unavailable",
+                    omission.items, omission.groups
+                ),
+                trailing_newline,
+            );
+            if strictly_smaller(&raw_fallback, &compact) {
+                return PreparedEmission::Plain {
+                    output: compact,
+                    meta: EmissionMeta {
+                        omitted_items: omission.items,
+                        omitted_groups: omission.groups,
+                        parser_failed,
+                        runtime_error: Some("oversized_output_recovery_unavailable"),
+                        ..EmissionMeta::default()
+                    },
+                };
+            }
+            return PreparedEmission::Plain {
+                output: raw_fallback,
+                meta: EmissionMeta {
+                    parser_failed,
+                    used_raw_fallback: true,
+                    runtime_error: Some("oversized_output_recovery_unavailable"),
+                    ..EmissionMeta::default()
+                },
+            };
+        }
+        Err(crate::core::tee::LosslessTeeReservationError::Unavailable) => {
+            return PreparedEmission::Plain {
+                output: raw_fallback,
+                meta: EmissionMeta {
+                    parser_failed,
+                    used_raw_fallback: true,
+                    runtime_error: Some("recovery_unavailable"),
+                    ..EmissionMeta::default()
+                },
+            };
+        }
     };
     let recovery = reservation.recovery_command();
     let body = rendered.text.trim_end_matches(['\r', '\n']);
@@ -377,6 +430,7 @@ where
         recovery_created: true,
         parser_failed,
         used_raw_fallback: false,
+        runtime_error: parser_error,
     };
     match reservation.commit_output_if_better(&raw_fallback, candidate) {
         Some(commit) => PreparedEmission::Recovered { commit, meta },
@@ -385,6 +439,7 @@ where
             meta: EmissionMeta {
                 parser_failed,
                 used_raw_fallback: true,
+                runtime_error: parser_error,
                 ..EmissionMeta::default()
             },
         },
@@ -839,7 +894,9 @@ mod tests {
             parser_failed: false,
         };
 
-        let prepared = prepare_emission_with(raw, "test", rendered, true, |_, _| None);
+        let prepared = prepare_emission_with(raw, "test", rendered, true, |_, _| {
+            Err(crate::core::tee::LosslessTeeReservationError::Unavailable)
+        });
 
         assert_eq!(prepared.as_str(), "short\n");
     }
@@ -875,6 +932,7 @@ mod tests {
         let raw = "native line\n".repeat(400);
         let prepared = prepare_emission_with(&raw, "cargo test", rendered, true, |raw, slug| {
             crate::core::tee::reserve_lossless_tee_file(raw, slug, temp.path(), 64_000, 20)
+                .ok_or(crate::core::tee::LosslessTeeReservationError::Unavailable)
         });
         let shown = prepared.as_str();
         assert!(shown.contains("omitted items=14 groups=3 recover=rtk read -l none "));
@@ -893,9 +951,39 @@ mod tests {
             }),
             parser_failed: false,
         };
-        let prepared = prepare_emission_with(&raw, "test", rendered, true, |_, _| None);
+        let prepared = prepare_emission_with(&raw, "test", rendered, true, |_, _| {
+            Err(crate::core::tee::LosslessTeeReservationError::Unavailable)
+        });
         assert_eq!(prepared.as_str(), raw);
         assert!(!prepared.recovery_created());
+    }
+
+    #[test]
+    fn oversized_lossy_emission_stays_compact_without_unbounded_recovery() {
+        let raw = "native output 漢字🙂\n".repeat(1_000);
+        let rendered = RenderedOutput {
+            text: "short".to_string(),
+            omission: Some(Omission {
+                items: 1,
+                groups: 0,
+            }),
+            parser_failed: false,
+        };
+
+        let prepared = prepare_emission_with(&raw, "rg", rendered, true, |_, _| {
+            Err(crate::core::tee::LosslessTeeReservationError::Oversized)
+        });
+
+        assert_eq!(
+            prepared.as_str(),
+            "short\nomitted items=1 groups=0 recovery=unavailable\n"
+        );
+        assert!(!prepared.recovery_created());
+        assert!(!prepared.meta().used_raw_fallback);
+        assert_eq!(
+            prepared.meta().runtime_error,
+            Some("oversized_output_recovery_unavailable")
+        );
     }
 
     fn long_record(path: &str) -> String {

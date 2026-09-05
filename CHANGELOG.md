@@ -5,6 +5,36 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.46.1-dev.8] (2026-09-05)
+
+### Bug Fixes
+
+* honor the configured tee size limit without unbounded recovery artifacts
+* persist runtime fallback errors and exclude errored executions from dashboard metrics
+* account for exact proxy and passthrough traffic in global efficiency
+
+### Dashboard
+
+* bound command aggregation to the terminal viewport and reload after resize
+
+## [0.46.1-dev.9] (2026-09-05)
+
+### Tests
+
+* align exact-traffic integration coverage with neutral residual accounting
+
+## [0.46.1-dev.7] (2026-09-05)
+
+### Bug Fixes
+
+* preserve complete recovery artifacts for oversized filtered output instead of
+  falling back to emitting the entire native payload
+
+### Dashboard
+
+* show global efficiency including exact/proxy traffic alongside supported-command efficiency
+* fill Commands and Activity tables to the available terminal height
+
 ## [0.44.1](https://github.com/rtk-ai/rtk/compare/v0.44.0...v0.44.1) (2026-07-28)
 
 

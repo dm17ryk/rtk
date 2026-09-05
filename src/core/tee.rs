@@ -292,6 +292,12 @@ pub struct LosslessTeeReservation {
     committed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LosslessTeeReservationError {
+    Oversized,
+    Unavailable,
+}
+
 /// A selected lossy CMD display whose recovery artifact remains protected
 /// until the caller has written its hint to stdout.
 pub struct LosslessTeeCommit {
@@ -444,7 +450,17 @@ pub(crate) fn reserve_lossless_tee_file(
     max_file_size: usize,
     max_files: usize,
 ) -> Option<LosslessTeeReservation> {
-    if raw.len() > max_file_size || raw.is_empty() || max_files == 0 {
+    reserve_lossless_tee_file_with_limit(raw, command_slug, tee_dir, max_file_size, max_files)
+}
+
+fn reserve_lossless_tee_file_with_limit(
+    raw: &str,
+    command_slug: &str,
+    tee_dir: &std::path::Path,
+    max_file_size: usize,
+    max_files: usize,
+) -> Option<LosslessTeeReservation> {
+    if raw.is_empty() || max_files == 0 || raw.len() > max_file_size {
         return None;
     }
     create_tee_dir(tee_dir)?;
@@ -482,16 +498,20 @@ pub(crate) fn reserve_lossless_tee_file(
 }
 
 /// Reserve a complete recovery artifact using the configured directory and
-/// retention policy. Dropping the reservation removes an unselected artifact.
-pub fn reserve_lossless_tee(raw: &str, command_slug: &str) -> Option<LosslessTeeReservation> {
+/// size/retention limits. Oversized output is reported separately so semantic
+/// emitters can stay compact without silently retaining an unbounded payload.
+pub(crate) fn reserve_lossless_tee_for_emission(
+    raw: &str,
+    command_slug: &str,
+) -> Result<LosslessTeeReservation, LosslessTeeReservationError> {
     if std::env::var("RTK_TEE").ok().as_deref() == Some("0") || raw.is_empty() {
-        return None;
+        return Err(LosslessTeeReservationError::Unavailable);
     }
-    let config = Config::load().ok()?;
+    let config = Config::load().map_err(|_| LosslessTeeReservationError::Unavailable)?;
     if !config.tee.enabled {
-        return None;
+        return Err(LosslessTeeReservationError::Unavailable);
     }
-    let tee_dir = get_tee_dir(&config)?;
+    let tee_dir = get_tee_dir(&config).ok_or(LosslessTeeReservationError::Unavailable)?;
     let max_files = lossless_tee_max_files_for_test(config.tee.max_files);
     reserve_lossless_tee_file(
         raw,
@@ -500,6 +520,17 @@ pub fn reserve_lossless_tee(raw: &str, command_slug: &str) -> Option<LosslessTee
         config.tee.max_file_size,
         max_files,
     )
+    .ok_or(if raw.len() > config.tee.max_file_size {
+        LosslessTeeReservationError::Oversized
+    } else {
+        LosslessTeeReservationError::Unavailable
+    })
+}
+
+/// Reserve a complete recovery artifact using the configured directory and
+/// retention policy. Dropping the reservation removes an unselected artifact.
+pub fn reserve_lossless_tee(raw: &str, command_slug: &str) -> Option<LosslessTeeReservation> {
+    reserve_lossless_tee_for_emission(raw, command_slug).ok()
 }
 
 fn resolve_lossless_recovery_file(identifier: &str, tee_dir: &std::path::Path) -> Option<PathBuf> {
