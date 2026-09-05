@@ -86,6 +86,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install ripgrep
+        shell: pwsh
+        run: |
+          if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
+            choco install ripgrep --no-progress --yes
+          }
       - uses: Swatinem/rust-cache@v2
       - name: Build and smoke-test native command paths
         shell: pwsh
