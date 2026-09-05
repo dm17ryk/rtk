@@ -7,10 +7,77 @@ use std::process::Command;
 fn contains_rtk_invocation(command: &str) -> bool {
     command
         .split(['&', '|', ';'])
-        .filter_map(|segment| segment.split_whitespace().next())
-        .map(|token| token.trim_matches(['"', '\'']))
-        .map(|token| token.rsplit(['/', '\\']).next().unwrap_or(token))
-        .any(|token| matches!(token, "rtk" | "rtk.exe"))
+        .any(|segment| contains_rtk_command(shell_words(segment)))
+}
+
+fn shell_words(segment: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+
+    for character in segment.chars() {
+        match (quote, character) {
+            (Some(active), character) if character == active => quote = None,
+            (None, '\'' | '"') => quote = Some(character),
+            (None, character) if character.is_whitespace() => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            (_, character) => current.push(character),
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn contains_rtk_command(words: Vec<String>) -> bool {
+    let mut index = 0;
+    if words.first().is_some_and(|word| word == "env") {
+        index = 1;
+        while let Some(word) = words.get(index) {
+            if word == "--" {
+                index += 1;
+                break;
+            }
+            if word == "-u" || word == "--unset" {
+                index = index.saturating_add(2);
+                continue;
+            }
+            if word.starts_with('-') {
+                index += 1;
+                continue;
+            }
+            break;
+        }
+    }
+
+    while let Some(word) = words.get(index) {
+        if is_shell_assignment(word) {
+            index += 1;
+        } else {
+            break;
+        }
+    }
+
+    let Some(program) = words.get(index) else {
+        return false;
+    };
+    let program = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    matches!(program, "rtk" | "rtk.exe")
+}
+
+fn is_shell_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    let mut characters = name.chars();
+    matches!(
+        characters.next(),
+        Some('_' | 'A'..='Z' | 'a'..='z')
+    ) && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
 fn build_shell_command(command: &str) -> Command {
@@ -63,6 +130,9 @@ mod tests {
             r#"C:\\Tools\\rtk.exe read file.txt"#,
             "echo before && rtk rg pattern file.txt",
             "echo before & \"C:/Tools/rtk.exe\" read file.txt",
+            "FOO=bar rtk git status",
+            "env RTK_TEE=0 rtk read file.txt",
+            "env -i -- RTK_TEE=0 rtk read file.txt",
         ] {
             assert!(contains_rtk_invocation(command), "{command}");
         }

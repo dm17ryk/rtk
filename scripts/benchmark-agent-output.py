@@ -10,17 +10,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
 
+def split_command(command: str) -> list[str]:
+    """Split a command using the quoting rules of the host shell."""
+    return shlex.split(command, posix=os.name != "nt")
+
+
 def run_command(command: str | None) -> tuple[bytes, int]:
     if not command:
         return b"", 0
     completed = subprocess.run(
-        shlex.split(command, posix=False),
+        split_command(command),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,

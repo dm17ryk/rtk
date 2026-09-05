@@ -428,7 +428,7 @@ pub struct ErrorCommandStats {
 /// call. Bump this whenever `run_schema_migrations` gains a new statement; a stale
 /// `user_version` triggers exactly one re-run of the full migration sequence, then
 /// the pragma is updated so subsequent opens skip straight past it.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Create all tables/indexes, run column migrations, and stamp `user_version` to
 /// `SCHEMA_VERSION` for the on-disk tracker DB.
@@ -569,6 +569,23 @@ fn run_schema_migrations(conn: &Connection) -> Result<()> {
     )?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_hook_decisions_timestamp ON hook_decisions(timestamp)",
+        [],
+    )?;
+    // Older databases were protected by a non-atomic SELECT-then-INSERT in
+    // record_hook_decision. Keep the oldest row for each identity before the
+    // unique index makes concurrent duplicate writes impossible.
+    conn.execute(
+        "DELETE FROM hook_decisions
+         WHERE id NOT IN (
+             SELECT MIN(id)
+             FROM hook_decisions
+             GROUP BY session_id, tool_use_id, decision
+         )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_hook_decisions_identity
+         ON hook_decisions(session_id, tool_use_id, decision)",
         [],
     )?;
     let _ = conn.execute(
@@ -992,19 +1009,8 @@ impl Tracker {
         rewritten_cmd: Option<&str>,
         rtk_version: &str,
     ) -> Result<()> {
-        let already_recorded: bool = self.conn.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM hook_decisions
-                WHERE session_id = ?1 AND tool_use_id = ?2 AND decision = ?3
-            )",
-            params![session_id, tool_use_id, decision.as_str()],
-            |row| row.get(0),
-        )?;
-        if already_recorded {
-            return Ok(());
-        }
         self.conn.execute(
-            "INSERT INTO hook_decisions (timestamp, session_id, tool_use_id, project_path, raw_cmd, decision, rewritten_cmd, rtk_version)
+            "INSERT OR IGNORE INTO hook_decisions (timestamp, session_id, tool_use_id, project_path, raw_cmd, decision, rewritten_cmd, rtk_version)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 Utc::now().to_rfc3339(),
@@ -3400,6 +3406,54 @@ mod tests {
         assert_eq!(raw_cmd, "git status");
         assert_eq!(rewritten_cmd.as_deref(), Some("rtk git status"));
         assert_eq!(rtk_version, "0.42.4");
+    }
+
+    #[test]
+    fn test_hook_decision_identity_is_unique_and_recording_is_idempotent() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+
+        tracker
+            .record_hook_decision(
+                "session-1",
+                "toolu_duplicate",
+                "",
+                "git status",
+                HookOutcome::Allow,
+                Some("rtk git status"),
+                "0.42.4",
+            )
+            .expect("first decision should be recorded");
+        tracker
+            .record_hook_decision(
+                "session-1",
+                "toolu_duplicate",
+                "/changed",
+                "different command",
+                HookOutcome::Allow,
+                None,
+                "different-version",
+            )
+            .expect("duplicate decision should be ignored");
+
+        let count: i64 = tracker
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM hook_decisions WHERE session_id = ?1 AND tool_use_id = ?2 AND decision = ?3",
+                params!["session-1", "toolu_duplicate", "allow"],
+                |row| row.get(0),
+            )
+            .expect("decision count should be readable");
+        assert_eq!(count, 1);
+
+        let unique_index: i64 = tracker
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_index_list('hook_decisions') WHERE name = 'idx_hook_decisions_identity' AND \"unique\" = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("unique hook decision index should be readable");
+        assert_eq!(unique_index, 1);
     }
 
     #[test]

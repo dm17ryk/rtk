@@ -30,12 +30,22 @@ pub fn run_tool(program: &str, args: &[String], verbose: u8) -> Result<i32> {
 }
 
 fn requires_exact_output(program: &str, args: &[String]) -> bool {
-    if program.eq_ignore_ascii_case("cmake")
-        && args
+    if program.eq_ignore_ascii_case("cmake") {
+        if args
             .iter()
             .any(|arg| arg == "-P" || arg == "--trace-expand")
-    {
-        return true;
+        {
+            return true;
+        }
+        if args
+            .iter()
+            .any(|arg| arg.strip_prefix("--trace-format=") == Some("json-v1"))
+            || args
+                .windows(2)
+                .any(|window| window[0] == "--trace-format" && window[1] == "json-v1")
+        {
+            return true;
+        }
     }
     args.iter().any(|arg| {
         arg == "--xml"
@@ -118,6 +128,14 @@ mod tests {
         assert!(requires_exact_output(
             "cmake",
             &["-P".into(), "script.cmake".into()]
+        ));
+        assert!(requires_exact_output(
+            "cmake",
+            &["--trace".into(), "--trace-format=json-v1".into()]
+        ));
+        assert!(requires_exact_output(
+            "cmake",
+            &["--trace-format".into(), "json-v1".into()]
         ));
         assert!(requires_exact_output("cppcheck", &["--xml".into()]));
         assert!(!requires_exact_output(

@@ -711,6 +711,7 @@ fn read_recovery_page(
     let mut first_line = None;
     let mut last_line = None;
     let mut output = Vec::new();
+    let mut output_lines = Vec::new();
     let mut has_more = false;
 
     while let Some(line) = read_bounded_recovery_line(
@@ -734,6 +735,11 @@ fn read_recovery_page(
         first_line.get_or_insert(line_number);
         last_line = Some(line_number);
         output.extend_from_slice(&rendered);
+        output_lines.push(
+            String::from_utf8_lossy(&rendered)
+                .trim_end_matches(['\r', '\n'])
+                .to_string(),
+        );
         has_more |= line.truncated;
         if last_line
             .is_some_and(|last| last.saturating_sub(first_line.unwrap_or(last)) + 1 >= max_lines)
@@ -753,11 +759,21 @@ fn read_recovery_page(
         anyhow::bail!("recovery page is empty or starts after the end of the artifact");
     };
     let last_line = last_line.expect("first recovery line implies last line");
+    let redacted_lines = redact_sensitive_lines(&output_lines);
+    let line_ending = if output.windows(2).any(|bytes| bytes == b"\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut content = redacted_lines.join(line_ending);
+    if output.ends_with(b"\n") {
+        content.push_str(line_ending);
+    }
     let mut result = json!({
         "recovery_id": recovery_id,
         "start_line": first_line,
         "end_line": last_line,
-        "content": redact_sensitive(&String::from_utf8_lossy(&output)),
+        "content": content,
         "has_more": has_more
     });
     if has_more {
@@ -1007,6 +1023,22 @@ fn rpc_error(id: Option<Value>, code: i32, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_page_redaction_preserves_line_boundaries() {
+        let file = tempfile::NamedTempFile::new().expect("temp recovery file");
+        std::fs::write(file.path(), "token=secret\nnext=value\n").expect("write recovery file");
+
+        let page =
+            read_recovery_page("recovery", file.path(), None, None, 2).expect("read recovery page");
+        let content = page["content"].as_str().expect("content string");
+
+        assert_eq!(page["start_line"], 1);
+        assert_eq!(page["end_line"], 2);
+        assert_eq!(content.lines().count(), 2);
+        assert_eq!(content.matches("\n").count(), 2);
+        assert!(!content.contains("secret"));
+    }
 
     #[test]
     fn initialize_returns_protocol_and_server_info() {

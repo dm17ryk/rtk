@@ -415,28 +415,41 @@ fn collect_codex_records(
         .or_else(|| object.get("id"))
         .and_then(|value| value.as_str());
 
+    let name = object.get("name").and_then(|value| value.as_str());
     if matches!(
         record_type,
         "function_call" | "tool_call" | "function_call_item" | "tool_use"
-    ) {
-        let name = object.get("name").and_then(|value| value.as_str());
-        if name
-            .is_some_and(|name| matches!(name, "shell_command" | "run_command" | "Bash" | "bash"))
-        {
-            let command = object
-                .get("arguments")
-                .or_else(|| object.get("input"))
-                .and_then(codex_command)
-                .filter(|command| !command.trim().is_empty());
-            if let (Some(call_id), Some(command)) = (call_id, command) {
-                pending.push((call_id.to_string(), command, *sequence_index));
-                *sequence_index += 1;
+    ) && name
+        .is_some_and(|name| matches!(name, "shell_command" | "run_command" | "Bash" | "bash"))
+    {
+        let command = object
+            .get("arguments")
+            .or_else(|| object.get("input"))
+            .and_then(codex_command)
+            .filter(|command| !command.trim().is_empty());
+        if let (Some(call_id), Some(command)) = (call_id, command) {
+            pending.push((call_id.to_string(), command, *sequence_index));
+            *sequence_index += 1;
+        }
+    }
+    if record_type == "custom_tool_call" && name == Some("exec") {
+        let commands = object
+            .get("input")
+            .or_else(|| object.get("arguments"))
+            .map(codex_custom_commands)
+            .unwrap_or_default();
+        if let Some(call_id) = call_id {
+            for command in commands {
+                if !command.trim().is_empty() {
+                    pending.push((call_id.to_string(), command, *sequence_index));
+                    *sequence_index += 1;
+                }
             }
         }
     }
     if matches!(
         record_type,
-        "function_call_output" | "tool_result" | "function_output"
+        "function_call_output" | "tool_result" | "function_output" | "custom_tool_call_output"
     ) {
         if let Some(call_id) = call_id {
             let output = object
@@ -471,18 +484,124 @@ fn codex_command(value: &serde_json::Value) -> Option<String> {
             .or_else(|| Some(text.clone())),
         serde_json::Value::Object(object) => object
             .get("command")
+            .or_else(|| object.get("cmd"))
             .and_then(|command| command.as_str())
             .map(str::to_string),
         _ => None,
     }
 }
 
+fn codex_custom_commands(value: &serde_json::Value) -> Vec<String> {
+    match value {
+        serde_json::Value::String(text) => {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) {
+                let commands = codex_custom_commands(&parsed);
+                if !commands.is_empty() {
+                    return commands;
+                }
+            }
+            let commands = extract_js_exec_commands(text);
+            if !commands.is_empty() {
+                commands
+            } else if text.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![text.clone()]
+            }
+        }
+        serde_json::Value::Object(object) => object
+            .get("command")
+            .or_else(|| object.get("cmd"))
+            .and_then(|command| command.as_str())
+            .map(|command| vec![command.to_string()])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn extract_js_exec_commands(source: &str) -> Vec<String> {
+    let marker = "tools.exec_command";
+    let mut commands = Vec::new();
+    let mut search_from = 0;
+    while let Some(relative_start) = source[search_from..].find(marker) {
+        let start = search_from + relative_start + marker.len();
+        let end = source[start..]
+            .find(marker)
+            .map_or(source.len(), |relative_end| start + relative_end);
+        if let Some(command) = find_js_property_string(&source[start..end], "cmd") {
+            commands.push(command);
+        }
+        search_from = start;
+    }
+    commands
+}
+
+fn find_js_property_string(source: &str, property: &str) -> Option<String> {
+    for (index, _) in source.match_indices(property) {
+        let previous_is_identifier = source[..index]
+            .chars()
+            .next_back()
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+        let next_is_identifier = source[index + property.len()..]
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+        if previous_is_identifier || next_is_identifier {
+            continue;
+        }
+        let after_property = source[index + property.len()..].trim_start();
+        let Some(after_colon) = after_property.strip_prefix(':').map(str::trim_start) else {
+            continue;
+        };
+        if let Some(command) = parse_js_string(after_colon) {
+            return Some(command);
+        }
+    }
+    None
+}
+
+fn parse_js_string(source: &str) -> Option<String> {
+    let quote = source.chars().next()?;
+    if !matches!(quote, '\'' | '"' | '`') {
+        return None;
+    }
+    let mut result = String::new();
+    let mut escaped = false;
+    for character in source[quote.len_utf8()..].chars() {
+        if escaped {
+            result.push(match character {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                other => other,
+            });
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == quote {
+            return Some(result);
+        } else {
+            result.push(character);
+        }
+    }
+    None
+}
+
 fn codex_output_text(value: &serde_json::Value) -> String {
-    value
-        .as_str()
-        .map(str::to_string)
-        .or_else(|| serde_json::to_string(value).ok())
-        .unwrap_or_default()
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(codex_output_text)
+            .collect::<Vec<_>>()
+            .join(""),
+        serde_json::Value::Object(object) => object
+            .get("text")
+            .map(codex_output_text)
+            .or_else(|| serde_json::to_string(value).ok())
+            .unwrap_or_default(),
+        _ => serde_json::to_string(value).unwrap_or_default(),
+    }
 }
 
 #[cfg(test)]
@@ -553,6 +672,33 @@ mod tests {
             Some("On branch main\nnothing to commit".len())
         );
         assert!(!cmds[0].is_error);
+    }
+
+    #[test]
+    fn test_extract_nested_codex_custom_exec_call_and_result() {
+        let jsonl = make_jsonl(&[
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call_custom","input":{"cmd":"git status"}}}"#,
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_custom","output":[{"type":"input_text","text":"On branch main"}],"is_error":true}}"#,
+        ]);
+
+        let provider = CodexProvider;
+        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].command, "git status");
+        assert_eq!(cmds[0].output_len, Some("On branch main".len()));
+        assert_eq!(cmds[0].output_content.as_deref(), Some("On branch main"));
+        assert!(cmds[0].is_error);
+    }
+
+    #[test]
+    fn test_extract_codex_custom_exec_orchestrator_commands() {
+        let jsonl = make_jsonl(&[
+            r#"{"type":"custom_tool_call","name":"exec","call_id":"call_js","input":"const results = await Promise.allSettled([tools.exec_command({cmd:\"rtk rg pattern file.txt\"})]);"}"#,
+        ]);
+
+        let cmds = CodexProvider.extract_commands(jsonl.path()).unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].command, "rtk rg pattern file.txt");
     }
 
     #[test]

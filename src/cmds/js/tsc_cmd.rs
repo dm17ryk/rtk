@@ -2,16 +2,13 @@
 
 use crate::core::ai_output::BudgetClass;
 use crate::core::runner;
-#[cfg(test)]
 use crate::core::stream::{BlockHandler, BlockStreamFilter};
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{MissingTool, exec_runner, strip_ansi, tool_exec, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
 use std::borrow::Cow;
-use std::collections::HashMap;
-#[cfg(test)]
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::collections::VecDeque;
 use std::sync::LazyLock;
 
@@ -103,6 +100,16 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: {} {}", via, args.join(" "));
     }
 
+    if uses_streaming_for_watch_mode(args) {
+        return runner::run_streamed(
+            cmd,
+            "tsc",
+            &args.join(" "),
+            Box::new(BlockStreamFilter::new(TscHandler::new())),
+            runner::RunOptions::with_tee("tsc"),
+        );
+    }
+
     runner::run_ai_filtered_with_exit(
         cmd,
         "tsc",
@@ -120,14 +127,12 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
-#[cfg(test)]
 struct TscHandler {
     error_count: usize,
     files: HashSet<String>,
     code_counts: HashMap<String, usize>,
 }
 
-#[cfg(test)]
 impl TscHandler {
     fn new() -> Self {
         Self {
@@ -138,7 +143,6 @@ impl TscHandler {
     }
 }
 
-#[cfg(test)]
 impl BlockHandler for TscHandler {
     /// `--pretty` wraps every field in ANSI escapes; strip them once so
     /// matching and the emitted block both see plain text.
@@ -389,6 +393,10 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
     result.trim().to_string()
 }
 
+fn uses_streaming_for_watch_mode(args: &[String]) -> bool {
+    runner::is_watch_mode(args) || args.iter().any(|arg| arg == "-w")
+}
+
 /// Preserve the actual failure when tsc exits unsuccessfully but emits text
 /// that the structured diagnostic parser does not recognize.
 pub(crate) fn filter_tsc_output_with_exit(output: &str, exit_code: i32) -> String {
@@ -572,6 +580,14 @@ src/app.tsx(20,5): error TS2345: Argument of type 'number' is not assignable to 
         assert!(result.contains("exited with code 1"));
         assert!(result.contains("This is not the tsc command"));
         assert!(!result.contains("compilation completed"));
+    }
+
+    #[test]
+    fn watch_flags_are_detected_for_streaming_execution() {
+        assert!(uses_streaming_for_watch_mode(&["--watch".into()]));
+        assert!(uses_streaming_for_watch_mode(&["-w".into()]));
+        assert!(!uses_streaming_for_watch_mode(&["--watchDirectory".into()]));
+        assert!(!uses_streaming_for_watch_mode(&["--pretty".into()]));
     }
 
     // --- Streaming handler tests ---
