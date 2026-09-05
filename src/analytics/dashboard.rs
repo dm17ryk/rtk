@@ -24,7 +24,15 @@ use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-const TAB_NAMES: [&str; 5] = ["Overview", "Commands", "Activity", "Health", "Artifacts"];
+const TAB_NAMES: [&str; 6] = [
+    "Overview",
+    "Commands",
+    "Error Commands",
+    "Activity",
+    "Health",
+    "Artifacts",
+];
+const EFFICIENCY_LABEL_WIDTH: usize = 25;
 const AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -98,7 +106,7 @@ fn dashboard_loop(
                 {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Char('1'..='5') => {
+                        KeyCode::Char('1'..='6') => {
                             if let KeyCode::Char(value) = key.code {
                                 let next = (value as usize) - ('1' as usize);
                                 if next != tab {
@@ -194,9 +202,10 @@ fn draw(frame: &mut Frame, tab: usize, data: &DashboardData, status: Option<&str
     match tab {
         0 => draw_overview(frame, data, chunks[1]),
         1 => draw_commands(frame, data, chunks[1]),
-        2 => draw_activity(frame, data, chunks[1]),
-        3 => draw_health(frame, data, chunks[1]),
-        4 => draw_artifacts(frame, data, chunks[1]),
+        2 => draw_error_commands(frame, data, chunks[1]),
+        3 => draw_activity(frame, data, chunks[1]),
+        4 => draw_health(frame, data, chunks[1]),
+        5 => draw_artifacts(frame, data, chunks[1]),
         _ => {}
     }
     draw_status(frame, status, chunks[2]);
@@ -225,7 +234,7 @@ fn draw_status(frame: &mut Frame, status: Option<&str>, area: Rect) {
         Some(message) => (format!(" {message}"), Color::Red),
         None => (
             format!(
-                " q/Esc: quit | Tab/1-5 or n/p: tabs | r: refresh | auto-refresh: {}s",
+                " q/Esc: quit | Tab/1-6 or n/p: tabs | r: refresh | auto-refresh: {}s",
                 AUTO_REFRESH_INTERVAL.as_secs()
             ),
             Color::DarkGray,
@@ -290,7 +299,18 @@ fn draw_overview(frame: &mut Frame, data: &DashboardData, area: Rect) {
         .split(area);
     let summary = &data.summary;
     let display = summary_display(summary);
-    let bar_width = chunks[0].width.saturating_sub(34).min(60) as usize;
+    let efficiency_suffix_width = [summary.avg_savings_pct, summary.supported_avg_savings_pct]
+        .iter()
+        .map(|pct| format!(" {:.1}%", pct).chars().count())
+        .max()
+        .unwrap_or(0);
+    let bar_width = chunks[0]
+        .width
+        .saturating_sub(2)
+        .saturating_sub(EFFICIENCY_LABEL_WIDTH as u16 + 1)
+        .saturating_sub(2)
+        .saturating_sub(efficiency_suffix_width as u16)
+        .min(60) as usize;
     let stats = vec![
         Line::from(vec![
             metric_span("Commands: ", display.commands),
@@ -329,6 +349,58 @@ fn draw_commands(frame: &mut Frame, data: &DashboardData, area: Rect) {
             data.summary.by_command.len()
         ),
     );
+}
+
+fn draw_error_commands(frame: &mut Frame, data: &DashboardData, area: Rect) {
+    let summary = &data.summary;
+    let capacity = table_row_capacity(area);
+    let shown = capacity.min(summary.error_commands.len());
+    let title = format!(
+        "Error Commands (showing {shown} of {} groups)",
+        summary.error_command_groups
+    );
+
+    if summary.error_commands.is_empty() {
+        let message = if summary.error_command_groups > 0 {
+            "  Errors exist but do not fit in the viewport."
+        } else {
+            "  No errored commands."
+        };
+        frame.render_widget(Paragraph::new(message).block(panel(title)), area);
+        return;
+    }
+
+    let rows = summary
+        .error_commands
+        .iter()
+        .take(capacity)
+        .enumerate()
+        .map(|(index, error)| {
+            Row::new(vec![
+                Cell::from(format!("{}.", index + 1)),
+                Cell::from(error.rtk_cmd.as_str()).style(Style::default().fg(Color::Cyan)),
+                Cell::from(error.runtime_error.as_str()).style(Style::default().fg(Color::Red)),
+                Cell::from(error.count.to_string()),
+                Cell::from(error_timestamp_display(&error.latest_timestamp)),
+            ])
+        });
+    let header = Row::new(["#", "Command", "Error", "Count", "Latest"])
+        .style(Style::default().add_modifier(Modifier::BOLD))
+        .bottom_margin(1);
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(4),
+            Constraint::Min(18),
+            Constraint::Min(16),
+            Constraint::Length(7),
+            Constraint::Length(19),
+        ],
+    )
+    .header(header)
+    .column_spacing(1)
+    .block(panel(title));
+    frame.render_widget(table, area);
 }
 
 fn draw_command_table(frame: &mut Frame, summary: &GainSummary, area: Rect, title: &str) {
@@ -437,7 +509,7 @@ fn draw_activity(frame: &mut Frame, data: &DashboardData, area: Rect) {
     .column_spacing(1)
     .block(panel(format!(
         "Daily Activity (showing {shown} of {} days)",
-        summary.by_day.len()
+        summary.activity_total_days
     )));
     frame.render_widget(table, area);
 }
@@ -557,9 +629,10 @@ fn metric_span(label: &'static str, value: String) -> Span<'static> {
 }
 
 fn efficiency_line(scope: &'static str, pct: f64, bar_width: usize) -> Line<'static> {
+    let label = format!("  Efficiency ({scope}):");
     Line::from(vec![
         Span::styled(
-            format!("  Efficiency ({scope}): "),
+            format!("{label:<width$} ", width = EFFICIENCY_LABEL_WIDTH),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -570,6 +643,10 @@ fn efficiency_line(scope: &'static str, pct: f64, bar_width: usize) -> Line<'sta
         ),
         Span::raw(format!(" {:.1}%", pct)),
     ])
+}
+
+fn error_timestamp_display(timestamp: &str) -> String {
+    timestamp.chars().take(19).collect()
 }
 
 fn health_line(label: &'static str, value: &str, color: Color) -> Line<'static> {
@@ -728,6 +805,9 @@ mod tests {
                     ("2026-07-27".to_string(), 20),
                     ("2026-07-28".to_string(), 80),
                 ],
+                activity_total_days: 2,
+                error_commands: Vec::new(),
+                error_command_groups: 0,
             },
             artifacts: Vec::new(),
             project_path: None,
@@ -826,7 +906,7 @@ mod tests {
         assert!(overview.contains('┌'));
 
         terminal
-            .draw(|frame| draw(frame, 2, &data, None))
+            .draw(|frame| draw(frame, 3, &data, None))
             .expect("activity frame");
         let activity = backend_text(&terminal);
         assert!(activity.contains("Daily Activity"));
@@ -849,6 +929,100 @@ mod tests {
     }
 
     #[test]
+    fn efficiency_lines_align_bars_and_percentages() {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| draw(frame, 0, &fixture(), None))
+            .expect("overview frame");
+        let rendered = backend_text(&terminal);
+        let lines: Vec<&str> = rendered
+            .lines()
+            .filter(|line| line.contains("Efficiency ("))
+            .collect();
+        assert_eq!(lines.len(), 2);
+
+        let positions: Vec<(usize, usize)> = lines
+            .iter()
+            .map(|line| {
+                (
+                    line.find('[').expect("efficiency bar"),
+                    line.find('%').expect("efficiency percentage"),
+                )
+            })
+            .collect();
+        assert_eq!(positions[0], positions[1]);
+    }
+
+    #[test]
+    fn narrow_overview_keeps_efficiency_percentages_visible() {
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| draw(frame, 0, &fixture(), None))
+            .expect("overview frame");
+        let rendered = backend_text(&terminal);
+        let lines: Vec<&str> = rendered
+            .lines()
+            .filter(|line| line.contains("Efficiency ("))
+            .collect();
+
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|line| line.contains("80.0%")));
+    }
+
+    #[test]
+    fn error_commands_tab_follows_commands() {
+        assert_eq!(TAB_NAMES.len(), 6);
+        assert_eq!(TAB_NAMES[1], "Commands");
+        assert_eq!(TAB_NAMES[2], "Error Commands");
+        assert_eq!(TAB_NAMES[3], "Activity");
+    }
+
+    #[test]
+    fn error_commands_tab_renders_an_error_panel() {
+        use crate::core::tracking::ErrorCommandStats;
+
+        let mut data = fixture();
+        data.summary.error_commands = vec![ErrorCommandStats {
+            rtk_cmd: "rtk rg --huge-log".to_string(),
+            runtime_error: "filter_failed".to_string(),
+            count: 2,
+            latest_timestamp: "2026-09-05T12:34:56+00:00".to_string(),
+        }];
+        data.summary.error_command_groups = 1;
+        data.summary.error_count = 2;
+        let backend = TestBackend::new(110, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| draw(frame, 2, &data, None))
+            .expect("error commands frame");
+        let rendered = backend_text(&terminal);
+
+        assert!(rendered.contains("Error Commands"));
+        assert!(rendered.contains("rtk rg --huge-log"));
+        assert!(rendered.contains("filter_failed"));
+    }
+
+    #[test]
+    fn error_commands_tab_explains_when_errors_do_not_fit() {
+        let mut data = fixture();
+        data.summary.error_command_groups = 1;
+        let backend = TestBackend::new(100, 8);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| draw(frame, 2, &data, None))
+            .expect("error commands frame");
+        let rendered = backend_text(&terminal);
+
+        assert!(rendered.contains("Errors exist but do not fit in the viewport."));
+    }
+
+    #[test]
     fn commands_and_activity_use_all_available_rows() {
         let mut data = fixture();
         data.summary.by_command = (0..20)
@@ -867,12 +1041,14 @@ mod tests {
         data.summary.by_day = (0..20)
             .map(|index| (format!("2026-08-{index:02}"), index + 1))
             .collect();
+        data.summary.activity_total_days = 20;
         terminal
-            .draw(|frame| draw(frame, 2, &data, None))
+            .draw(|frame| draw(frame, 3, &data, None))
             .expect("activity frame");
         let activity = backend_text(&terminal);
         assert!(activity.contains("2026-08-19"));
         assert!(!activity.contains("2026-08-03"));
+        assert!(activity.contains("Daily Activity (showing 16 of 20 days)"));
     }
 
     #[test]

@@ -240,8 +240,14 @@ pub struct GainSummary {
     /// The default summary keeps the historical top-10 limit; callers that
     /// render their own viewport can request all command groups.
     pub by_command: Vec<(String, usize, usize, f64, u64)>,
-    /// Last 30 days of activity: (date, saved_tokens)
+    /// Activity rows, oldest first: (date, saved_tokens). The caller may limit the rows.
     pub by_day: Vec<(String, usize)>,
+    /// Total number of days represented by the dashboard activity query.
+    pub activity_total_days: usize,
+    /// Runtime-error command groups returned for the dashboard error tab.
+    pub error_commands: Vec<ErrorCommandStats>,
+    /// Total number of runtime-error command groups before the viewport limit.
+    pub error_command_groups: usize,
 }
 
 /// Daily statistics for token savings and execution metrics.
@@ -333,6 +339,15 @@ pub struct MonthStats {
 
 /// Type alias for command statistics tuple: (command, count, saved_tokens, avg_savings_pct, avg_time_ms)
 type CommandStats = (String, usize, usize, f64, u64);
+
+/// Aggregated dashboard information for one runtime-error command and error kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorCommandStats {
+    pub rtk_cmd: String,
+    pub runtime_error: String,
+    pub count: usize,
+    pub latest_timestamp: String,
+}
 
 /// Current tracking-DB schema version, stored in the SQLite `user_version` pragma.
 ///
@@ -941,7 +956,7 @@ impl Tracker {
         project_path: Option<&str>,
         command_limit: Option<usize>,
     ) -> Result<GainSummary> {
-        self.get_summary_filtered_with_options(project_path, command_limit, true)
+        self.get_summary_filtered_with_options(project_path, command_limit, true, Some(30))
     }
 
     /// Get the dashboard summary with errored executions excluded from the
@@ -951,7 +966,17 @@ impl Tracker {
         project_path: Option<&str>,
         command_limit: usize,
     ) -> Result<GainSummary> {
-        self.get_summary_filtered_with_options(project_path, Some(command_limit), false)
+        let mut summary = self.get_summary_filtered_with_options(
+            project_path,
+            Some(command_limit),
+            false,
+            Some(command_limit),
+        )?;
+        let (error_commands, error_command_groups) =
+            self.get_error_commands(project_path, command_limit)?;
+        summary.error_commands = error_commands;
+        summary.error_command_groups = error_command_groups;
+        Ok(summary)
     }
 
     fn get_summary_filtered_with_options(
@@ -959,6 +984,7 @@ impl Tracker {
         project_path: Option<&str>,
         command_limit: Option<usize>,
         include_errors: bool,
+        activity_limit: Option<usize>,
     ) -> Result<GainSummary> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut total_commands = 0usize;
@@ -1026,7 +1052,8 @@ impl Tracker {
         };
 
         let by_command = self.get_by_command(project_path, command_limit, include_errors)?;
-        let by_day = self.get_by_day(project_path, include_errors)?;
+        let (by_day, activity_total_days) =
+            self.get_by_day(project_path, include_errors, activity_limit)?;
 
         Ok(GainSummary {
             total_commands,
@@ -1040,6 +1067,9 @@ impl Tracker {
             avg_time_ms,
             by_command,
             by_day,
+            activity_total_days,
+            error_commands: Vec::new(),
+            error_command_groups: 0,
         })
     }
 
@@ -1079,6 +1109,44 @@ impl Tracker {
         })?;
 
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    fn get_error_commands(
+        &self,
+        project_path: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<ErrorCommandStats>, usize)> {
+        let (project_exact, project_glob) = project_filter_params(project_path);
+        let total_groups: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM (
+                SELECT rtk_cmd, runtime_error
+                FROM commands
+                WHERE runtime_error IS NOT NULL
+                  AND (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+                GROUP BY rtk_cmd, runtime_error
+            )",
+            params![project_exact, project_glob],
+            |row| row.get(0),
+        )?;
+        let mut statement = self.conn.prepare(
+            "SELECT rtk_cmd, runtime_error, COUNT(*), MAX(timestamp)
+             FROM commands
+             WHERE runtime_error IS NOT NULL
+               AND (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+             GROUP BY rtk_cmd, runtime_error
+             ORDER BY MAX(timestamp) DESC, COUNT(*) DESC, rtk_cmd ASC
+             LIMIT ?3",
+        )?;
+        let rows =
+            statement.query_map(params![project_exact, project_glob, limit as i64], |row| {
+                Ok(ErrorCommandStats {
+                    rtk_cmd: row.get(0)?,
+                    runtime_error: row.get(1)?,
+                    count: row.get::<_, i64>(2)? as usize,
+                    latest_timestamp: row.get(3)?,
+                })
+            })?;
+        Ok((rows.collect::<Result<Vec<_>, _>>()?, total_groups as usize))
     }
 
     #[allow(dead_code)] // Used by the pending residual-output reporting surface.
@@ -1132,21 +1200,36 @@ impl Tracker {
         &self,
         project_path: Option<&str>, // added
         include_errors: bool,
-    ) -> Result<Vec<(String, usize)>> {
+        limit: Option<usize>,
+    ) -> Result<(Vec<(String, usize)>, usize)> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
         let error_clause = if include_errors {
             ""
         } else {
             " AND runtime_error IS NULL"
         };
+        let total_days: i64 = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM (
+                    SELECT DATE(timestamp)
+                    FROM commands
+                    WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2){error_clause}
+                    GROUP BY DATE(timestamp)
+                )"
+            ),
+            params![project_exact, project_glob],
+            |row| row.get(0),
+        )?;
+        let limit_clause = limit
+            .map(|value| format!(" LIMIT {value}"))
+            .unwrap_or_default();
         let mut stmt = self.conn.prepare(
             &format!(
                 "SELECT DATE(timestamp), SUM(saved_tokens)
-             FROM commands
-             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2){error_clause}
-             GROUP BY DATE(timestamp)
-             ORDER BY DATE(timestamp) DESC
-             LIMIT 30"
+                 FROM commands
+                 WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2){error_clause}
+                 GROUP BY DATE(timestamp)
+                 ORDER BY DATE(timestamp) DESC{limit_clause}"
             ), // added: project filter in WHERE
         )?;
 
@@ -1157,7 +1240,7 @@ impl Tracker {
 
         let mut result: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
         result.reverse();
-        Ok(result)
+        Ok((result, total_days as usize))
     }
 
     /// Get daily statistics for all recorded days.
@@ -2878,6 +2961,44 @@ mod tests {
         assert!((summary.supported_avg_savings_pct - 80.0).abs() < f64::EPSILON);
         assert_eq!(summary.error_count, 1);
         assert_eq!(summary.by_command.len(), 2);
+        assert_eq!(summary.error_command_groups, 1);
+        assert_eq!(summary.error_commands.len(), 1);
+        assert_eq!(summary.error_commands[0].rtk_cmd, "rtk rg errored");
+        assert_eq!(
+            summary.error_commands[0].runtime_error,
+            "oversized_output_recovery_unavailable"
+        );
+    }
+
+    #[test]
+    fn dashboard_activity_rows_follow_the_requested_viewport_limit() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        for index in 0..40 {
+            tracker
+                .record(
+                    &format!("command-{index}"),
+                    &format!("rtk command-{index}"),
+                    100,
+                    20,
+                    1,
+                )
+                .unwrap();
+            tracker
+                .conn
+                .execute(
+                    "UPDATE commands SET timestamp = ?1 WHERE id = (SELECT MAX(id) FROM commands)",
+                    params![format!(
+                        "2026-{:02}-{:02}T00:00:00+00:00",
+                        index / 28 + 7,
+                        index % 28 + 1
+                    )],
+                )
+                .unwrap();
+        }
+
+        let summary = tracker.get_dashboard_summary(None, 40).unwrap();
+        assert_eq!(summary.by_day.len(), 40);
+        assert_eq!(summary.activity_total_days, 40);
     }
 
     #[test]
