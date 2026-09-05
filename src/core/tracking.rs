@@ -190,6 +190,10 @@ pub struct OutputTracking {
     pub omitted_groups: usize,
     pub recovery_created: bool,
     pub filter_failed: bool,
+    /// Stable runtime error kind retained for diagnosis and dashboard
+    /// filtering. This is separate from `filter_failed` because recovery and
+    /// transport failures can occur after filtering succeeded.
+    pub runtime_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -224,6 +228,10 @@ pub struct GainSummary {
     /// Weighted savings percentage for commands RTK filtered or otherwise
     /// supported. Exact/proxy executions are excluded.
     pub supported_avg_savings_pct: f64,
+    /// Number of command executions recorded with a runtime error. Dashboard
+    /// summaries omit these rows from efficiency and impact metrics but retain
+    /// the count so users can inspect the underlying DB records.
+    pub error_count: usize,
     /// Total execution time across all commands (milliseconds)
     pub total_time_ms: u64,
     /// Average execution time per command (milliseconds)
@@ -333,7 +341,7 @@ type CommandStats = (String, usize, usize, f64, u64);
 /// call. Bump this whenever `run_schema_migrations` gains a new statement; a stale
 /// `user_version` triggers exactly one re-run of the full migration sequence, then
 /// the pragma is updated so subsequent opens skip straight past it.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Create all tables/indexes, run column migrations, and stamp `user_version` to
 /// `SCHEMA_VERSION` for the on-disk tracker DB.
@@ -357,7 +365,8 @@ fn run_schema_migrations(conn: &Connection) -> Result<()> {
             omitted_items INTEGER NOT NULL DEFAULT 0,
             omitted_groups INTEGER NOT NULL DEFAULT 0,
             recovery_created INTEGER NOT NULL DEFAULT 0,
-            filter_failed INTEGER NOT NULL DEFAULT 0
+            filter_failed INTEGER NOT NULL DEFAULT 0,
+            runtime_error TEXT
         )",
         [],
     )?;
@@ -398,6 +407,7 @@ fn run_schema_migrations(conn: &Connection) -> Result<()> {
         "ALTER TABLE commands ADD COLUMN filter_failed INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    let _ = conn.execute("ALTER TABLE commands ADD COLUMN runtime_error TEXT", []);
     // One-time migration: normalize NULLs from pre-default schema // changed: guarded with EXISTS
     let has_nulls: bool = conn
         .query_row(
@@ -569,6 +579,7 @@ impl Tracker {
     /// tracker.record("ls -la", "rtk ls", 1000, 200, 50)?;
     /// # Ok::<(), anyhow::Error>(())
     /// ```
+    #[allow(dead_code)]
     pub fn record(
         &self,
         original_cmd: &str,
@@ -613,10 +624,10 @@ impl Tracker {
                 "INSERT INTO commands (
                 timestamp, original_cmd, rtk_cmd, project_path, input_tokens,
                 output_tokens, saved_tokens, savings_pct, exec_time_ms,
-                output_contract, exact_reason, omitted_items, omitted_groups,
-                recovery_created, filter_failed
-             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
+        output_contract, exact_reason, omitted_items, omitted_groups,
+        recovery_created, filter_failed, runtime_error
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
              )",
                 params![
                     Utc::now().to_rfc3339(),
@@ -634,6 +645,7 @@ impl Tracker {
                     tracking.omitted_groups as i64,
                     tracking.recovery_created,
                     tracking.filter_failed,
+                    tracking.runtime_error,
                 ],
             )
             .inspect_err(|e| warn_if_missing_table("record", e))?;
@@ -929,6 +941,25 @@ impl Tracker {
         project_path: Option<&str>,
         command_limit: Option<usize>,
     ) -> Result<GainSummary> {
+        self.get_summary_filtered_with_options(project_path, command_limit, true)
+    }
+
+    /// Get the dashboard summary with errored executions excluded from the
+    /// efficiency, impact, and activity metrics.
+    pub fn get_dashboard_summary(
+        &self,
+        project_path: Option<&str>,
+        command_limit: usize,
+    ) -> Result<GainSummary> {
+        self.get_summary_filtered_with_options(project_path, Some(command_limit), false)
+    }
+
+    fn get_summary_filtered_with_options(
+        &self,
+        project_path: Option<&str>,
+        command_limit: Option<usize>,
+        include_errors: bool,
+    ) -> Result<GainSummary> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut total_commands = 0usize;
         let mut total_input = 0usize;
@@ -937,9 +968,11 @@ impl Tracker {
         let mut supported_input = 0usize;
         let mut supported_saved = 0usize;
         let mut total_time_ms = 0u64;
+        let mut error_count = 0usize;
 
         let mut stmt = self.conn.prepare(
-            "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms, output_contract
+            "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms, output_contract,
+                    runtime_error
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)", // added: project filter
         )?;
@@ -952,11 +985,18 @@ impl Tracker {
                 row.get::<_, i64>(2)? as usize,
                 row.get::<_, i64>(3)? as u64,
                 row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })?;
 
         for row in rows {
-            let (input, output, saved, time_ms, contract) = row?;
+            let (input, output, saved, time_ms, contract, runtime_error) = row?;
+            if runtime_error.is_some() {
+                error_count += 1;
+                if !include_errors {
+                    continue;
+                }
+            }
             total_commands += 1;
             total_input += input;
             total_output += output;
@@ -985,8 +1025,8 @@ impl Tracker {
             0
         };
 
-        let by_command = self.get_by_command(project_path, command_limit)?; // added: pass project filter
-        let by_day = self.get_by_day(project_path)?; // added: pass project filter
+        let by_command = self.get_by_command(project_path, command_limit, include_errors)?;
+        let by_day = self.get_by_day(project_path, include_errors)?;
 
         Ok(GainSummary {
             total_commands,
@@ -995,6 +1035,7 @@ impl Tracker {
             total_saved,
             avg_savings_pct,
             supported_avg_savings_pct,
+            error_count,
             total_time_ms,
             avg_time_ms,
             by_command,
@@ -1006,15 +1047,21 @@ impl Tracker {
         &self,
         project_path: Option<&str>, // added
         command_limit: Option<usize>,
+        include_errors: bool,
     ) -> Result<Vec<CommandStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
         let limit_clause = command_limit
             .map(|limit| format!(" LIMIT {limit}"))
             .unwrap_or_default();
+        let error_clause = if include_errors {
+            ""
+        } else {
+            " AND runtime_error IS NULL"
+        };
         let query = format!(
             "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
              FROM commands
-             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2){error_clause}
              GROUP BY rtk_cmd
              ORDER BY SUM(saved_tokens) DESC{limit_clause}"
         );
@@ -1084,15 +1131,23 @@ impl Tracker {
     fn get_by_day(
         &self,
         project_path: Option<&str>, // added
+        include_errors: bool,
     ) -> Result<Vec<(String, usize)>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
+        let error_clause = if include_errors {
+            ""
+        } else {
+            " AND runtime_error IS NULL"
+        };
         let mut stmt = self.conn.prepare(
-            "SELECT DATE(timestamp), SUM(saved_tokens)
+            &format!(
+                "SELECT DATE(timestamp), SUM(saved_tokens)
              FROM commands
-             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2){error_clause}
              GROUP BY DATE(timestamp)
              ORDER BY DATE(timestamp) DESC
-             LIMIT 30", // added: project filter in WHERE
+             LIMIT 30"
+            ), // added: project filter in WHERE
         )?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
@@ -1857,6 +1912,12 @@ pub struct TimedExecution {
     start: Instant,
 }
 
+// Native passthrough keeps the child's stdout/stderr attached to the user's
+// terminal, so its exact byte volume is intentionally unobservable. Count one
+// neutral input/output token for those executions: this contributes 0% savings
+// to the global denominator without pretending that the token volume is known.
+const UNMEASURED_EXACT_RESIDUAL_TOKENS: usize = 1;
+
 impl TimedExecution {
     /// Start timing a command execution.
     ///
@@ -1953,13 +2014,31 @@ impl TimedExecution {
     }
 
     pub fn track_exact(&self, original_cmd: &str, rtk_cmd: &str, reason: &str) {
+        self.track_exact_with_tokens(
+            original_cmd,
+            rtk_cmd,
+            reason,
+            UNMEASURED_EXACT_RESIDUAL_TOKENS,
+            UNMEASURED_EXACT_RESIDUAL_TOKENS,
+        );
+    }
+
+    /// Track an exact command when the caller has measured its native output.
+    pub fn track_exact_with_tokens(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        reason: &str,
+        input_tokens: usize,
+        output_tokens: usize,
+    ) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
         if let Ok(tracker) = Tracker::new() {
             let _ = tracker.record_with_output(
                 original_cmd,
                 rtk_cmd,
-                0,
-                0,
+                input_tokens,
+                output_tokens,
                 elapsed_ms,
                 OutputTracking {
                     contract: "exact".into(),
@@ -1970,11 +2049,11 @@ impl TimedExecution {
         }
     }
 
-    /// Track passthrough commands (timing-only, no token counting).
+    /// Track passthrough commands as exact, zero-savings executions.
     ///
     /// For commands that stream output or run interactively where output
-    /// cannot be captured. Records execution time but sets tokens to 0
-    /// (does not dilute savings statistics).
+    /// cannot be captured, records a neutral residual unit so these
+    /// executions remain visible in global efficiency.
     ///
     /// # Arguments
     ///
@@ -1991,11 +2070,7 @@ impl TimedExecution {
     /// timer.track_passthrough("git tag", "rtk git tag");
     /// ```
     pub fn track_passthrough(&self, original_cmd: &str, rtk_cmd: &str) {
-        let elapsed_ms = self.start.elapsed().as_millis() as u64;
-        // input_tokens=0, output_tokens=0 won't dilute savings statistics
-        if let Ok(tracker) = Tracker::new() {
-            let _ = tracker.record(original_cmd, rtk_cmd, 0, 0, elapsed_ms);
-        }
+        self.track_exact(original_cmd, rtk_cmd, "passthrough");
     }
 }
 
@@ -2077,6 +2152,10 @@ mod tests {
                 "unexpected schema for {name}"
             );
         }
+        assert_eq!(
+            command_column(tracker, "runtime_error"),
+            Some(("TEXT".into(), false, None)),
+        );
     }
 
     #[test]
@@ -2144,15 +2223,16 @@ mod tests {
                     omitted_groups: 3,
                     recovery_created: true,
                     filter_failed: true,
+                    runtime_error: Some("filter_failed".into()),
                 },
             )
             .unwrap();
 
-        let stored: (String, Option<String>, i64, i64, bool, bool) = tracker
+        let stored: (String, Option<String>, i64, i64, bool, bool, Option<String>) = tracker
             .conn
             .query_row(
                 "SELECT output_contract, exact_reason, omitted_items, omitted_groups,
-                        recovery_created, filter_failed
+             recovery_created, filter_failed, runtime_error
                  FROM commands WHERE rtk_cmd = 'rtk cargo test'",
                 [],
                 |row| {
@@ -2163,6 +2243,7 @@ mod tests {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
+                        row.get(6)?,
                     ))
                 },
             )
@@ -2175,7 +2256,8 @@ mod tests {
                 17,
                 3,
                 true,
-                true
+                true,
+                Some("filter_failed".into())
             )
         );
     }
@@ -2480,7 +2562,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
-        assert_eq!(stored, ("exact".into(), Some("structured".into()), 0, 0));
+        assert_eq!(stored, ("exact".into(), Some("structured".into()), 1, 1));
 
         drop(tracker);
         env::remove_var("RTK_DB_PATH");
@@ -2750,6 +2832,52 @@ mod tests {
         assert!((summary.avg_savings_pct - 43.75).abs() < f64::EPSILON);
         assert!((summary.supported_avg_savings_pct - (140.0 / 220.0 * 100.0)).abs() < 0.000_001);
         assert_eq!(summary.by_command.len(), 14);
+    }
+
+    #[test]
+    fn dashboard_summary_excludes_runtime_errors_but_reports_them() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        tracker
+            .record("supported", "rtk supported", 100, 20, 1)
+            .unwrap();
+        tracker
+            .record_with_output(
+                "proxy",
+                "rtk proxy",
+                100,
+                100,
+                1,
+                OutputTracking {
+                    contract: "exact".into(),
+                    exact_reason: Some("proxy".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        tracker
+            .record_with_output(
+                "errored search",
+                "rtk rg errored",
+                1_000,
+                0,
+                1,
+                OutputTracking {
+                    contract: "ai_owned".into(),
+                    runtime_error: Some("oversized_output_recovery_unavailable".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let summary = tracker.get_dashboard_summary(None, 10).unwrap();
+        assert_eq!(summary.total_commands, 2);
+        assert_eq!(summary.total_input, 200);
+        assert_eq!(summary.total_output, 120);
+        assert_eq!(summary.total_saved, 80);
+        assert!((summary.avg_savings_pct - 40.0).abs() < f64::EPSILON);
+        assert!((summary.supported_avg_savings_pct - 80.0).abs() < f64::EPSILON);
+        assert_eq!(summary.error_count, 1);
+        assert_eq!(summary.by_command.len(), 2);
     }
 
     #[test]

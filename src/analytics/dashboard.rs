@@ -64,7 +64,11 @@ fn dashboard_loop(
     project: bool,
 ) -> Result<()> {
     let mut tab = 0usize;
-    let mut data = DashboardData::load(project)?;
+    let initial_height = terminal
+        .size()
+        .context("Failed to read dashboard terminal size")?
+        .height;
+    let mut data = DashboardData::load(project, dashboard_command_limit(initial_height))?;
     let mut last_refresh = Instant::now();
     let mut status: Option<String> = None;
     let mut dirty = true;
@@ -79,7 +83,16 @@ fn dashboard_loop(
 
         if event::poll(EVENT_POLL_INTERVAL).context("Failed to poll dashboard input")? {
             match event::read().context("Failed to read dashboard input")? {
-                Event::Resize(_, _) => dirty = true,
+                Event::Resize(_, height) => {
+                    refresh_data(
+                        &mut data,
+                        project,
+                        dashboard_command_limit(height),
+                        &mut status,
+                    );
+                    last_refresh = Instant::now();
+                    dirty = true;
+                }
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
@@ -103,7 +116,16 @@ fn dashboard_loop(
                             dirty = true;
                         }
                         KeyCode::Char('r') => {
-                            refresh_data(&mut data, project, &mut status);
+                            let height = terminal
+                                .size()
+                                .map(|size| size.height)
+                                .unwrap_or(initial_height);
+                            refresh_data(
+                                &mut data,
+                                project,
+                                dashboard_command_limit(height),
+                                &mut status,
+                            );
                             last_refresh = Instant::now();
                             dirty = true;
                         }
@@ -115,7 +137,16 @@ fn dashboard_loop(
         }
 
         if refresh_due(last_refresh.elapsed()) {
-            refresh_data(&mut data, project, &mut status);
+            let height = terminal
+                .size()
+                .map(|size| size.height)
+                .unwrap_or(initial_height);
+            refresh_data(
+                &mut data,
+                project,
+                dashboard_command_limit(height),
+                &mut status,
+            );
             last_refresh = Instant::now();
             dirty = true;
         }
@@ -127,8 +158,13 @@ fn refresh_due(elapsed: Duration) -> bool {
     elapsed >= AUTO_REFRESH_INTERVAL
 }
 
-fn refresh_data(data: &mut DashboardData, project: bool, status: &mut Option<String>) {
-    match DashboardData::load(project) {
+fn refresh_data(
+    data: &mut DashboardData,
+    project: bool,
+    command_limit: usize,
+    status: &mut Option<String>,
+) {
+    match DashboardData::load(project, command_limit) {
         Ok(refreshed) => {
             *data = refreshed;
             *status = None;
@@ -412,6 +448,11 @@ fn draw_health(frame: &mut Frame, data: &DashboardData, area: Rect) {
         HookStatus::Outdated => ("outdated", Color::Yellow),
         HookStatus::Missing => ("missing", Color::Red),
     };
+    let error_color = if data.summary.error_count == 0 {
+        Color::Green
+    } else {
+        Color::Red
+    };
     let lines = vec![
         Line::from(""),
         health_line("Hook/plugin status: ", hook_text, hook_color),
@@ -432,6 +473,11 @@ fn draw_health(frame: &mut Frame, data: &DashboardData, area: Rect) {
             "Tracking scope: ",
             data.project_path.as_deref().unwrap_or("all projects"),
             Color::White,
+        ),
+        health_line(
+            "Errored executions: ",
+            &data.summary.error_count.to_string(),
+            error_color,
         ),
         health_line(
             "Tee artifacts: ",
@@ -482,6 +528,15 @@ fn table_row_capacity(area: Rect) -> usize {
     area.height.saturating_sub(4) as usize
 }
 
+fn dashboard_command_limit(terminal_height: u16) -> usize {
+    // Commands and Activity each receive the middle frame area: subtract the
+    // three-row tab header and one-row status footer before applying the table
+    // header/border overhead. This is the largest viewport used by either
+    // dashboard tab, so the DB aggregation stays bounded without truncating a
+    // resized terminal's visible rows.
+    table_row_capacity(Rect::new(0, 0, 0, terminal_height.saturating_sub(4)))
+}
+
 fn panel(title: impl Into<String>) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
@@ -525,7 +580,7 @@ fn health_line(label: &'static str, value: &str, color: Color) -> Line<'static> 
 }
 
 fn render_plain(project: bool) -> Result<()> {
-    let data = DashboardData::load(project)?;
+    let data = DashboardData::load(project, 10)?;
     let mut stdout = io::stdout();
     write!(stdout, "{}", plain_dashboard_text(&data, project))?;
     Ok(())
@@ -556,6 +611,7 @@ fn plain_dashboard_text(data: &DashboardData, project: bool) -> String {
             "Efficiency (supported): {:.1}%",
             data.summary.supported_avg_savings_pct
         ),
+        format!("Errored executions: {}", data.summary.error_count),
         String::new(),
         "Highest impact commands:".to_string(),
         format!(
@@ -584,11 +640,11 @@ struct DashboardData {
 }
 
 impl DashboardData {
-    fn load(project: bool) -> Result<Self> {
+    fn load(project: bool, command_limit: usize) -> Result<Self> {
         let tracker = Tracker::new().context("Failed to initialize tracking database")?;
         let project_path = project.then(current_project_path_string);
         let summary = tracker
-            .get_summary_filtered_with_command_limit(project_path.as_deref(), None)
+            .get_dashboard_summary(project_path.as_deref(), command_limit)
             .context("Failed to load dashboard statistics")?;
         Ok(Self {
             summary,
@@ -661,6 +717,7 @@ mod tests {
                 total_saved: 80,
                 avg_savings_pct: 80.0,
                 supported_avg_savings_pct: 80.0,
+                error_count: 0,
                 total_time_ms: 50,
                 avg_time_ms: 25,
                 by_command: vec![
@@ -710,6 +767,12 @@ mod tests {
             "auto-refresh: {}s",
             AUTO_REFRESH_INTERVAL.as_secs()
         )));
+    }
+
+    #[test]
+    fn dashboard_command_limit_tracks_terminal_height() {
+        assert_eq!(dashboard_command_limit(24), 16);
+        assert_eq!(dashboard_command_limit(8), 0);
     }
 
     #[test]

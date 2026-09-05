@@ -3101,12 +3101,19 @@ fn run_cli() -> Result<i32> {
             let stderr = core::utils::decode_process_output(&stderr_bytes);
             let full_output = format!("{}{}", stdout, stderr);
 
-            // Track usage (input = output since no filtering)
-            timer.track(
+            // Track usage as exact output with the bytes captured above. This
+            // keeps proxy traffic in global efficiency while excluding it
+            // from the supported-command metric.
+            timer.track_output(
                 &format!("{} {}", cmd_name, cmd_args.join(" ")),
                 &format!("rtk proxy {} {}", cmd_name, cmd_args.join(" ")),
                 &full_output,
                 &full_output,
+                core::tracking::OutputTracking {
+                    contract: "exact".into(),
+                    exact_reason: Some("proxy".into()),
+                    ..Default::default()
+                },
             );
 
             core::utils::exit_code_from_status(&status, &cmd_name)

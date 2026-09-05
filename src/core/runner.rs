@@ -206,6 +206,7 @@ fn track_captured_replay(
             contract,
             EmissionMeta {
                 used_raw_fallback: true,
+                runtime_error: Some("capture_incomplete"),
                 ..EmissionMeta::default()
             },
         ),
@@ -234,6 +235,7 @@ pub(crate) fn output_tracking_from_emission(
         omitted_groups: meta.omitted_groups,
         recovery_created: meta.recovery_created,
         filter_failed: meta.parser_failed,
+        runtime_error: meta.runtime_error.map(str::to_owned),
     }
 }
 
@@ -1847,6 +1849,7 @@ mod err_test_runner_tests {
                 recovery_created: true,
                 parser_failed: true,
                 used_raw_fallback: false,
+                runtime_error: Some("filter_failed"),
             },
         );
 
@@ -1856,6 +1859,7 @@ mod err_test_runner_tests {
         assert_eq!(tracking.omitted_groups, 2);
         assert!(tracking.recovery_created);
         assert!(tracking.filter_failed);
+        assert_eq!(tracking.runtime_error.as_deref(), Some("filter_failed"));
     }
 
     #[test]

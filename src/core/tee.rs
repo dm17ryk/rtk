@@ -292,6 +292,12 @@ pub struct LosslessTeeReservation {
     committed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LosslessTeeReservationError {
+    Oversized,
+    Unavailable,
+}
+
 /// A selected lossy CMD display whose recovery artifact remains protected
 /// until the caller has written its hint to stdout.
 pub struct LosslessTeeCommit {
@@ -444,29 +450,17 @@ pub(crate) fn reserve_lossless_tee_file(
     max_file_size: usize,
     max_files: usize,
 ) -> Option<LosslessTeeReservation> {
-    reserve_lossless_tee_file_with_limit(raw, command_slug, tee_dir, Some(max_file_size), max_files)
-}
-
-/// Reserve a complete lossless artifact without applying the truncating tee
-/// size limit. Semantic emitters use this when the configured ordinary tee
-/// limit would otherwise force an unbounded raw-output fallback.
-pub(crate) fn reserve_lossless_tee_file_unbounded(
-    raw: &str,
-    command_slug: &str,
-    tee_dir: &std::path::Path,
-    max_files: usize,
-) -> Option<LosslessTeeReservation> {
-    reserve_lossless_tee_file_with_limit(raw, command_slug, tee_dir, None, max_files)
+    reserve_lossless_tee_file_with_limit(raw, command_slug, tee_dir, max_file_size, max_files)
 }
 
 fn reserve_lossless_tee_file_with_limit(
     raw: &str,
     command_slug: &str,
     tee_dir: &std::path::Path,
-    max_file_size: Option<usize>,
+    max_file_size: usize,
     max_files: usize,
 ) -> Option<LosslessTeeReservation> {
-    if raw.is_empty() || max_files == 0 || max_file_size.is_some_and(|limit| raw.len() > limit) {
+    if raw.is_empty() || max_files == 0 || raw.len() > max_file_size {
         return None;
     }
     create_tee_dir(tee_dir)?;
@@ -504,31 +498,39 @@ fn reserve_lossless_tee_file_with_limit(
 }
 
 /// Reserve a complete recovery artifact using the configured directory and
-/// retention policy. Dropping the reservation removes an unselected artifact.
-pub fn reserve_lossless_tee(raw: &str, command_slug: &str) -> Option<LosslessTeeReservation> {
+/// size/retention limits. Oversized output is reported separately so semantic
+/// emitters can stay compact without silently retaining an unbounded payload.
+pub(crate) fn reserve_lossless_tee_for_emission(
+    raw: &str,
+    command_slug: &str,
+) -> Result<LosslessTeeReservation, LosslessTeeReservationError> {
     if std::env::var("RTK_TEE").ok().as_deref() == Some("0") || raw.is_empty() {
-        return None;
+        return Err(LosslessTeeReservationError::Unavailable);
     }
-    let config = Config::load().ok()?;
+    let config = Config::load().map_err(|_| LosslessTeeReservationError::Unavailable)?;
     if !config.tee.enabled {
-        return None;
+        return Err(LosslessTeeReservationError::Unavailable);
     }
-    let tee_dir = get_tee_dir(&config)?;
+    let tee_dir = get_tee_dir(&config).ok_or(LosslessTeeReservationError::Unavailable)?;
     let max_files = lossless_tee_max_files_for_test(config.tee.max_files);
-    let bounded = reserve_lossless_tee_file(
+    reserve_lossless_tee_file(
         raw,
         command_slug,
         &tee_dir,
         config.tee.max_file_size,
         max_files,
-    );
-    if bounded.is_some() || raw.len() <= config.tee.max_file_size {
-        bounded
+    )
+    .ok_or(if raw.len() > config.tee.max_file_size {
+        LosslessTeeReservationError::Oversized
     } else {
-        // A lossless artifact cannot honor the ordinary truncation limit: a
-        // truncated file would make the emitted recovery command misleading.
-        reserve_lossless_tee_file_unbounded(raw, command_slug, &tee_dir, max_files)
-    }
+        LosslessTeeReservationError::Unavailable
+    })
+}
+
+/// Reserve a complete recovery artifact using the configured directory and
+/// retention policy. Dropping the reservation removes an unselected artifact.
+pub fn reserve_lossless_tee(raw: &str, command_slug: &str) -> Option<LosslessTeeReservation> {
+    reserve_lossless_tee_for_emission(raw, command_slug).ok()
 }
 
 fn resolve_lossless_recovery_file(identifier: &str, tee_dir: &std::path::Path) -> Option<PathBuf> {
