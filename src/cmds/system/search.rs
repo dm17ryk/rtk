@@ -1095,10 +1095,19 @@ fn rg_replacement_values(args: &[String]) -> Vec<String> {
 }
 
 fn run_rg_exact(args: &[String], verbose: u8, reason: ExactReason) -> Result<i32> {
-    let args = args
+    let mut args = args
         .iter()
         .map(std::ffi::OsString::from)
         .collect::<Vec<_>>();
+    if reason == ExactReason::Streaming
+        && !std::io::stdout().is_terminal()
+        && !args.iter().any(|arg| arg == "--line-buffered")
+    {
+        // A piped search must emit matches while its stdin producer is still
+        // open. Keep native output and exit semantics, but disable ripgrep's
+        // block buffering for the exact streaming route.
+        args.insert(0, std::ffi::OsString::from("--line-buffered"));
+    }
     runner::run_passthrough_with_reason("rg", &args, verbose, reason)
 }
 
