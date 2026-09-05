@@ -46,7 +46,7 @@ fn unknown_exact_fallback_persists_contract_and_reason() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
-    assert_eq!(stored, ("exact".into(), Some("unknown".into()), 0, 0));
+    assert_eq!(stored, ("exact".into(), Some("unknown".into()), 1, 1));
 }
 
 #[cfg(windows)]

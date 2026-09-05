@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * bound command aggregation to the terminal viewport and reload after resize
 
+## [0.46.1-dev.9] (2026-09-05)
+
+### Tests
+
+* align exact-traffic integration coverage with neutral residual accounting
+
 ## [0.46.1-dev.7] (2026-09-05)
 
 ### Bug Fixes
