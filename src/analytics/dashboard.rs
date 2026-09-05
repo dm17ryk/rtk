@@ -299,7 +299,18 @@ fn draw_overview(frame: &mut Frame, data: &DashboardData, area: Rect) {
         .split(area);
     let summary = &data.summary;
     let display = summary_display(summary);
-    let bar_width = chunks[0].width.saturating_sub(34).min(60) as usize;
+    let efficiency_suffix_width = [summary.avg_savings_pct, summary.supported_avg_savings_pct]
+        .iter()
+        .map(|pct| format!(" {:.1}%", pct).chars().count())
+        .max()
+        .unwrap_or(0);
+    let bar_width = chunks[0]
+        .width
+        .saturating_sub(2)
+        .saturating_sub(EFFICIENCY_LABEL_WIDTH as u16 + 1)
+        .saturating_sub(2)
+        .saturating_sub(efficiency_suffix_width as u16)
+        .min(60) as usize;
     let stats = vec![
         Line::from(vec![
             metric_span("Commands: ", display.commands),
@@ -350,10 +361,12 @@ fn draw_error_commands(frame: &mut Frame, data: &DashboardData, area: Rect) {
     );
 
     if summary.error_commands.is_empty() {
-        frame.render_widget(
-            Paragraph::new("  No errored commands.").block(panel(title)),
-            area,
-        );
+        let message = if summary.error_command_groups > 0 {
+            "  Errors exist but do not fit in the viewport."
+        } else {
+            "  No errored commands."
+        };
+        frame.render_widget(Paragraph::new(message).block(panel(title)), area);
         return;
     }
 
@@ -943,6 +956,24 @@ mod tests {
     }
 
     #[test]
+    fn narrow_overview_keeps_efficiency_percentages_visible() {
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| draw(frame, 0, &fixture(), None))
+            .expect("overview frame");
+        let rendered = backend_text(&terminal);
+        let lines: Vec<&str> = rendered
+            .lines()
+            .filter(|line| line.contains("Efficiency ("))
+            .collect();
+
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|line| line.contains("80.0%")));
+    }
+
+    #[test]
     fn error_commands_tab_follows_commands() {
         assert_eq!(TAB_NAMES.len(), 6);
         assert_eq!(TAB_NAMES[1], "Commands");
@@ -974,6 +1005,21 @@ mod tests {
         assert!(rendered.contains("Error Commands"));
         assert!(rendered.contains("rtk rg --huge-log"));
         assert!(rendered.contains("filter_failed"));
+    }
+
+    #[test]
+    fn error_commands_tab_explains_when_errors_do_not_fit() {
+        let mut data = fixture();
+        data.summary.error_command_groups = 1;
+        let backend = TestBackend::new(100, 8);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| draw(frame, 2, &data, None))
+            .expect("error commands frame");
+        let rendered = backend_text(&terminal);
+
+        assert!(rendered.contains("Errors exist but do not fit in the viewport."));
     }
 
     #[test]

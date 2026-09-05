@@ -240,7 +240,7 @@ pub struct GainSummary {
     /// The default summary keeps the historical top-10 limit; callers that
     /// render their own viewport can request all command groups.
     pub by_command: Vec<(String, usize, usize, f64, u64)>,
-    /// Last 30 days of activity: (date, saved_tokens)
+    /// Activity rows, oldest first: (date, saved_tokens). The caller may limit the rows.
     pub by_day: Vec<(String, usize)>,
     /// Total number of days represented by the dashboard activity query.
     pub activity_total_days: usize,
