@@ -71,7 +71,7 @@ def command_tokens(command: str) -> list[str]:
 def command_matches(command: str, expected: str) -> bool:
     actual_tokens = command_tokens(command)
     expected_tokens = command_tokens(expected)
-    return bool(expected_tokens) and actual_tokens[: len(expected_tokens)] == expected_tokens
+    return bool(expected_tokens) and actual_tokens == expected_tokens
 
 
 def result_bytes(value: object) -> int:
@@ -182,7 +182,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--expect-rtk-command",
-        help="exact direct RTK command prefix that structured evidence must demonstrate",
+        help="exact direct RTK command that structured evidence must demonstrate",
     )
     parser.add_argument(
         "--require-verified",

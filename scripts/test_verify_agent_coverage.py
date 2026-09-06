@@ -181,6 +181,40 @@ class VerifyAgentCoverageTests(unittest.TestCase):
         self.assertEqual(report["rtk_evidence"], [])
         self.assertIn("rtk git status", report["live_reason"])
 
+    def test_compound_rtk_prefix_is_not_verified_without_direct_execution(self) -> None:
+        events = (
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "command-1",
+                    "type": "command_execution",
+                    "command": "rtk git status < /dev/null/rtk-review-input || true",
+                    "aggregated_output": "",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            },
+            {"type": "item.completed", "item": {"text": "RTK_LIVE_CODEX_OK"}},
+        )
+        completed = run_validator(
+            "--expect-stdout",
+            "RTK_LIVE_CODEX_OK",
+            "--evidence-format",
+            "codex-jsonl",
+            "--expect-rtk-command",
+            "rtk git status",
+            "--require-verified",
+            "--live-command",
+            *emit_json_lines(*events),
+        )
+
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        report = json.loads(completed.stdout)
+        self.assertEqual(report["live_verification"], "unverified")
+        self.assertEqual(report["live_smoke"], "passed")
+        self.assertEqual(report["rtk_evidence"], [])
+        self.assertIn("rtk git status", report["live_reason"])
+
     def test_missing_live_marker_stays_failed(self) -> None:
         completed = run_validator(
             "--expect-stdout",
