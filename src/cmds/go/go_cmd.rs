@@ -74,12 +74,22 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
         return runner::run_passthrough_with_reason("go", &exact_args, verbose, ExactReason::Structured);
     }
 
-    runner::run_ai_from_filter(
+    let args_display = format!("-json {}", args.join(" "));
+    runner::run_ai_filtered_with_exit(
         cmd,
         "go test",
-        &format!("-json {}", args.join(" ")),
+        &args_display,
         BudgetClass::Diagnostic,
-        filter_go_test_json,
+        |raw, exit_code| {
+            let filtered = filter_go_test_json(raw);
+            let document = runner::document_from_filtered(
+                raw,
+                &filtered,
+                &args_display,
+                exit_code,
+            );
+            Ok(document.with_lossless_baseline(go_test_native_baseline(raw)))
+        },
         crate::core::runner::RunOptions::stdout_only().tee("go_test"),
     )
 }
@@ -498,6 +508,31 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
     result.trim().to_string()
 }
 
+/// Reconstruct the output that `go test` would have written without `-json`.
+///
+/// RTK adds `-json` as a parse aid, but the protocol stream is not the native
+/// output users asked for. Keeping the event payload as the lossless baseline
+/// makes the shared no-worse guard compare semantic output with the actual
+/// command output, rather than with Go's larger JSON transport.
+fn go_test_native_baseline(output: &str) -> String {
+    let mut baseline = String::new();
+    for line in output.lines() {
+        let Ok(event) = serde_json::from_str::<GoTestEvent>(line.trim()) else {
+            continue;
+        };
+        if event.action == "output" {
+            if let Some(text) = event.output {
+                baseline.push_str(&text);
+            }
+        }
+    }
+    if baseline.is_empty() {
+        output.to_string()
+    } else {
+        baseline
+    }
+}
+
 fn select_go_test_failure_lines(outputs: &[String]) -> Vec<String> {
     let mut relevant = Vec::new();
     let mut keep_next_context_line = false;
@@ -816,6 +851,22 @@ mod tests {
             result.contains("FAIL"),
             "Expected failure output in summary, got: {}",
             result
+        );
+    }
+
+    #[test]
+    fn go_test_native_baseline_reconstructs_output_events() {
+        let output = r#"{"Action":"run","Package":"bench","Test":"TestAdd"}
+{"Action":"output","Package":"bench","Test":"TestAdd","Output":"=== RUN   TestAdd\n"}
+{"Action":"output","Package":"bench","Test":"TestAdd","Output":"--- PASS: TestAdd (0.00s)\n"}
+{"Action":"pass","Package":"bench","Test":"TestAdd"}
+{"Action":"output","Package":"bench","Output":"PASS\n"}
+{"Action":"output","Package":"bench","Output":"ok  \tbench\t0.002s\n"}
+{"Action":"pass","Package":"bench"}"#;
+
+        assert_eq!(
+            go_test_native_baseline(output),
+            "=== RUN   TestAdd\n--- PASS: TestAdd (0.00s)\nPASS\nok  \tbench\t0.002s\n"
         );
     }
 

@@ -5,7 +5,7 @@ src/cmds/cloud/wget_cmd.rs	prints=4	stdout_handles=0	fingerprint=1bca0f20521e451
 src/cmds/dotnet/dotnet_cmd.rs	prints=3	stdout_handles=0	fingerprint=c326e89f4d1b9ce1
 src/cmds/git/diff_cmd.rs	prints=2	stdout_handles=0	fingerprint=7737f0f8f26d82a2
 src/cmds/git/git.rs	prints=14	stdout_handles=0	fingerprint=811e7f6869edb524
-src/cmds/go/go_cmd.rs	prints=2	stdout_handles=0	fingerprint=ddecbcedc1297f8e
+src/cmds/go/go_cmd.rs	prints=2	stdout_handles=0	fingerprint=63d4afcac2552639
 src/cmds/js/pnpm_cmd.rs	prints=3	stdout_handles=0	fingerprint=41bb7cfd8d5d4288
 src/cmds/js/prisma_cmd.rs	prints=3	stdout_handles=0	fingerprint=fb15ed49f1af9fbd
 src/cmds/powershell/orchestrator.rs	prints=0	stdout_handles=1	fingerprint=2ffe00af154aa8c7
