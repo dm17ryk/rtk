@@ -56,9 +56,10 @@ fn codex_pre_tool_use_returns_only_a_safe_input_update() {
         response["hookSpecificOutput"]["updatedInput"]["description"],
         "Inspect repository"
     );
-    assert!(response["hookSpecificOutput"]
-        .get("permissionDecision")
-        .is_none());
+    assert_eq!(
+        response["hookSpecificOutput"]["permissionDecision"],
+        "allow"
+    );
 }
 
 #[test]

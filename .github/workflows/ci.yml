@@ -3,6 +3,13 @@ name: CI
 on:
   pull_request:
     branches: [develop, master]
+  workflow_dispatch:
+    inputs:
+      run_live_hosts:
+        description: Run paid Codex and Claude host probes when their configured variables are enabled
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -63,6 +70,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
       - name: Install test tools (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get install -y ripgrep
@@ -89,7 +99,53 @@ jobs:
             throw 'ripgrep was not available after installation'
           }
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all
+      - name: Build candidate binary
+        run: cargo build
+      - name: Smoke-test candidate routing (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          ./target/debug/rtk --version
+          ./target/debug/rtk rewrite "git status"
+      - name: Smoke-test candidate routing (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          .\target\debug\rtk.exe --version
+          .\target\debug\rtk.exe rewrite "git status"
+      - name: Smoke-test isolated Codex installation lifecycle (Unix)
+        if: matrix.os != 'windows-latest'
+        env:
+          CODEX_HOME: ${{ runner.temp }}/codex-home
+        run: |
+          mkdir -p "$CODEX_HOME"
+          ./target/debug/rtk init -g --codex
+          ./target/debug/rtk init -g --codex
+          ./target/debug/rtk doctor --agent codex --format json
+          ./target/debug/rtk init -g --codex --uninstall
+          ./target/debug/rtk init -g --codex --uninstall
+          ./target/debug/rtk init -g --codex
+          ./target/debug/rtk doctor --agent codex --format json
+      - name: Smoke-test isolated Codex installation lifecycle (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          CODEX_HOME: ${{ runner.temp }}\codex-home
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:CODEX_HOME | Out-Null
+          $rtk = (Resolve-Path .\target\debug\rtk.exe).Path
+          & $rtk init -g --codex
+          & $rtk init -g --codex
+          & $rtk doctor --agent codex --format json
+          & $rtk init -g --codex --uninstall
+          & $rtk init -g --codex --uninstall
+          & $rtk init -g --codex
+          & $rtk doctor --agent codex --format json
+      - name: Full Rust suite (includes protocol and installation migration tests)
+        run: cargo test --all
+      - name: Deterministic agent fixture validator
+        run: |
+          python scripts/test_verify_agent_coverage.py
+          python scripts/verify-agent-coverage.py
 
   windows-native:
     name: native Windows smoke tests
@@ -122,11 +178,12 @@ jobs:
         run: |
           cargo build
           $env:RTK_DEBUG = "1"
-          cargo run -- --version
-          cargo run -- rewrite dir
-          cargo run -- cmd "echo rtk-cmd-smoke & dir /b"
-          cargo run -- powershell -NoProfile -NonInteractive -Command "Write-Output rtk-powershell-smoke"
-          cargo run -- pwsh -NoProfile -NonInteractive -Command "Write-Output rtk-pwsh-smoke"
+          $rtk = Resolve-Path .\target\debug\rtk.exe
+          & $rtk --version
+          & $rtk rewrite dir
+          & $rtk cmd "echo rtk-cmd-smoke & dir /b"
+          & $rtk powershell -NoProfile -NonInteractive -Command "Write-Output rtk-powershell-smoke"
+          & $rtk pwsh -NoProfile -NonInteractive -Command "Write-Output rtk-pwsh-smoke"
           cargo test "cmds::windows::tests::" --bin rtk
           cargo test "cmds::powershell::" --bin rtk
           cargo test --test windows_cmd_e2e
@@ -140,6 +197,87 @@ jobs:
           if ($before -ne $after) { throw "PowerShell manifest snapshot drifted; regenerate and commit it." }
           cargo test service::mcp -- --nocapture
           cargo test --all
+
+  live-codex:
+    name: live Codex host (opt-in; skipped means unverified)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_hosts && vars.RTK_LIVE_CODEX_CONFIGURED == 'true' }}
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+      - name: Build candidate and install Codex CLI
+        run: |
+          cargo build --release
+          npm install --global @openai/codex
+          echo "$PWD/target/release" >> "$GITHUB_PATH"
+          codex --version
+      - name: Install candidate integration in an isolated profile
+        env:
+          CODEX_HOME: ${{ runner.temp }}/codex-home
+        run: |
+          mkdir -p "$CODEX_HOME"
+          rtk init -g --codex
+          rtk doctor --agent codex --format json
+      - name: Run live Codex probe
+        env:
+          CODEX_HOME: ${{ runner.temp }}/codex-home
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          test -n "$OPENAI_API_KEY" || { echo "OPENAI_API_KEY is missing" >&2; exit 1; }
+          python scripts/verify-agent-coverage.py \
+            --expect-stdout RTK_LIVE_CODEX_OK \
+            --live-command codex exec --json --ephemeral \
+            --dangerously-bypass-approvals-and-sandbox \
+            --dangerously-bypass-hook-trust \
+            "Run git status and rtk --version. Report RTK_LIVE_CODEX_OK only after both commands succeed."
+
+  live-claude:
+    name: live Claude host (opt-in; skipped means unverified)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_hosts && vars.RTK_LIVE_CLAUDE_CONFIGURED == 'true' }}
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+      - name: Build candidate and install Claude Code
+        run: |
+          cargo build --release
+          npm install --global @anthropic-ai/claude-code
+          echo "$PWD/target/release" >> "$GITHUB_PATH"
+          claude --version
+      - name: Install candidate integration in an isolated profile
+        env:
+          HOME: ${{ runner.temp }}/claude-home
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/claude-home/.claude
+        run: |
+          mkdir -p "$CLAUDE_CONFIG_DIR"
+          rtk init -g --auto-patch
+          rtk doctor --agent claude --format json
+      - name: Run live Claude probe
+        env:
+          HOME: ${{ runner.temp }}/claude-home
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/claude-home/.claude
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          test -n "$ANTHROPIC_API_KEY" || { echo "ANTHROPIC_API_KEY is missing" >&2; exit 1; }
+          python scripts/verify-agent-coverage.py \
+            --expect-stdout RTK_LIVE_CLAUDE_OK \
+            --live-command claude -p --output-format json --max-turns 3 \
+            --dangerously-skip-permissions \
+            "Run git status and rtk --version. Report RTK_LIVE_CLAUDE_OK only after both commands succeed."
 
   security:
     name: Security Scan

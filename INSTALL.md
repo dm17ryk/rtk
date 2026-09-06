@@ -87,6 +87,25 @@ rtk gain  # MUST show the savings dashboard, not "command not found"
             No hook, no global effect
 ```
 
+### Codex: project, global, and selected home
+
+```bash
+rtk init --codex             # project .codex/config.toml + AGENTS.md
+rtk init -g --codex          # selected Codex home (default ~/.codex)
+rtk doctor --agent codex --format json
+```
+
+To repair an alternate Codex home, set `CODEX_HOME` for both init and doctor.
+The installer updates only RTK's hook, instruction, and MCP entries. It preserves
+unrelated TOML keys, servers, hooks, named-profile files, custom-agent files,
+and model/reasoning settings. A named `codex --profile <name>` overlay remains a
+host choice; RTK does not impose this repository's task-role assignments.
+
+Re-run the same init command after an RTK upgrade or executable-path change.
+The command is idempotent, migrates the old Codex awareness/MCP-only setup, and
+refreshes absolute paths. Review project hook changes before granting Codex
+trust, then restart or start a fresh Codex session.
+
 ### Recommended: Global Hook-First Setup
 
 **Best for: All projects, automatic RTK usage**
@@ -183,6 +202,19 @@ rtk init --show
 # Should show: ✅ Hook: ... (thin delegator, up to date)
 ```
 
+#### From Codex awareness/MCP-only integration
+
+```bash
+rtk init -g --codex
+rtk init -g --codex --dry-run
+rtk doctor --agent codex --format json
+```
+
+The first command installs the native Codex hook and refreshes the absolute MCP
+path. The second must report no pending writes once initialization is current.
+If a project-local hook was added, complete Codex's normal trust review; do not
+use RTK to bypass it.
+
 ## Common User Flows
 
 ### First-Time User (Recommended)
@@ -247,6 +279,20 @@ rtk pnpm list
 rtk vitest
 ```
 
+On native Windows, verify the shell routes independently with the same installed
+binary. MSYS2/WSL is optional and does not replace these native hosts:
+
+```powershell
+where.exe rtk
+rtk cmd "echo %CD% & dir /b"
+rtk powershell -NoProfile -NonInteractive -Command "Write-Output rtk-powershell-ok"
+rtk pwsh -NoProfile -NonInteractive -Command "Write-Output rtk-pwsh-ok"
+```
+
+Use direct routes (`rtk read`, `rtk rg`, `rtk git`, `rtk cargo`) first. Use the
+shell-expression routes only when native shell syntax is part of the request;
+keep interactive, redirected, structured, binary, and exact-output work native.
+
 ## Uninstalling
 
 ### Complete Removal (Global Installations Only)
@@ -262,6 +308,13 @@ rtk init -g --uninstall
 #   - Registration: RTK hook entry from settings.json
 
 # Restart Claude Code after uninstall
+```
+
+For Codex, remove the matching scope without changing model/profile files:
+
+```bash
+rtk init --codex --uninstall
+rtk init -g --codex --uninstall
 ```
 
 **For Local Projects**: Manually remove RTK block from `./CLAUDE.md`

@@ -46,7 +46,7 @@ Agent runs "cargo test"
 | Factory Droid | Shell hook (`PreToolUse`, matcher `Execute`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
-| Codex CLI | AGENTS.md instructions | N/A |
+| Codex CLI | Native `PreToolUse` hook + instructions | Yes, in host bypass mode |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
@@ -193,9 +193,56 @@ rtk init --global --agent windsurf    # creates .windsurfrules in current projec
 ### Codex CLI
 
 ```bash
-rtk init --codex           # project-scoped (AGENTS.md)
-rtk init --global --codex  # user-global (~/.codex/AGENTS.md)
+rtk init --codex           # project-scoped hook, instructions, and MCP
+rtk init --global --codex  # selected $CODEX_HOME (default: ~/.codex)
+rtk doctor --agent codex --format json
 ```
+
+Re-running init upgrades the earlier awareness/MCP-only setup, refreshes the
+absolute RTK executable path, and preserves unrelated TOML keys, hooks, MCP
+servers, model settings, and instruction content. Project hooks load only after
+Codex trusts the project; inspect the changes before granting trust. Remove only
+RTK's entries with `rtk init --uninstall --codex` (add `--global` for the
+selected Codex home).
+
+Codex requires `permissionDecision: "allow"` beside rewritten `updatedInput`.
+RTK emits that response only when Codex already reports
+`permission_mode: "bypassPermissions"`. Normal approval modes, denied or
+unknown operations, redirects, substitutions, and unknown schemas remain
+untouched so RTK cannot authorize an operation the host did not authorize.
+
+Named profiles are separate overlays such as
+`$CODEX_HOME/deep-review.config.toml`; choose one with `codex --profile
+deep-review`. `rtk init` repairs the selected `CODEX_HOME` base integration but
+does not install, override, or remove project-specific model/effort choices.
+
+### Workers and configuration boundaries
+
+Normal in-process subtasks use the same host executor and inherit its RTK
+instructions, MCP tools, sandbox, and permission mode. A child can select a
+different model without becoming a different shell environment; no in-place
+model switch should be inferred when the host instead creates a fresh child.
+
+Separate CLI/headless workers and SDK workers are new processes. They must load
+their own effective instructions, hook/settings files, MCP registration, PATH,
+and selected profile. SDK adapters must explicitly install or call RTK; host
+defaults are not a universal SDK contract. Native tools and remote services
+also need an explicit, schema-validated adapter. Unknown host versions or tool
+schemas are `unsupported`/`unverified`, never silently counted as filtered.
+
+For a live smoke check, use the candidate installation and record each step
+separately:
+
+1. In the main task, run `rtk --version` and one direct read-only route such as
+   `rtk git status`.
+2. Start a fresh child through the host's native subagent mechanism and ask it
+   to run the same two commands; record the child identity and observed
+   model/effort.
+3. Resume that same child for a follow-up `rtk doctor --agent codex --format
+   json`; confirm the earlier execution is not counted twice.
+
+If the host cannot create or resume children, mark those rows unverified. Do not
+replace them with fixture results or launch an unrelated provider.
 
 ### Kilo Code
 
@@ -244,7 +291,13 @@ Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any o
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) rewrite supported top-level commands before execution. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API. Generated instructions and MCP server guidance additionally tell agents not to hide supported commands inside a PowerShell or Command Prompt wrapper.
+Rules file integrations (Cline, Windsurf, Kilo Code, Antigravity) rely on the
+model following instructions. Full hook integrations (Claude Code, Codex,
+Cursor, Gemini) rewrite supported top-level commands before execution within
+their host-specific permission boundaries. Plugin integrations (OpenCode, Pi)
+use in-place mutation via the agent's extension API. Generated instructions and
+MCP server guidance additionally tell agents not to hide supported commands
+inside a PowerShell or Command Prompt wrapper.
 
 ## Windows support
 

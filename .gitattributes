@@ -2,3 +2,6 @@
 # Without this, Windows runners (core.autocrlf=true) check fixtures out with
 # CRLF, and tests that synthesize CRLF input from them produce \r\r\n.
 tests/fixtures/** -text
+
+# Bash entry points must remain executable from native Windows checkouts.
+scripts/*.sh text eol=lf

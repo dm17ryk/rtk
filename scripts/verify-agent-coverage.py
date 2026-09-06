@@ -49,6 +49,10 @@ def validate_manifest(repo: Path) -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--expect-stdout",
+        help="require this literal marker in live command stdout before marking it verified",
+    )
+    parser.add_argument(
         "--live-command",
         nargs=argparse.REMAINDER,
         help="explicitly run a host command after this option; no command is run by default",
@@ -72,12 +76,33 @@ def main() -> int:
         if not command:
             print(json.dumps({"fixture_validation": "passed", "live_verification": "invalid"}))
             return 2
-        completed = subprocess.run(command, cwd=repo, text=True, capture_output=True, check=False)
-        report["live_verification"] = "passed" if completed.returncode == 0 else "failed"
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=repo,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            report["live_verification"] = "unsupported"
+            report["live_command"] = command
+            report["live_reason"] = f"runtime not found: {command[0]}"
+            print(json.dumps(report, sort_keys=True))
+            return 3
+
         report["live_command"] = command
         report["live_exit_code"] = completed.returncode
         report["live_stdout_bytes"] = len(completed.stdout.encode("utf-8"))
         report["live_stderr_bytes"] = len(completed.stderr.encode("utf-8"))
+        marker_found = args.expect_stdout is None or args.expect_stdout in completed.stdout
+        report["live_expected_stdout_found"] = marker_found
+        if completed.returncode == 0 and marker_found:
+            report["live_verification"] = "verified"
+        else:
+            report["live_verification"] = "failed"
+            if completed.returncode == 0:
+                report["live_reason"] = "expected stdout marker was not observed"
 
     print(json.dumps(report, sort_keys=True))
     return 0 if report["fixture_validation"] == "passed" and report["live_verification"] != "failed" else 1

@@ -38,7 +38,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`cursor/`](cursor/README.md)** — Shell hook, Cursor JSON format, empty `{}` response requirement
 - **[`cline/`](cline/README.md)** — Rules file (prompt-level), `.clinerules` project-local installation
 - **[`windsurf/`](windsurf/README.md)** — Rules file (prompt-level), `.windsurfrules` workspace-scoped
-- **[`codex/`](codex/README.md)** — Awareness document, `AGENTS.md` integration, `$CODEX_HOME` or `~/.codex/` location
+- **[`codex/`](codex/README.md)** — Native `PreToolUse` adapter plus `AGENTS.md`, MCP, and `$CODEX_HOME` integration
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, local `isBashToolCallEvent` guard, in-place mutation, `~/.pi/agent/extensions/`
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
@@ -55,7 +55,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Gemini CLI | Rust binary (`rtk hook gemini`) | Transparent rewrite | Yes (`hookSpecificOutput`) |
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
-| Codex CLI | AGENTS.md / instructions | Prompt-level guidance | N/A |
+| Codex CLI | Rust binary (`rtk hook codex`) + instructions | Conditional transparent rewrite | Yes (`updatedInput`) in host bypass mode |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | In-place mutation | Yes |
 | Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
@@ -158,6 +158,37 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 ```
 
 **No rewrite**: `{"decision": "allow"}`
+
+### Codex CLI (Rust Binary)
+
+**Input** (stdin):
+
+```json
+{
+  "hook_event_name": "PreToolUse",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "Bash",
+  "tool_input": { "command": "git status", "description": "Inspect status" }
+}
+```
+
+**Output** (only for a safe rewrite in bypass mode):
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "allow",
+    "updatedInput": {
+      "command": "rtk git status",
+      "description": "Inspect status"
+    }
+  }
+}
+```
+
+Normal approval modes and unsafe or unknown input produce no output, so Codex
+executes the original request through its native permission flow.
 
 ### Mistral Vibe (Rust Binary)
 
@@ -269,9 +300,9 @@ New integrations must follow the [Exit Code Contract](#exit-code-contract) and [
 
 | Tier | Mechanism | Maintenance | Examples |
 |------|-----------|-------------|----------|
-| **Full hook** | Shell script or Rust binary, intercepts commands via agent's hook API | High — must track agent API changes | Claude Code, Cursor, Copilot, Gemini |
+| **Full hook** | Shell script or Rust binary, intercepts commands via agent's hook API | High — must track agent API changes | Claude Code, Codex, Cursor, Copilot, Gemini |
 | **Plugin** | TypeScript/JS/Python plugin in agent's plugin system | Medium — agent manages loading | OpenCode, Hermes, Pi |
-| **Rules file** | Prompt-level instructions the agent reads | Low — no code to break | Cline, Windsurf, Codex |
+| **Rules file** | Prompt-level instructions the agent reads | Low — no code to break | Cline, Windsurf, Kilo Code, Antigravity |
 
 ### Eligibility
 

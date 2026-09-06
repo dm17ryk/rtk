@@ -330,7 +330,7 @@ Start here, then drill down into each README for file-level details.
 | [`cursor/`](../hooks/cursor/README.md) | Cursor IDE | Shell hook, empty JSON response requirement |
 | [`cline/`](../hooks/cline/README.md) | Cline / Roo Code | Rules file (prompt-level, no programmatic hook) |
 | [`windsurf/`](../hooks/windsurf/README.md) | Windsurf / Cascade | Rules file (workspace-scoped) |
-| [`codex/`](../hooks/codex/README.md) | OpenAI Codex CLI | Awareness document, AGENTS.md integration |
+| [`codex/`](../hooks/codex/README.md) | OpenAI Codex CLI | Native PreToolUse adapter, AGENTS.md, and MCP |
 | [`opencode/`](../hooks/opencode/README.md) | OpenCode | TypeScript plugin, zx library, in-place mutation |
 
 ---
@@ -348,7 +348,7 @@ RTK supports the following LLM agents through hook integrations:
 | Gemini CLI | Rust binary | `rtk hook gemini` reads JSON | Yes (`hookSpecificOutput`) |
 | Cline/Roo Code | Rules file | Prompt-level guidance | N/A (prompt) |
 | Windsurf | Rules file | Prompt-level guidance | N/A (prompt) |
-| Codex CLI | Awareness doc | AGENTS.md integration | N/A (prompt) |
+| Codex CLI | Native hook + instructions | `PreToolUse` in config.toml | Yes in bypass mode |
 | OpenCode | TS plugin | `tool.execute.before` event | Yes (in-place mutation) |
 
 > **Details**: [`hooks/README.md`](../hooks/README.md) has the full JSON schemas for each agent. [`src/hooks/README.md`](../src/hooks/README.md) covers installation, integrity verification, and the rewrite command.

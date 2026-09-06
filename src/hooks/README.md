@@ -28,7 +28,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Claude-MD (legacy) | `rtk init --claude-md` | 134-line RTK block | CLAUDE.md |
 | Windsurf | `rtk init -g --agent windsurf` | `.windsurfrules` | -- |
 | Cline | `rtk init --agent cline` | `.clinerules` | -- |
-| Codex | `rtk init --codex` | RTK.md in `$CODEX_HOME` or `~/.codex` | AGENTS.md |
+| Codex | `rtk init --codex` | RTK.md in project or selected `$CODEX_HOME` | AGENTS.md, config.toml hook + MCP |
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
 | Pi | `rtk init --agent pi` | `.pi/extensions/rtk.ts` | -- |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
@@ -89,7 +89,7 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 | Cursor (rtk hook cursor) | Ready | `permission: "ask",` — users will be prompted when Cursor enforces the permission; in the meantime, allow |
 | Gemini CLI (rtk hook gemini) | No (allow/deny only) | allow (limitation — no ask mode in Gemini) |
 | Copilot CLI (rtk hook copilot) | No updatedInput | deny-with-suggestion (unchanged) |
-| Codex | Native `PreToolUse` rewrite only in `bypassPermissions`; approval mode is unchanged | unchanged (RTK cannot reproduce Codex's per-command approval) |
+| Codex | Native `PreToolUse` rewrite only in `bypassPermissions`; current schema requires `permissionDecision: "allow"` with `updatedInput` | unchanged outside bypass mode (RTK cannot reproduce Codex's per-command approval) |
 | Mistral Vibe (rtk hook vibe) | No native ask surface | passthrough — Vibe's own approval prompt fires on the rewritten command |
 
 ### Implementation

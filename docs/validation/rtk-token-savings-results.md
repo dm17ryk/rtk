@@ -1,23 +1,33 @@
 # RTK agent-output measurement
 
-The repository now includes scripts/benchmark-agent-output.py for paired,
-offline measurements. The report separates:
+Task 13 reran a deterministic paired measurement with the same repository,
+input, candidate executable, model-visible boundary, and `byte_estimate`
+counter (`ceil(UTF-8 bytes / 4)`). The command compared native `rg` with
+candidate `rtk rg` for `permissionDecision` under `src/hooks`.
 
-- raw_producer
-- baseline_model_input
-- candidate_model_input
-- recovery_input
-- hook_context
-- tool_schema_context
+| Field | Baseline | Candidate |
+|---|---:|---:|
+| Producer/model-input bytes | 4,429 | 3,196 |
+| Estimated tokens | 1,108 | 799 |
+| Exit status | 0 | 0 |
+| Initial output reduction | — | 27.8392% |
+| Recovery bytes read | 0 | 0 |
+| Hook/tool-schema context in this offline run | 0 | 0 |
 
-The default counter is byte_estimate, defined as ceil(UTF-8 bytes / 4).
-An optional tiktoken:<encoding> counter can be selected when the dependency
-is deliberately installed. Neither counter is presented as a universal
-billing-token count.
+Reproduce from the repository root with:
 
-The current implementation has deterministic route and contract tests, but no
-paid live-agent benchmark was run in this environment. A valid paired run must
-record the base/candidate revisions, identical task inputs, producer exit
-codes, complete rendered streams, recovery reads, and the selected counter.
-Model routing or reasoning-effort changes must be reported separately from
-RTK output compression.
+```text
+python scripts/benchmark-agent-output.py --label task13-rg-permission-contract --baseline-command "rg -n permissionDecision src/hooks" --candidate-command "target/debug/rtk.exe rg -n permissionDecision src/hooks" --counter byte_estimate
+```
+
+This is an offline command-output comparison, not a paid model benchmark or a
+billing-token count. No live agent task was run, so complete conversation
+history, reasoning tokens, model output, retries, and provider cost are
+unavailable. No recovery read occurred; if the full 4,429-byte producer output
+had been recovered, that recovery input would need to be reported separately
+and could erase the initial model-input reduction for that task.
+
+The repository script keeps `raw_producer`, `baseline_model_input`,
+`candidate_model_input`, `recovery_input`, `hook_context`, and
+`tool_schema_context` separate. Model routing and reasoning-effort effects are
+never counted as RTK savings.

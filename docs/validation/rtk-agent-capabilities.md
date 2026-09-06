@@ -1,64 +1,76 @@
-# RTK agent capability baseline
+# RTK agent capability validation
 
-Recorded 2026-09-05 on the Windows checkout `D:\src\rtk`.
+Recorded 2026-09-06 on the Windows checkout `D:\src\rtk` from baseline
+`b87d349` plus the Task 13 candidate changes.
 
-## Environment
+## Observed environment
 
 | Item | Observed value |
 |---|---|
-| Source branch | `RTK-Global-Optimization` |
-| Source commit | `d296b2b` plus intentionally uncommitted implementation work |
-| Installed RTK | `0.46.1-dev.10` |
-| Installed RTK executable | `C:\Users\dmitr\.cargo\bin\rtk.exe` |
-| Codex executable configured by the host | `C:\Users\dmitr\AppData\Local\OpenAI\Codex\bin\27d6a192e9c98618\codex.exe` |
-| Codex profile | `C:\Users\dmitr\.codex\config.toml` |
-| RTK MCP registration | One absolute `[mcp_servers.rtk]` entry using `rtk.exe mcp` |
-| Global instructions | `C:\Users\dmitr\.codex\AGENTS.md` references `C:\Users\dmitr\.codex\RTK.md` |
-| Project trust | `D:\src\rtk` is trusted by the active Codex profile |
+| Branch | `codex/rtk-codex-implementation` |
+| Candidate / installed RTK before final reinstall | `0.46.1-dev.12` |
+| Candidate binary used for integration checks | `D:\src\rtk\target\debug\rtk.exe` |
+| Codex CLI | `codex-cli 0.153.0` |
+| Claude Code | `2.1.258` |
+| Active Codex home | `C:\Users\dmitr\.codex` (`default`) |
+| Task 13 implementer binding | requested and host-bound `gpt-5.6-sol` / `high` |
+| Base Codex config | `gpt-5.6-luna` / `medium`, unchanged by RTK init |
 
-`rtk init -g --codex` was run after a private backup of the Codex config. A
-second `rtk init -g --codex --dry-run` reported `Nothing written` and the MCP
-registration was `already up to date`.
+Before migration, candidate `rtk doctor --agent codex --format json` reported
+instructions and MCP `present`, hook `missing-hook`, and live verification
+`unverified`. After backing up `config.toml`, the candidate ran
+`rtk init -g --codex`; doctor then reported hook `ready`. A second
+`rtk init -g --codex --dry-run` reported `Nothing written` and MCP `already up
+to date`.
 
-## Protocol checks
+The redacted before/after diff added one `hooks.PreToolUse` matcher/handler and
+changed only `mcp_servers.rtk.command` to the candidate path. TOML serialization
+reordered existing keys without changing their values. Unrelated MCP servers,
+marketplaces, feature flags, and the base model/effort remained present.
 
-The current Codex hook output schema accepts a `PreToolUse` response with
-`hookSpecificOutput`, `hookEventName`, optional `updatedInput`, and optional
-permission fields. The source of truth used for this baseline is the
-[Codex pre-tool-use output schema](https://github.com/openai/codex/blob/main/codex-rs/hooks/schema/generated/pre-tool-use.command.output.schema.json).
+## Protocol contract
 
-Claude Code’s current hook contract uses JSON settings with a `PreToolUse`
-matcher group and command handlers. A handler may return
-`hookSpecificOutput.updatedInput` or remain silent with exit code 0 so the
-normal permission flow continues. See the [Claude Code hooks reference](https://code.claude.com/docs/en/hooks).
+Current Codex documentation requires rewritten `updatedInput` to be paired with
+`permissionDecision: "allow"`. RTK now emits that pair only when the event is
+canonical `Bash`, the command is safely rewritable, and Codex already reports
+`permission_mode = "bypassPermissions"`. Normal approval modes and unsafe or
+unknown input remain silent, preserving the original host permission flow. See
+the [Codex hook contract](https://learn.chatgpt.com/docs/hooks).
 
-RTK's Codex adapter only returns `updatedInput` when the event is the canonical
-`Bash` tool and Codex supplies `permission_mode = "bypassPermissions"`. In the
-normal `default` approval mode the adapter is intentionally silent: Codex runs
-its own per-command approval after the hook, and RTK cannot safely recreate that
-decision for a renamed `rtk ...` command.
+The deterministic boundary is covered by `tests/codex_hook_test.rs`,
+`tests/agent_integration_test.rs`, and the unit tests in
+`src/hooks/codex.rs`/`src/hooks/hook_cmd.rs`. Claude, native tool, MCP, recovery,
+and tracking fixtures remain separate from live-agent evidence.
 
-Live child-agent and follow-up probes were not available through the current
-desktop execution interface. They remain an explicit compatibility gate; no
-fixture result below is presented as live worker evidence.
+## End-to-end matrix
 
-## Deterministic fixture manifest
+| Case | Status | Evidence / boundary |
+|---|---|---|
+| Current Codex main agent | verified | This host executed direct candidate RTK commands; profile doctor is `ready`. Current session hook reload is not inferred. |
+| Codex fresh child | blocked | Explicit Task 13 instruction prohibited subagents; fixture coverage is not a live child. |
+| Codex resumed child/follow-up | blocked | Same authorization boundary; no duplicate-execution claim. |
+| Task-specific model selection | verified | Host role bound this implementer to `gpt-5.6-sol` / `high`; base config remained unchanged. |
+| Changed complexity / custom override | implemented | Precedence is documented and deterministic; no live rebinding was authorized. |
+| Delegation unavailable | verified | Work continued in the same provider/permission scope and the missing live rows stayed explicit. |
+| Nested child | blocked | No nested delegation authorized. |
+| Claude main/background subagents | implemented | Deterministic hook tests pass; no paid live Claude session was run. |
+| Superpowers implementer/reviewer | implemented | Implementer used host integration; separate Astra reviewer was prohibited and is not claimed. |
+| Ruflo headless worker | unsupported | No compatible live Ruflo runtime was established in this environment. |
+| SDK worker | unsupported | No SDK host/adapter was supplied; defaults are not assumed. |
+| Worktree/nested directory | verified | Absolute global RTK reference and executable paths are covered by installer tests. |
+| Alternate `CODEX_HOME` | verified | `test_resolve_codex_dir_prefers_codex_home_and_ignores_empty_value` plus fake-home integration tests. |
+| Windows MCP CMD listing | verified | `windows_cmd_e2e`, MCP service tests, and nonterminal capture tests. |
+| Windows redirected/structured output | verified | CMD/PowerShell passthrough and exact-output tests. |
+| Native Read/Grep replacement | verified | `native_tool_output_test`; producer input is consumed once and unknown/error schemas pass through. |
+| Unknown host/tool schema | verified | Host-specific no-op/fallback tests; no success label is synthesized. |
+| Raw/exact invocation | verified | Exact contract tests preserve bytes/status and avoid false compression credit. |
+| Long output / late failure | verified | Large-output, bounded drain, diagnostics, and recovery tests. |
+| Recovery request | verified | `recovery_navigation_test`; stored data is read without rerunning the producer. |
+| Tracking DB absent/locked | verified | Tracking fail-open tests keep command output/status authoritative. |
+| Originally denied operation | verified | Permission tests and Codex default-mode no-op show RTK cannot authorize it. |
 
-`tests/fixtures/agent_capabilities.json` defines the baseline cases and
-`tests/agent_capability_fixture_test.rs` validates that every case has:
-
-- typed argv without a duplicate leading `rtk`;
-- a unique ID, route, consumer, exit code, and output contract;
-- a checked-in fixture file; and
-- exact output for machine consumers.
-
-The fixture values are sanitized contract examples, not measured model token
-usage. Paired benchmark measurements must record raw bytes, complete
-model-visible bytes, estimated tokens, recovery bytes, fact preservation, and
-exit-code preservation separately.
-
-Run the validator with:
-
-```text
-cargo test --test agent_capability_fixture_test
-```
+`scripts/verify-agent-coverage.py` validates the offline fixture manifest by
+default and reports live verification `unverified`. Its opt-in
+`--live-command` path reports `verified` only after a zero exit and any requested
+stdout marker; missing runtimes are `unsupported` with exit 3, and host failures
+remain failures. The manual CI host jobs are skipped unless explicitly enabled.
