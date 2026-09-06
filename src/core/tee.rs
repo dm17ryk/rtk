@@ -288,6 +288,7 @@ fn write_tee_file(
 pub struct LosslessTeeReservation {
     pending_path: PathBuf,
     committed_path: PathBuf,
+    max_file_size: usize,
     max_files: usize,
     committed: bool,
 }
@@ -347,6 +348,9 @@ impl LosslessTeeReservation {
 
     /// Keep the complete artifact once the caller has selected compact output.
     fn commit_path_locked(&mut self) -> Option<PathBuf> {
+        if std::fs::metadata(&self.pending_path).ok()?.len() > self.max_file_size as u64 {
+            return None;
+        }
         std::fs::rename(&self.pending_path, &self.committed_path).ok()?;
         cleanup_lossless_files_except(
             self.committed_path.parent().expect("tee path has parent"),
@@ -482,6 +486,7 @@ fn reserve_lossless_tee_file_with_limit(
                     return Some(LosslessTeeReservation {
                         pending_path,
                         committed_path,
+                        max_file_size,
                         max_files,
                         committed: false,
                     });
@@ -542,8 +547,26 @@ fn resolve_lossless_recovery_file(identifier: &str, tee_dir: &std::path::Path) -
     {
         return None;
     }
-    let path = tee_dir.join(identifier);
-    path.is_file().then_some(path)
+    let root = normalize_canonical_path(tee_dir.canonicalize().ok()?);
+    let path = normalize_canonical_path(tee_dir.join(identifier).canonicalize().ok()?);
+    if !path.starts_with(&root) || !path.is_file() {
+        return None;
+    }
+    Some(path)
+}
+
+fn normalize_canonical_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let display = path.to_string_lossy();
+        if let Some(rest) = display.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{}", rest));
+        }
+        if let Some(rest) = display.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    path
 }
 
 pub(crate) fn resolve_lossless_recovery(identifier: &str) -> Option<PathBuf> {
@@ -1024,8 +1047,12 @@ mod tests {
             reserve_lossless_tee_file("complete raw output", "cargo test", &directory, 1_024, 20)
                 .unwrap();
         let identifier = reservation.recovery_identifier().to_string();
-        let expected = reservation.committed_path.clone();
         reservation.commit_hint().unwrap();
+        // Resolution canonicalizes both sides; this matters on macOS (`/tmp`
+        // is commonly a symlink) and Windows (the temp path may use an 8.3
+        // alias).
+        let expected =
+            normalize_canonical_path(directory.join(&identifier).canonicalize().unwrap());
 
         assert_eq!(
             resolve_lossless_recovery_file(&identifier, &directory),
@@ -1056,6 +1083,17 @@ mod tests {
             .commit_output_if_better(raw, "a much larger rendered candidate".to_string())
             .is_none());
         assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn lossless_commit_rechecks_the_configured_file_size_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let reservation = reserve_lossless_tee_file("small", "test", temp.path(), 1_024, 20)
+            .expect("reservation");
+        std::fs::write(&reservation.pending_path, "x".repeat(2_048)).unwrap();
+
+        assert!(reservation.commit_hint().is_none());
+        assert!(!temp.path().join("test.lossless.log").exists());
     }
 
     #[test]

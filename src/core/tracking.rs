@@ -36,7 +36,8 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 // ── Project path helpers ── // added: project-scoped tracking support
 
@@ -106,6 +107,77 @@ pub struct CommandRecord {
     pub saved_tokens: usize,
     /// Savings percentage ((saved / input) * 100)
     pub savings_pct: f64,
+}
+
+/// Per-execution identity propagated across an integration boundary.
+///
+/// Host fields are deliberately optional: an absent host event is unknown,
+/// not evidence that the execution belonged to the current agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutionContext {
+    pub execution_id: String,
+    pub host: Option<String>,
+    pub session_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub parent_agent_id: Option<String>,
+    pub task_id: Option<String>,
+    pub tool_call_id: Option<String>,
+}
+
+static EXECUTION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+impl ExecutionContext {
+    pub fn new() -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let sequence = EXECUTION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        Self {
+            execution_id: format!("{nanos}_{}_{}", std::process::id(), sequence),
+            host: None,
+            session_id: None,
+            agent_id: None,
+            parent_agent_id: None,
+            task_id: None,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn from_env_or_new() -> Self {
+        let mut context = Self::new();
+        if let Some(value) = env_value("RTK_EXECUTION_ID") {
+            context.execution_id = value;
+        }
+        context.host = env_value("RTK_HOST");
+        context.session_id = env_value("RTK_SESSION_ID");
+        context.agent_id = env_value("RTK_AGENT_ID");
+        context.parent_agent_id = env_value("RTK_PARENT_AGENT_ID");
+        context.task_id = env_value("RTK_TASK_ID");
+        context.tool_call_id = env_value("RTK_TOOL_CALL_ID");
+        context
+    }
+}
+
+fn env_value(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionRecord {
+    pub execution_id: String,
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub saved_tokens: usize,
+    pub output_contract: String,
+    pub exact_reason: Option<String>,
+    pub omitted_items: usize,
+    pub omitted_groups: usize,
+    pub recovery_created: bool,
+    pub filter_failed: bool,
+    pub runtime_error: Option<String>,
 }
 
 /// The real outcome a PreToolUse hook reached for one Bash call.
@@ -356,7 +428,7 @@ pub struct ErrorCommandStats {
 /// call. Bump this whenever `run_schema_migrations` gains a new statement; a stale
 /// `user_version` triggers exactly one re-run of the full migration sequence, then
 /// the pragma is updated so subsequent opens skip straight past it.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Create all tables/indexes, run column migrations, and stamp `user_version` to
 /// `SCHEMA_VERSION` for the on-disk tracker DB.
@@ -381,7 +453,14 @@ fn run_schema_migrations(conn: &Connection) -> Result<()> {
             omitted_groups INTEGER NOT NULL DEFAULT 0,
             recovery_created INTEGER NOT NULL DEFAULT 0,
             filter_failed INTEGER NOT NULL DEFAULT 0,
-            runtime_error TEXT
+            runtime_error TEXT,
+            execution_id TEXT,
+            host TEXT,
+            session_id TEXT,
+            agent_id TEXT,
+            parent_agent_id TEXT,
+            task_id TEXT,
+            tool_call_id TEXT
         )",
         [],
     )?;
@@ -423,6 +502,17 @@ fn run_schema_migrations(conn: &Connection) -> Result<()> {
         [],
     );
     let _ = conn.execute("ALTER TABLE commands ADD COLUMN runtime_error TEXT", []);
+    for column in [
+        "execution_id TEXT",
+        "host TEXT",
+        "session_id TEXT",
+        "agent_id TEXT",
+        "parent_agent_id TEXT",
+        "task_id TEXT",
+        "tool_call_id TEXT",
+    ] {
+        let _ = conn.execute(&format!("ALTER TABLE commands ADD COLUMN {column}"), []);
+    }
     // One-time migration: normalize NULLs from pre-default schema // changed: guarded with EXISTS
     let has_nulls: bool = conn
         .query_row(
@@ -468,7 +558,8 @@ fn run_schema_migrations(conn: &Connection) -> Result<()> {
             raw_cmd TEXT NOT NULL,
             decision TEXT NOT NULL,
             rewritten_cmd TEXT,
-            rtk_version TEXT NOT NULL
+            rtk_version TEXT NOT NULL,
+            execution_id TEXT
         )",
         [],
     )?;
@@ -478,6 +569,49 @@ fn run_schema_migrations(conn: &Connection) -> Result<()> {
     )?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_hook_decisions_timestamp ON hook_decisions(timestamp)",
+        [],
+    )?;
+    // Older databases were protected by a non-atomic SELECT-then-INSERT in
+    // record_hook_decision. Keep the oldest row for each identity before the
+    // unique index makes concurrent duplicate writes impossible.
+    conn.execute(
+        "DELETE FROM hook_decisions
+         WHERE id NOT IN (
+             SELECT MIN(id)
+             FROM hook_decisions
+             GROUP BY session_id, tool_use_id, decision
+         )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_hook_decisions_identity
+         ON hook_decisions(session_id, tool_use_id, decision)",
+        [],
+    )?;
+    let _ = conn.execute(
+        "ALTER TABLE hook_decisions ADD COLUMN execution_id TEXT",
+        [],
+    );
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS execution_events (
+            event_id TEXT PRIMARY KEY,
+            execution_id TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            host TEXT,
+            session_id TEXT,
+            agent_id TEXT,
+            parent_agent_id TEXT,
+            task_id TEXT,
+            tool_call_id TEXT,
+            details_json TEXT
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_events_execution_id
+         ON execution_events(execution_id, timestamp)",
         [],
     )?;
 
@@ -625,6 +759,30 @@ impl Tracker {
         exec_time_ms: u64,
         tracking: OutputTracking,
     ) -> Result<()> {
+        self.record_with_output_context(
+            original_cmd,
+            rtk_cmd,
+            input_tokens,
+            output_tokens,
+            exec_time_ms,
+            tracking,
+            None,
+        )
+    }
+
+    // Keep the context-bearing form as a stable compatibility API for callers
+    // that already have the individual measured fields available.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_with_output_context(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input_tokens: usize,
+        output_tokens: usize,
+        exec_time_ms: u64,
+        tracking: OutputTracking,
+        context: Option<&ExecutionContext>,
+    ) -> Result<()> {
         let saved = input_tokens.saturating_sub(output_tokens);
         let pct = if input_tokens > 0 {
             (saved as f64 / input_tokens as f64) * 100.0
@@ -633,6 +791,8 @@ impl Tracker {
         };
 
         let project_path = current_project_path_string(); // added: record cwd
+        let context = context.cloned().unwrap_or_else(ExecutionContext::new);
+        let runtime_error = tracking.runtime_error.clone();
 
         self.conn
             .execute(
@@ -640,9 +800,11 @@ impl Tracker {
                 timestamp, original_cmd, rtk_cmd, project_path, input_tokens,
                 output_tokens, saved_tokens, savings_pct, exec_time_ms,
         output_contract, exact_reason, omitted_items, omitted_groups,
-        recovery_created, filter_failed, runtime_error
+        recovery_created, filter_failed, runtime_error, execution_id, host,
+        session_id, agent_id, parent_agent_id, task_id, tool_call_id
         ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+            ?17, ?18, ?19, ?20, ?21, ?22, ?23
              )",
                 params![
                     Utc::now().to_rfc3339(),
@@ -661,11 +823,109 @@ impl Tracker {
                     tracking.recovery_created,
                     tracking.filter_failed,
                     tracking.runtime_error,
+                    &context.execution_id,
+                    context.host.as_deref(),
+                    context.session_id.as_deref(),
+                    context.agent_id.as_deref(),
+                    context.parent_agent_id.as_deref(),
+                    context.task_id.as_deref(),
+                    context.tool_call_id.as_deref(),
                 ],
             )
             .inspect_err(|e| warn_if_missing_table("record", e))?;
 
+        let event_id = format!("{}:output", context.execution_id);
+        let _ = self.record_execution_event(
+            &event_id,
+            &context,
+            "execution.output",
+            runtime_error.as_deref(),
+        );
+
         self.cleanup_old()?;
+        Ok(())
+    }
+
+    /// Return the actual output report emitted by one execution, if it was
+    /// recorded before the integration boundary closed.
+    pub fn execution_by_id(&self, execution_id: &str) -> Result<Option<ExecutionRecord>> {
+        let mut statement = self.conn.prepare(
+            "SELECT execution_id, input_tokens, output_tokens, saved_tokens,
+             output_contract, exact_reason, omitted_items, omitted_groups,
+             recovery_created, filter_failed, runtime_error
+             FROM commands WHERE execution_id = ?1 ORDER BY id ASC",
+        )?;
+        let mut rows = statement.query(params![execution_id])?;
+        let mut aggregate: Option<ExecutionRecord> = None;
+
+        while let Some(row) = rows.next()? {
+            let record = ExecutionRecord {
+                execution_id: row.get(0)?,
+                input_tokens: row.get::<_, i64>(1)? as usize,
+                output_tokens: row.get::<_, i64>(2)? as usize,
+                saved_tokens: row.get::<_, i64>(3)? as usize,
+                output_contract: row.get(4)?,
+                exact_reason: row.get(5)?,
+                omitted_items: row.get::<_, i64>(6)? as usize,
+                omitted_groups: row.get::<_, i64>(7)? as usize,
+                recovery_created: row.get(8)?,
+                filter_failed: row.get(9)?,
+                runtime_error: row.get(10)?,
+            };
+
+            if let Some(total) = aggregate.as_mut() {
+                total.input_tokens = total.input_tokens.saturating_add(record.input_tokens);
+                total.output_tokens = total.output_tokens.saturating_add(record.output_tokens);
+                total.saved_tokens = total.saved_tokens.saturating_add(record.saved_tokens);
+                total.omitted_items = total.omitted_items.saturating_add(record.omitted_items);
+                total.omitted_groups = total.omitted_groups.saturating_add(record.omitted_groups);
+                if total.output_contract != record.output_contract {
+                    total.output_contract = "mixed".to_string();
+                }
+                if total.exact_reason.is_none() {
+                    total.exact_reason = record.exact_reason;
+                }
+                total.recovery_created |= record.recovery_created;
+                total.filter_failed |= record.filter_failed;
+                if total.runtime_error.is_none() {
+                    total.runtime_error = record.runtime_error;
+                }
+            } else {
+                aggregate = Some(record);
+            }
+        }
+
+        Ok(aggregate)
+    }
+
+    /// Append an idempotent lifecycle event. Event identity is supplied by the
+    /// host/integration so retries cannot double-count a notification.
+    pub fn record_execution_event(
+        &self,
+        event_id: &str,
+        context: &ExecutionContext,
+        event_type: &str,
+        details_json: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO execution_events (
+                event_id, execution_id, timestamp, event_type, host, session_id,
+                agent_id, parent_agent_id, task_id, tool_call_id, details_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                event_id,
+                context.execution_id,
+                Utc::now().to_rfc3339(),
+                event_type,
+                context.host,
+                context.session_id,
+                context.agent_id,
+                context.parent_agent_id,
+                context.task_id,
+                context.tool_call_id,
+                details_json,
+            ],
+        )?;
         Ok(())
     }
 
@@ -683,6 +943,10 @@ impl Tracker {
             "DELETE FROM hook_decisions WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
         )?;
+        self.conn.execute(
+            "DELETE FROM execution_events WHERE timestamp < ?1",
+            params![cutoff.to_rfc3339()],
+        )?;
         Ok(())
     }
 
@@ -694,6 +958,7 @@ impl Tracker {
                  DELETE FROM commands;
                  DELETE FROM parse_failures;
                  DELETE FROM hook_decisions;
+                 DELETE FROM execution_events;
                  COMMIT;",
             )
             .context("Failed to reset tracking database")?;
@@ -745,7 +1010,7 @@ impl Tracker {
         rtk_version: &str,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO hook_decisions (timestamp, session_id, tool_use_id, project_path, raw_cmd, decision, rewritten_cmd, rtk_version)
+            "INSERT OR IGNORE INTO hook_decisions (timestamp, session_id, tool_use_id, project_path, raw_cmd, decision, rewritten_cmd, rtk_version)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 Utc::now().to_rfc3339(),
@@ -1993,6 +2258,7 @@ pub fn estimate_tokens_from_bytes(byte_count: usize) -> usize {
 /// ```
 pub struct TimedExecution {
     start: Instant,
+    context: ExecutionContext,
 }
 
 // Native passthrough keeps the child's stdout/stderr attached to the user's
@@ -2020,6 +2286,7 @@ impl TimedExecution {
     pub fn start() -> Self {
         Self {
             start: Instant::now(),
+            context: ExecutionContext::from_env_or_new(),
         }
     }
 
@@ -2085,13 +2352,14 @@ impl TimedExecution {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
 
         if let Ok(tracker) = Tracker::new() {
-            let _ = tracker.record_with_output(
+            let _ = tracker.record_with_output_context(
                 original_cmd,
                 rtk_cmd,
                 input_tokens,
                 output_tokens,
                 elapsed_ms,
                 tracking,
+                Some(&self.context),
             );
         }
     }
@@ -2117,7 +2385,7 @@ impl TimedExecution {
     ) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
         if let Ok(tracker) = Tracker::new() {
-            let _ = tracker.record_with_output(
+            let _ = tracker.record_with_output_context(
                 original_cmd,
                 rtk_cmd,
                 input_tokens,
@@ -2128,6 +2396,7 @@ impl TimedExecution {
                     exact_reason: Some(reason.into()),
                     ..Default::default()
                 },
+                Some(&self.context),
             );
         }
     }
@@ -2620,6 +2889,64 @@ mod tests {
     }
 
     #[test]
+    fn execution_by_id_aggregates_multiple_mcp_components() {
+        use std::env;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        let db_path = env::temp_dir().join(format!(
+            "rtk_test_execution_aggregate_{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&db_path);
+        env::set_var("RTK_DB_PATH", &db_path);
+
+        let tracker = Tracker::new().unwrap();
+        let context = ExecutionContext {
+            execution_id: format!("mcp-components-{}", std::process::id()),
+            host: None,
+            session_id: None,
+            agent_id: None,
+            parent_agent_id: None,
+            task_id: None,
+            tool_call_id: None,
+        };
+        tracker
+            .record_with_output_context(
+                "read a.txt",
+                "rtk read a.txt",
+                100,
+                60,
+                10,
+                OutputTracking::default(),
+                Some(&context),
+            )
+            .unwrap();
+        tracker
+            .record_with_output_context(
+                "read b.txt",
+                "rtk read b.txt",
+                200,
+                120,
+                20,
+                OutputTracking::default(),
+                Some(&context),
+            )
+            .unwrap();
+
+        let record = tracker
+            .execution_by_id(&context.execution_id)
+            .unwrap()
+            .expect("aggregated execution");
+        assert_eq!(record.input_tokens, 300);
+        assert_eq!(record.output_tokens, 180);
+        assert_eq!(record.saved_tokens, 120);
+
+        drop(tracker);
+        env::remove_var("RTK_DB_PATH");
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
     fn timed_execution_track_exact_records_reason() {
         use std::env;
         let _guard = ENV_LOCK.lock().unwrap();
@@ -3079,6 +3406,54 @@ mod tests {
         assert_eq!(raw_cmd, "git status");
         assert_eq!(rewritten_cmd.as_deref(), Some("rtk git status"));
         assert_eq!(rtk_version, "0.42.4");
+    }
+
+    #[test]
+    fn test_hook_decision_identity_is_unique_and_recording_is_idempotent() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+
+        tracker
+            .record_hook_decision(
+                "session-1",
+                "toolu_duplicate",
+                "",
+                "git status",
+                HookOutcome::Allow,
+                Some("rtk git status"),
+                "0.42.4",
+            )
+            .expect("first decision should be recorded");
+        tracker
+            .record_hook_decision(
+                "session-1",
+                "toolu_duplicate",
+                "/changed",
+                "different command",
+                HookOutcome::Allow,
+                None,
+                "different-version",
+            )
+            .expect("duplicate decision should be ignored");
+
+        let count: i64 = tracker
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM hook_decisions WHERE session_id = ?1 AND tool_use_id = ?2 AND decision = ?3",
+                params!["session-1", "toolu_duplicate", "allow"],
+                |row| row.get(0),
+            )
+            .expect("decision count should be readable");
+        assert_eq!(count, 1);
+
+        let unique_index: i64 = tracker
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_index_list('hook_decisions') WHERE name = 'idx_hook_decisions_identity' AND \"unique\" = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("unique hook decision index should be readable");
+        assert_eq!(unique_index, 1);
     }
 
     #[test]

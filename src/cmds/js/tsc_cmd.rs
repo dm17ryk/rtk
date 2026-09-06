@@ -1,13 +1,15 @@
 //! Filters TypeScript compiler errors, grouping them by file and error code.
 
+use crate::core::ai_output::BudgetClass;
 use crate::core::runner;
 use crate::core::stream::{BlockHandler, BlockStreamFilter};
-use crate::core::truncate::{reduced, CAP_WARNINGS};
+use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{MissingTool, exec_runner, strip_ansi, tool_exec, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
+use std::collections::VecDeque;
 use std::sync::LazyLock;
 
 /// Cap on the non-empty lines kept when RTK cannot parse failure output. With
@@ -17,7 +19,7 @@ const MAX_UNPARSED_LINES: usize = CAP_WARNINGS;
 /// tsc and npx print the cause first (`Unknown compiler option`, `This is not
 /// the tsc command`) and boilerplate after it, so spending the whole cap on a
 /// tail would drop the cause.
-const MAX_UNPARSED_HEAD_LINES: usize = reduced(MAX_UNPARSED_LINES, 5);
+const MAX_UNPARSED_HEAD_LINES: usize = 5;
 
 static TSC_ERROR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+(TS\d+):\s+(.+)$").unwrap()
@@ -98,11 +100,29 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: {} {}", via, args.join(" "));
     }
 
-    runner::run_streamed(
+    if uses_streaming_for_watch_mode(args) {
+        return runner::run_streamed(
+            cmd,
+            "tsc",
+            &args.join(" "),
+            Box::new(BlockStreamFilter::new(TscHandler::new())),
+            runner::RunOptions::with_tee("tsc"),
+        );
+    }
+
+    runner::run_ai_filtered_with_exit(
         cmd,
         "tsc",
         &args.join(" "),
-        Box::new(BlockStreamFilter::new(TscHandler::new())),
+        BudgetClass::Diagnostic,
+        |raw, exit_code| {
+            Ok(runner::document_from_filtered(
+                raw,
+                &filter_tsc_output_with_exit(raw, exit_code),
+                "tsc",
+                exit_code,
+            ))
+        },
         runner::RunOptions::with_tee("tsc"),
     )
 }
@@ -373,6 +393,69 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
     result.trim().to_string()
 }
 
+fn uses_streaming_for_watch_mode(args: &[String]) -> bool {
+    runner::is_watch_mode(args) || args.iter().any(|arg| arg == "-w")
+}
+
+/// Preserve the actual failure when tsc exits unsuccessfully but emits text
+/// that the structured diagnostic parser does not recognize.
+pub(crate) fn filter_tsc_output_with_exit(output: &str, exit_code: i32) -> String {
+    let filtered = filter_tsc_output(output);
+    if exit_code == 0
+        || (!filtered.starts_with("TypeScript compilation completed")
+            && !filtered.starts_with("TypeScript: No errors found"))
+    {
+        return filtered;
+    }
+
+    let mut summary = format!(
+        "TypeScript: compiler exited with code {exit_code}, but RTK parsed no diagnostics\n"
+    );
+    if output.len() < crate::core::tee::MIN_TEE_SIZE {
+        for line in output.lines() {
+            let line = clean_line(line);
+            if !line.trim().is_empty() {
+                push_dump_line(&mut summary, line.as_ref());
+            }
+        }
+        return summary.trim_end().to_string();
+    }
+
+    let head_len = MAX_UNPARSED_HEAD_LINES.min(MAX_UNPARSED_LINES);
+    let tail_len = MAX_UNPARSED_LINES.saturating_sub(head_len);
+    let mut head: Vec<Cow<'_, str>> = Vec::with_capacity(head_len);
+    let mut tail: VecDeque<Cow<'_, str>> = VecDeque::with_capacity(tail_len);
+    let mut total = 0usize;
+
+    for line in output.lines() {
+        let line = clean_line(line);
+        if line.trim().is_empty() {
+            continue;
+        }
+        total += 1;
+        if head.len() < head_len {
+            head.push(line);
+        } else if tail_len > 0 {
+            if tail.len() == tail_len {
+                tail.pop_front();
+            }
+            tail.push_back(line);
+        }
+    }
+
+    for line in &head {
+        push_dump_line(&mut summary, line.as_ref());
+    }
+    let hidden = total.saturating_sub(head.len()).saturating_sub(tail.len());
+    if hidden > 0 {
+        summary.push_str(&format!("... +{hidden} more lines\n"));
+    }
+    for line in tail {
+        push_dump_line(&mut summary, line.as_ref());
+    }
+    summary.trim_end().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,6 +572,22 @@ src/app.tsx(20,5): error TS2345: Argument of type 'number' is not assignable to 
         let output = "\x1b[32mFound 0 errors.\x1b[0m Watching for file changes.";
         let result = filter_tsc_output(output);
         assert!(result.contains("No errors found"));
+    }
+
+    #[test]
+    fn test_filter_tsc_output_failed_unparsed_keeps_the_cause() {
+        let result = filter_tsc_output_with_exit("This is not the tsc command...\n", 1);
+        assert!(result.contains("exited with code 1"));
+        assert!(result.contains("This is not the tsc command"));
+        assert!(!result.contains("compilation completed"));
+    }
+
+    #[test]
+    fn watch_flags_are_detected_for_streaming_execution() {
+        assert!(uses_streaming_for_watch_mode(&["--watch".into()]));
+        assert!(uses_streaming_for_watch_mode(&["-w".into()]));
+        assert!(!uses_streaming_for_watch_mode(&["--watchDirectory".into()]));
+        assert!(!uses_streaming_for_watch_mode(&["--pretty".into()]));
     }
 
     // --- Streaming handler tests ---

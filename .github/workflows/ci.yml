@@ -10,6 +10,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Clap-heavy test threads need more than the platform default stack.
+  RUST_MIN_STACK: 8388608
 
 jobs:
   # ─── Fast gates (fail early, save CI minutes) ───
@@ -61,6 +63,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install test tools (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install -y ripgrep
+      - name: Install test tools (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install ripgrep
+      - name: Install test tools (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
+            choco install ripgrep --no-progress --yes
+          }
+          $chocoBin = if ($env:ChocolateyInstall) {
+            Join-Path $env:ChocolateyInstall 'bin'
+          } else {
+            'C:\ProgramData\chocolatey\bin'
+          }
+          if (Test-Path $chocoBin) {
+            $env:Path = "$chocoBin;$env:Path"
+            Add-Content -Path $env:GITHUB_PATH -Value $chocoBin
+          }
+          if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
+            throw 'ripgrep was not available after installation'
+          }
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all
 
@@ -71,6 +98,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install ripgrep
+        shell: pwsh
+        run: |
+          if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
+            choco install ripgrep --no-progress --yes
+          }
+          $chocoBin = if ($env:ChocolateyInstall) {
+            Join-Path $env:ChocolateyInstall 'bin'
+          } else {
+            'C:\ProgramData\chocolatey\bin'
+          }
+          if (Test-Path $chocoBin) {
+            $env:Path = "$chocoBin;$env:Path"
+            Add-Content -Path $env:GITHUB_PATH -Value $chocoBin
+          }
+          if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
+            throw 'ripgrep was not available after installation'
+          }
       - uses: Swatinem/rust-cache@v2
       - name: Build and smoke-test native command paths
         shell: pwsh
@@ -244,7 +289,7 @@ jobs:
         run: cargo build --release
 
       - name: Install system tools
-        run: sudo apt-get install -y tree
+        run: sudo apt-get install -y tree ripgrep
 
       - name: Install Python tools
         run: pip install ruff pytest mypy

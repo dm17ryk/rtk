@@ -11,7 +11,41 @@ use std::process::{Command, Stdio};
 use std::sync::LazyLock;
 use std::time::Duration;
 
+/// Identifies who owns the output contract at an integration boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[allow(dead_code)]
+pub enum OutputAudience {
+    Auto,
+    Agent,
+    Exact,
+}
+
+/// Request-level output policy. `max_tokens` is semantic, not a transport cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputRequest {
+    pub audience: OutputAudience,
+    pub max_tokens: Option<usize>,
+}
+
+#[allow(dead_code)]
+impl OutputRequest {
+    pub const fn auto() -> Self {
+        Self {
+            audience: OutputAudience::Auto,
+            max_tokens: None,
+        }
+    }
+
+    pub const fn agent() -> Self {
+        Self {
+            audience: OutputAudience::Agent,
+            max_tokens: None,
+        }
+    }
+}
+
 use crate::core::config::Config;
+pub use crate::core::tracking::ExecutionContext;
 use crate::discover::registry::rewrite_command;
 
 static SECRET_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -34,6 +68,7 @@ pub struct RewriteResult {
 
 #[derive(Debug, Serialize)]
 pub struct RunResult {
+    pub execution_id: String,
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
@@ -100,6 +135,7 @@ pub fn validate_cwd(cwd: Option<&Path>) -> Result<Option<PathBuf>> {
 /// This deliberately uses a child-process boundary: every existing command
 /// router and filter keeps its current stdout/stderr and exit-code behavior,
 /// while integrations receive bounded captured output.
+#[allow(dead_code)]
 pub fn run_filtered(
     rtk_args: &[String],
     cwd: Option<&Path>,
@@ -107,9 +143,29 @@ pub fn run_filtered(
     max_output_bytes: usize,
     tee_on_failure: bool,
 ) -> Result<RunResult> {
+    run_filtered_with_request(
+        rtk_args,
+        cwd,
+        timeout,
+        max_output_bytes,
+        tee_on_failure,
+        OutputRequest::auto(),
+    )
+}
+
+/// Execute a typed RTK command with an explicit output audience.
+pub fn run_filtered_with_request(
+    rtk_args: &[String],
+    cwd: Option<&Path>,
+    timeout: Duration,
+    max_output_bytes: usize,
+    tee_on_failure: bool,
+    request: OutputRequest,
+) -> Result<RunResult> {
     validate_rtk_args(rtk_args)?;
     let cwd = validate_cwd(cwd)?;
     let executable = std::env::current_exe().context("Failed to locate the RTK executable")?;
+    let context = ExecutionContext::new();
 
     // The executable comes only from current_exe(); validate_rtk_args rejects meta commands.
     // nosemgrep: dynamic-command-execution
@@ -126,6 +182,19 @@ pub fn run_filtered(
         // captured pipes, so allow the PowerShell route to compact it.
         command.env("RTK_POWERSHELL_FILTER", "1");
     }
+    match request.audience {
+        OutputAudience::Agent => {
+            command.env("RTK_OUTPUT_AUDIENCE", "agent");
+        }
+        OutputAudience::Exact => {
+            command.env("RTK_OUTPUT_AUDIENCE", "exact");
+        }
+        OutputAudience::Auto => {}
+    }
+    if let Some(max_tokens) = request.max_tokens {
+        command.env("RTK_MAX_OUTPUT_TOKENS", max_tokens.to_string());
+    }
+    command.env("RTK_EXECUTION_ID", &context.execution_id);
     if !tee_on_failure {
         command.env("RTK_TEE", "0");
     }
@@ -162,8 +231,17 @@ pub fn run_filtered(
         rtk_args.first().map(String::as_str),
         Some("powershell" | "pwsh")
     );
+    let execution = crate::core::tracking::Tracker::new()
+        .ok()
+        .and_then(|tracker| {
+            tracker
+                .execution_by_id(&context.execution_id)
+                .ok()
+                .flatten()
+        });
 
     Ok(RunResult {
+        execution_id: context.execution_id,
         exit_code: output.status.code().unwrap_or(1),
         stdout,
         stderr,
@@ -176,19 +254,21 @@ pub fn run_filtered(
                 .rewritten_command
                 .map(|command| redact_sensitive(&command))
         },
-        filtered: if powershell_route {
-            tee_path.is_some()
-        } else {
-            rewritten.matched
-        },
+        filtered: execution
+            .as_ref()
+            .map(|record| record.output_contract != "exact")
+            .unwrap_or_else(|| {
+                if powershell_route {
+                    tee_path.is_some()
+                } else {
+                    rewritten.matched
+                }
+            }),
         tee_path,
-        metrics_available: false,
-        // The raw producer output is intentionally not reconstructed from the
-        // argv string. RTK's tracking database remains the authoritative source
-        // for savings; returning None avoids misleading per-call metrics.
-        input_tokens: None,
-        output_tokens: None,
-        saved_tokens: None,
+        metrics_available: execution.is_some(),
+        input_tokens: execution.as_ref().map(|record| record.input_tokens),
+        output_tokens: execution.as_ref().map(|record| record.output_tokens),
+        saved_tokens: execution.as_ref().map(|record| record.saved_tokens),
     })
 }
 
@@ -312,6 +392,43 @@ pub fn redact_sensitive(value: &str) -> String {
     SECRET_RE.replace_all(value, "[REDACTED]").into_owned()
 }
 
+/// Redact secrets across line boundaries while preserving one output string
+/// for each input line. This keeps recovery search line numbers intact while
+/// preventing a credential split over adjacent lines from leaking.
+pub(crate) fn redact_sensitive_lines(lines: &[String]) -> Vec<String> {
+    let joined = lines.join("\n");
+    let matches = SECRET_RE
+        .find_iter(&joined)
+        .map(|matched| (matched.start(), matched.end()))
+        .collect::<Vec<_>>();
+    let mut offset = 0usize;
+
+    lines
+        .iter()
+        .map(|line| {
+            let line_start = offset;
+            let line_end = line_start.saturating_add(line.len());
+            offset = line_end.saturating_add(1);
+            let mut redacted = line.clone();
+            let ranges = matches
+                .iter()
+                .filter_map(|(start, end)| {
+                    let local_start = (*start).max(line_start);
+                    let local_end = (*end).min(line_end);
+                    (local_start < local_end).then_some((
+                        local_start.saturating_sub(line_start),
+                        local_end.saturating_sub(line_start),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            for (start, end) in ranges.into_iter().rev() {
+                redacted.replace_range(start..end, "[REDACTED]");
+            }
+            redacted
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,6 +501,17 @@ mod tests {
         assert!(!value.contains("xyz"));
         assert!(!value.contains("secret"));
         assert!(value.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redacts_multiline_secret_without_losing_line_boundaries() {
+        let lines = vec![
+            "Authorization: Bearer".to_string(),
+            "FAKE_TEST_TOKEN".to_string(),
+        ];
+        let redacted = redact_sensitive_lines(&lines);
+        assert_eq!(redacted.len(), 2);
+        assert!(!redacted.join("\n").contains("FAKE_TEST_TOKEN"));
     }
 
     #[test]
