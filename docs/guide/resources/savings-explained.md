@@ -96,6 +96,27 @@ As elsewhere in the dashboard, both `input_tokens` and `output_tokens` use the `
 - **Your prompt, the system prompt, or conversation history.** These are input tokens RTK has no visibility into.
 - **Exact command routes.** These pass through untouched and retain native I/O semantics. Their reason is persisted for pending reporting, but the current `rtk gain` views do not surface a per-reason breakdown because captured size is unavailable. See `rtk gain --history` for the currently exposed history fields.
 
+## Complete-task cost and routing coverage
+
+A fair before/after comparison uses the same task input, model, reasoning
+effort, permissions, producer exit status, and token counter. Report at least
+three numbers separately:
+
+1. raw producer bytes versus the bytes initially shown to the model;
+2. any additional bytes read through recovery; and
+3. complete-task context and model output, when the host exposes them.
+
+RTK's output reduction is the first measurement. Recovery can intentionally
+give some bytes back to preserve facts. Prompt history, hook/tool schemas,
+reasoning tokens, model output, retries, and model-routing choices contribute to
+total task cost but are not RTK compression savings.
+
+Effective routing coverage is also different from filter efficiency. It asks
+what fraction of eligible producer executions actually used RTK. Fixture,
+diagnostic, benchmark, and repeated child/follow-up traffic should be identified
+instead of presented as ordinary workload adoption. Exact routes and unavailable
+residual sizes are unknown, not zero-byte successes.
+
 ## See also
 
 - [What RTK Optimizes](what-rtk-covers.md) — per-command bash output reduction

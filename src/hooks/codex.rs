@@ -1,11 +1,13 @@
 //! Native Codex hook protocol and safety policy.
 //!
 //! Codex runs `PreToolUse` hooks before it evaluates the command's execution
-//! approval.  RTK therefore only changes input when Codex has explicitly
-//! selected its no-approval mode.  In the normal approval mode we cannot see
-//! Codex's per-command decision, so returning a rewritten command could turn a
-//! denied command into a different command that no longer matches the user's
-//! approval rule.
+//! approval. RTK therefore only changes input when Codex has explicitly
+//! selected its no-approval mode. Current Codex requires rewritten input to be
+//! paired with `permissionDecision: "allow"`; emitting that decision is safe
+//! only after the host has already selected `bypassPermissions`. In the normal
+//! approval mode we cannot see Codex's per-command decision, so returning a
+//! rewritten command could turn a denied command into a different command that
+//! no longer matches the user's approval rule.
 
 use crate::core::config::hook_rewrite_params;
 use crate::discover::lexer::contains_unattestable_construct;
@@ -47,6 +49,7 @@ pub fn response_from_value(value: &Value) -> Option<Value> {
     Some(json!({
         "hookSpecificOutput": {
             "hookEventName": PRE_TOOL_USE_EVENT,
+            "permissionDecision": "allow",
             "updatedInput": updated_input
         }
     }))
@@ -93,9 +96,7 @@ mod tests {
             output["hookSpecificOutput"]["updatedInput"]["description"],
             "keep me"
         );
-        assert!(output["hookSpecificOutput"]
-            .get("permissionDecision")
-            .is_none());
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
     #[test]
