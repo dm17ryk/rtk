@@ -127,18 +127,16 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          .\target\debug\rtk.exe --version
+          $rtk = (Resolve-Path .\target\debug\rtk.exe).Path
+          & $rtk --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $previous_error_action_preference = $ErrorActionPreference
-          $previous_native_command_error_preference = $PSNativeCommandUseErrorActionPreference
+          $rewrite_output_path = Join-Path $env:RUNNER_TEMP ("rtk-rewrite-$PID-$([guid]::NewGuid().ToString('N')).out")
           try {
-            $ErrorActionPreference = 'Continue'
-            $PSNativeCommandUseErrorActionPreference = $false
-            $rewrite_output = @(& .\target\debug\rtk.exe rewrite "git status")
-            $rewrite_status = $LASTEXITCODE
+            $rewrite_process = Start-Process -FilePath $rtk -ArgumentList @('rewrite', 'git status') -Wait -PassThru -NoNewWindow -RedirectStandardOutput $rewrite_output_path
+            $rewrite_status = $rewrite_process.ExitCode
+            $rewrite_output = [System.IO.File]::ReadAllText($rewrite_output_path)
           } finally {
-            $ErrorActionPreference = $previous_error_action_preference
-            $PSNativeCommandUseErrorActionPreference = $previous_native_command_error_preference
+            Remove-Item -LiteralPath $rewrite_output_path -Force -ErrorAction SilentlyContinue
           }
           if ($rewrite_status -ne 0 -and $rewrite_status -ne 3) {
             throw "unexpected rtk rewrite exit code: $rewrite_status"
@@ -239,19 +237,16 @@ jobs:
           cargo build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:RTK_DEBUG = "1"
-          $rtk = Resolve-Path .\target\debug\rtk.exe
+          $rtk = (Resolve-Path .\target\debug\rtk.exe).Path
           & $rtk --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $previous_error_action_preference = $ErrorActionPreference
-          $previous_native_command_error_preference = $PSNativeCommandUseErrorActionPreference
+          $rewrite_output_path = Join-Path $env:RUNNER_TEMP ("rtk-rewrite-$PID-$([guid]::NewGuid().ToString('N')).out")
           try {
-            $ErrorActionPreference = 'Continue'
-            $PSNativeCommandUseErrorActionPreference = $false
-            $rewrite_output = @(& $rtk rewrite dir)
-            $rewrite_status = $LASTEXITCODE
+            $rewrite_process = Start-Process -FilePath $rtk -ArgumentList @('rewrite', 'dir') -Wait -PassThru -NoNewWindow -RedirectStandardOutput $rewrite_output_path
+            $rewrite_status = $rewrite_process.ExitCode
+            $rewrite_output = [System.IO.File]::ReadAllText($rewrite_output_path)
           } finally {
-            $ErrorActionPreference = $previous_error_action_preference
-            $PSNativeCommandUseErrorActionPreference = $previous_native_command_error_preference
+            Remove-Item -LiteralPath $rewrite_output_path -Force -ErrorAction SilentlyContinue
           }
           if ($rewrite_status -ne 0 -and $rewrite_status -ne 3) {
             throw "unexpected rtk rewrite exit code: $rewrite_status"
