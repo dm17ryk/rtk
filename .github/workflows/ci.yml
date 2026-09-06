@@ -114,15 +114,29 @@ jobs:
         run: |
           set -euo pipefail
           ./target/debug/rtk --version
-          ./target/debug/rtk rewrite "git status"
+          set +e
+          rewrite_output="$(./target/debug/rtk rewrite "git status")"
+          rewrite_status=$?
+          set -e
+          if [ "$rewrite_status" -ne 0 ] && [ "$rewrite_status" -ne 3 ]; then
+            echo "unexpected rtk rewrite exit code: $rewrite_status"
+            exit "$rewrite_status"
+          fi
+          test "$rewrite_output" = "rtk git status"
       - name: Smoke-test candidate routing (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           .\target\debug\rtk.exe --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\target\debug\rtk.exe rewrite "git status"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $rewrite_output = @(& .\target\debug\rtk.exe rewrite "git status")
+          $rewrite_status = $LASTEXITCODE
+          if ($rewrite_status -ne 0 -and $rewrite_status -ne 3) {
+            throw "unexpected rtk rewrite exit code: $rewrite_status"
+          }
+          if (($rewrite_output -join "`n") -ne "rtk git status") {
+            throw "unexpected rtk rewrite output: $($rewrite_output -join "`n")"
+          }
       - name: Smoke-test isolated Codex installation lifecycle (Unix)
         if: matrix.os != 'windows-latest'
         env:
@@ -219,8 +233,14 @@ jobs:
           $rtk = Resolve-Path .\target\debug\rtk.exe
           & $rtk --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $rtk rewrite dir
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $rewrite_output = @(& $rtk rewrite dir)
+          $rewrite_status = $LASTEXITCODE
+          if ($rewrite_status -ne 0 -and $rewrite_status -ne 3) {
+            throw "unexpected rtk rewrite exit code: $rewrite_status"
+          }
+          if (($rewrite_output -join "`n") -ne "rtk ls") {
+            throw "unexpected rtk rewrite output: $($rewrite_output -join "`n")"
+          }
           & $rtk cmd "echo rtk-cmd-smoke & dir /b"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $rtk powershell -NoProfile -NonInteractive -Command "Write-Output rtk-powershell-smoke"
