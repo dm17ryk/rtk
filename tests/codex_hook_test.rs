@@ -34,7 +34,7 @@ fn codex_subagent_start_event_is_a_silent_noop() {
 }
 
 #[test]
-fn codex_pre_tool_use_returns_only_a_safe_input_update() {
+fn codex_pre_tool_use_returns_safe_input_update_and_allow_decision() {
     let output = run_hook(
         &["hook", "codex"],
         r#"{"hook_event_name":"PreToolUse","permission_mode":"bypassPermissions","tool_name":"Bash","tool_input":{"command":"git status","description":"Inspect repository"}}"#,

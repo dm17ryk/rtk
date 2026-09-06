@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -46,11 +47,147 @@ def validate_manifest(repo: Path) -> dict[str, object]:
     return {"schema_version": 1, "cases": len(cases), "fixture_validation": "passed"}
 
 
+def command_tokens(command: str) -> list[str]:
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return []
+    if len(tokens) >= 3 and tokens[0].replace("\\", "/").rsplit("/", 1)[-1] in {
+        "bash",
+        "sh",
+        "zsh",
+    } and tokens[1] in {"-c", "-lc"}:
+        try:
+            tokens = shlex.split(tokens[2], posix=True)
+        except ValueError:
+            return []
+    if tokens:
+        executable = tokens[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if executable == "rtk.exe":
+            tokens[0] = "rtk"
+    return tokens
+
+
+def command_matches(command: str, expected: str) -> bool:
+    actual_tokens = command_tokens(command)
+    expected_tokens = command_tokens(expected)
+    return bool(expected_tokens) and actual_tokens[: len(expected_tokens)] == expected_tokens
+
+
+def result_bytes(value: object) -> int:
+    if isinstance(value, str):
+        rendered = value
+    else:
+        rendered = json.dumps(value, sort_keys=True)
+    return len(rendered.encode("utf-8"))
+
+
+def json_lines(stdout: str) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def codex_evidence(stdout: str, expected: str) -> list[dict[str, object]]:
+    evidence: list[dict[str, object]] = []
+    for event in json_lines(stdout):
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "command_execution":
+            continue
+        command = item.get("command")
+        exit_code = item.get("exit_code")
+        if not isinstance(command, str) or exit_code != 0:
+            continue
+        if not command_matches(command, expected):
+            continue
+        output = item.get("aggregated_output", item.get("output", ""))
+        evidence.append(
+            {
+                "command": command,
+                "event_id": item.get("id"),
+                "exit_code": exit_code,
+                "result_bytes": result_bytes(output),
+            }
+        )
+    return evidence
+
+
+def claude_evidence(stdout: str, expected: str) -> list[dict[str, object]]:
+    tool_uses: dict[str, str] = {}
+    evidence: list[dict[str, object]] = []
+    for event in json_lines(stdout):
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                tool_id = block.get("id")
+                tool_input = block.get("input")
+                command = tool_input.get("command") if isinstance(tool_input, dict) else None
+                if (
+                    isinstance(tool_id, str)
+                    and block.get("name") in {"Bash", "PowerShell"}
+                    and isinstance(command, str)
+                    and command_matches(command, expected)
+                ):
+                    tool_uses[tool_id] = command
+            elif block.get("type") == "tool_result":
+                tool_id = block.get("tool_use_id")
+                if (
+                    isinstance(tool_id, str)
+                    and tool_id in tool_uses
+                    and block.get("is_error") is not True
+                    and "content" in block
+                ):
+                    evidence.append(
+                        {
+                            "command": tool_uses.pop(tool_id),
+                            "tool_use_id": tool_id,
+                            "is_error": False,
+                            "result_bytes": result_bytes(block["content"]),
+                        }
+                    )
+    return evidence
+
+
+def extract_evidence(
+    stdout: str, evidence_format: str | None, expected: str | None
+) -> list[dict[str, object]]:
+    if evidence_format is None or expected is None:
+        return []
+    if evidence_format == "codex-jsonl":
+        return codex_evidence(stdout, expected)
+    return claude_evidence(stdout, expected)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--expect-stdout",
-        help="require this literal marker in live command stdout before marking it verified",
+        help="require this literal smoke marker in live command stdout",
+    )
+    parser.add_argument(
+        "--evidence-format",
+        choices=("codex-jsonl", "claude-stream-json"),
+        help="parse structured host output for concrete RTK command/result evidence",
+    )
+    parser.add_argument(
+        "--expect-rtk-command",
+        help="exact direct RTK command prefix that structured evidence must demonstrate",
+    )
+    parser.add_argument(
+        "--require-verified",
+        action="store_true",
+        help="return failure unless the live result is verified, not only smoke-tested",
     )
     parser.add_argument(
         "--live-command",
@@ -59,6 +196,13 @@ def main() -> int:
     )
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
+
+    if (args.evidence_format is None) != (args.expect_rtk_command is None):
+        parser.error("--evidence-format and --expect-rtk-command must be supplied together")
+    if args.expect_rtk_command is not None:
+        expected_tokens = command_tokens(args.expect_rtk_command)
+        if not expected_tokens or expected_tokens[0] != "rtk":
+            parser.error("--expect-rtk-command must begin with a direct rtk invocation")
 
     try:
         report = validate_manifest(repo)
@@ -97,15 +241,36 @@ def main() -> int:
         report["live_stderr_bytes"] = len(completed.stderr.encode("utf-8"))
         marker_found = args.expect_stdout is None or args.expect_stdout in completed.stdout
         report["live_expected_stdout_found"] = marker_found
-        if completed.returncode == 0 and marker_found:
+        smoke_passed = completed.returncode == 0 and marker_found
+        report["live_smoke"] = "passed" if smoke_passed else "failed"
+        evidence = extract_evidence(
+            completed.stdout, args.evidence_format, args.expect_rtk_command
+        )
+        report["rtk_evidence"] = evidence
+        if smoke_passed and evidence:
             report["live_verification"] = "verified"
+        elif smoke_passed:
+            report["live_verification"] = "unverified"
+            if args.expect_rtk_command is None:
+                report["live_reason"] = (
+                    "Live command passed as smoke only; no structured RTK "
+                    "command/result evidence was requested"
+                )
+            else:
+                report["live_reason"] = (
+                    "Live smoke passed but no successful command/result evidence matched "
+                    f"{args.expect_rtk_command!r}"
+                )
         else:
             report["live_verification"] = "failed"
             if completed.returncode == 0:
                 report["live_reason"] = "expected stdout marker was not observed"
 
     print(json.dumps(report, sort_keys=True))
-    return 0 if report["fixture_validation"] == "passed" and report["live_verification"] != "failed" else 1
+    acceptable_live_result = report["live_verification"] != "failed"
+    if args.require_verified:
+        acceptable_live_result = report["live_verification"] == "verified"
+    return 0 if report["fixture_validation"] == "passed" and acceptable_live_result else 1
 
 
 if __name__ == "__main__":

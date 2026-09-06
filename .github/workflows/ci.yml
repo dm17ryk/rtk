@@ -233,10 +233,13 @@ jobs:
           test -n "$OPENAI_API_KEY" || { echo "OPENAI_API_KEY is missing" >&2; exit 1; }
           python scripts/verify-agent-coverage.py \
             --expect-stdout RTK_LIVE_CODEX_OK \
+            --evidence-format codex-jsonl \
+            --expect-rtk-command "rtk git status" \
+            --require-verified \
             --live-command codex exec --json --ephemeral \
             --dangerously-bypass-approvals-and-sandbox \
             --dangerously-bypass-hook-trust \
-            "Run git status and rtk --version. Report RTK_LIVE_CODEX_OK only after both commands succeed."
+            "Run rtk git status directly, then run rtk --version directly. Report RTK_LIVE_CODEX_OK only after both commands succeed."
 
   live-claude:
     name: live Claude host (opt-in; skipped means unverified)
@@ -275,9 +278,12 @@ jobs:
           test -n "$ANTHROPIC_API_KEY" || { echo "ANTHROPIC_API_KEY is missing" >&2; exit 1; }
           python scripts/verify-agent-coverage.py \
             --expect-stdout RTK_LIVE_CLAUDE_OK \
-            --live-command claude -p --output-format json --max-turns 3 \
+            --evidence-format claude-stream-json \
+            --expect-rtk-command "rtk git status" \
+            --require-verified \
+            --live-command claude -p --output-format stream-json --verbose --max-turns 3 \
             --dangerously-skip-permissions \
-            "Run git status and rtk --version. Report RTK_LIVE_CLAUDE_OK only after both commands succeed."
+            "Run rtk git status directly, then run rtk --version directly. Report RTK_LIVE_CLAUDE_OK only after both commands succeed."
 
   security:
     name: Security Scan

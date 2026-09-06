@@ -244,6 +244,15 @@ separately:
 If the host cannot create or resume children, mark those rows unverified. Do not
 replace them with fixture results or launch an unrelated provider.
 
+The marker in a host's final prose is only a smoke signal: by itself it can be
+printed without running RTK. Automated verification must also retain structured
+tool events and use `scripts/verify-agent-coverage.py` with the matching
+`--evidence-format`, an explicit `--expect-rtk-command` such as `rtk git status`,
+and `--require-verified`. The verifier marks a zero-exit marker-only run as
+`live_smoke = passed` and `live_verification = unverified`; only a successful
+command/result event for that direct RTK command is verified. Requested
+model/effort and host-observed model/effort must be recorded separately.
+
 ### Kilo Code
 
 ```bash

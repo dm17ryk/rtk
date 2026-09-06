@@ -24,6 +24,16 @@ def run_validator(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def emit_json_lines(*events: dict[str, object]) -> tuple[str, ...]:
+    return (
+        sys.executable,
+        "-c",
+        "import json, sys; "
+        "[print(json.dumps(event)) for event in json.loads(sys.argv[1])]",
+        json.dumps(events),
+    )
+
+
 class VerifyAgentCoverageTests(unittest.TestCase):
     def test_offline_validation_is_explicitly_unverified(self) -> None:
         completed = run_validator()
@@ -33,7 +43,7 @@ class VerifyAgentCoverageTests(unittest.TestCase):
         self.assertEqual(report["fixture_validation"], "passed")
         self.assertEqual(report["live_verification"], "unverified")
 
-    def test_successful_live_command_is_verified(self) -> None:
+    def test_marker_only_live_command_is_smoke_unverified(self) -> None:
         completed = run_validator(
             "--expect-stdout",
             "rtk-live-smoke",
@@ -45,10 +55,131 @@ class VerifyAgentCoverageTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         report = json.loads(completed.stdout)
-        self.assertEqual(report["live_verification"], "verified")
+        self.assertEqual(report["live_verification"], "unverified")
+        self.assertEqual(report["live_smoke"], "passed")
         self.assertEqual(report["live_exit_code"], 0)
         self.assertGreater(report["live_stdout_bytes"], 0)
         self.assertTrue(report["live_expected_stdout_found"])
+        self.assertIn("command/result evidence", report["live_reason"])
+
+    def test_codex_jsonl_command_result_evidence_is_verified(self) -> None:
+        events = (
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "command-1",
+                    "type": "command_execution",
+                    "command": "rtk git status",
+                    "aggregated_output": "On branch test",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            },
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "RTK_LIVE_CODEX_OK"},
+            },
+        )
+        completed = run_validator(
+            "--expect-stdout",
+            "RTK_LIVE_CODEX_OK",
+            "--evidence-format",
+            "codex-jsonl",
+            "--expect-rtk-command",
+            "rtk git status",
+            "--require-verified",
+            "--live-command",
+            *emit_json_lines(*events),
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout)
+        self.assertEqual(report["live_verification"], "verified")
+        self.assertEqual(report["rtk_evidence"][0]["command"], "rtk git status")
+        self.assertEqual(report["rtk_evidence"][0]["exit_code"], 0)
+        self.assertGreater(report["rtk_evidence"][0]["result_bytes"], 0)
+
+    def test_claude_stream_json_command_result_evidence_is_verified(self) -> None:
+        events = (
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": "Bash",
+                            "input": {"command": "rtk git status"},
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tool-1",
+                            "content": "On branch test",
+                            "is_error": False,
+                        }
+                    ]
+                },
+            },
+            {"type": "result", "subtype": "success", "result": "RTK_LIVE_CLAUDE_OK"},
+        )
+        completed = run_validator(
+            "--expect-stdout",
+            "RTK_LIVE_CLAUDE_OK",
+            "--evidence-format",
+            "claude-stream-json",
+            "--expect-rtk-command",
+            "rtk git status",
+            "--require-verified",
+            "--live-command",
+            *emit_json_lines(*events),
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout)
+        self.assertEqual(report["live_verification"], "verified")
+        self.assertEqual(report["rtk_evidence"][0]["command"], "rtk git status")
+        self.assertFalse(report["rtk_evidence"][0]["is_error"])
+
+    def test_wrong_rtk_command_is_unverified_and_fails_required_gate(self) -> None:
+        events = (
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "command-1",
+                    "type": "command_execution",
+                    "command": "rtk --version",
+                    "aggregated_output": "rtk 0.46.1-dev.12",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            },
+            {"type": "item.completed", "item": {"text": "RTK_LIVE_CODEX_OK"}},
+        )
+        completed = run_validator(
+            "--expect-stdout",
+            "RTK_LIVE_CODEX_OK",
+            "--evidence-format",
+            "codex-jsonl",
+            "--expect-rtk-command",
+            "rtk git status",
+            "--require-verified",
+            "--live-command",
+            *emit_json_lines(*events),
+        )
+
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        report = json.loads(completed.stdout)
+        self.assertEqual(report["live_verification"], "unverified")
+        self.assertEqual(report["live_smoke"], "passed")
+        self.assertEqual(report["rtk_evidence"], [])
+        self.assertIn("rtk git status", report["live_reason"])
 
     def test_missing_live_marker_stays_failed(self) -> None:
         completed = run_validator(

@@ -6,13 +6,14 @@ install, upgrade, and uninstall do not add or remove model preferences.
 | Task | Role | Requested model/effort | Host-observed binding | Selection mechanism | Status | RTK evidence |
 |---|---|---|---|---|---|---|
 | 1–12 | imported checkpoint | plan-specific roles | not replayed in Task 13 | checked-in checkpoint at `b87d349` | implemented | Full source/test checkpoint imported; no new live-worker claim. |
-| 13 | `rtk_implementer` | `gpt-5.6-sol` / `high` | `gpt-5.6-sol` / `high` | Task host role binding | verified | Direct candidate RTK commands and active-profile migration executed in this task. |
+| 13 | `rtk_implementer` | `gpt-5.6-sol` / `high` | not observed | User-requested task role; no host-introspection record | pending | Candidate RTK commands prove execution behavior, not the effective model or effort. |
 | 13 final review | `rtk_reviewer` | `gpt-6-astra` / `xhigh` | none | User prohibited subagents/reviewers | blocked | Implementer self-review is recorded but is not represented as Astra evidence. |
 
-The active global Codex base config remained `gpt-5.6-luna` / `medium`; no
-`rtk_implementer` or `rtk_reviewer` files existed under the global Codex home.
-This proves the Task 13 binding was scoped by the host rather than installed as
-an unrelated global override.
+The candidate's recorded config inspection found the active global Codex base
+config at `gpt-5.6-luna` / `medium` and no `rtk_implementer` or `rtk_reviewer`
+files under the global Codex home. That supports only the claim that RTK did not
+install an unrelated global role override. It does not prove which model or
+effort the task host actually selected for Task 13.
 
 ## Precedence and process boundaries
 

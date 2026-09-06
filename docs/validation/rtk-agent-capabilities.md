@@ -13,7 +13,7 @@ Recorded 2026-09-06 on the Windows checkout `D:\src\rtk` from baseline
 | Codex CLI | `codex-cli 0.153.0` |
 | Claude Code | `2.1.258` |
 | Active Codex home | `C:\Users\dmitr\.codex` (`default`) |
-| Task 13 implementer binding | requested and host-bound `gpt-5.6-sol` / `high` |
+| Task 13 implementer binding | requested `gpt-5.6-sol` / `high`; host-observed model/effort unavailable |
 | Base Codex config | `gpt-5.6-luna` / `medium`, unchanged by RTK init |
 
 Before migration, candidate `rtk doctor --agent codex --format json` reported
@@ -49,7 +49,7 @@ and tracking fixtures remain separate from live-agent evidence.
 | Current Codex main agent | verified | This host executed direct candidate RTK commands; profile doctor is `ready`. Current session hook reload is not inferred. |
 | Codex fresh child | blocked | Explicit Task 13 instruction prohibited subagents; fixture coverage is not a live child. |
 | Codex resumed child/follow-up | blocked | Same authorization boundary; no duplicate-execution claim. |
-| Task-specific model selection | verified | Host role bound this implementer to `gpt-5.6-sol` / `high`; base config remained unchanged. |
+| Task-specific model selection | pending | `gpt-5.6-sol` / `high` was requested, but no host-introspection record proves the effective model/effort; unchanged base config is not binding evidence. |
 | Changed complexity / custom override | implemented | Precedence is documented and deterministic; no live rebinding was authorized. |
 | Delegation unavailable | verified | Work continued in the same provider/permission scope and the missing live rows stayed explicit. |
 | Nested child | blocked | No nested delegation authorized. |
@@ -70,7 +70,12 @@ and tracking fixtures remain separate from live-agent evidence.
 | Originally denied operation | verified | Permission tests and Codex default-mode no-op show RTK cannot authorize it. |
 
 `scripts/verify-agent-coverage.py` validates the offline fixture manifest by
-default and reports live verification `unverified`. Its opt-in
-`--live-command` path reports `verified` only after a zero exit and any requested
-stdout marker; missing runtimes are `unsupported` with exit 3, and host failures
-remain failures. The manual CI host jobs are skipped unless explicitly enabled.
+default and reports live verification `unverified`. A zero-exit live command and
+requested stdout marker establish only `live_smoke = passed`; marker-only output
+remains `live_verification = unverified`. Verification additionally requires a
+successful structured command/result event matching `--expect-rtk-command`,
+parsed as either `codex-jsonl` or `claude-stream-json`. The manual CI host jobs
+pass `--require-verified`, so missing or mismatched evidence fails the enabled
+job without relabeling marker-only output as verified. Missing runtimes are
+`unsupported` with exit 3, host command failures remain failures, and disabled
+manual jobs remain visibly skipped/unverified.
