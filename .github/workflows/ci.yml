@@ -76,6 +76,18 @@ jobs:
           if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
             choco install ripgrep --no-progress --yes
           }
+          $chocoBin = if ($env:ChocolateyInstall) {
+            Join-Path $env:ChocolateyInstall 'bin'
+          } else {
+            'C:\ProgramData\chocolatey\bin'
+          }
+          if (Test-Path $chocoBin) {
+            $env:Path = "$chocoBin;$env:Path"
+            Add-Content -Path $env:GITHUB_PATH -Value $chocoBin
+          }
+          if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
+            throw 'ripgrep was not available after installation'
+          }
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all
 
@@ -91,6 +103,18 @@ jobs:
         run: |
           if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
             choco install ripgrep --no-progress --yes
+          }
+          $chocoBin = if ($env:ChocolateyInstall) {
+            Join-Path $env:ChocolateyInstall 'bin'
+          } else {
+            'C:\ProgramData\chocolatey\bin'
+          }
+          if (Test-Path $chocoBin) {
+            $env:Path = "$chocoBin;$env:Path"
+            Add-Content -Path $env:GITHUB_PATH -Value $chocoBin
+          }
+          if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
+            throw 'ripgrep was not available after installation'
           }
       - uses: Swatinem/rust-cache@v2
       - name: Build and smoke-test native command paths
