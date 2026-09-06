@@ -48,6 +48,8 @@ def validate_manifest(repo: Path) -> dict[str, object]:
 
 
 def command_tokens(command: str) -> list[str]:
+    if any(character in command for character in "\r\n|&;()<>$`\x00"):
+        return []
     try:
         tokens = shlex.split(command, posix=True)
     except ValueError:
