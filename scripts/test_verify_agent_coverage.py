@@ -99,6 +99,71 @@ class VerifyAgentCoverageTests(unittest.TestCase):
         self.assertEqual(report["rtk_evidence"][0]["exit_code"], 0)
         self.assertGreater(report["rtk_evidence"][0]["result_bytes"], 0)
 
+    def test_codex_safe_shell_wrapper_is_verified(self) -> None:
+        events = (
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "command-1",
+                    "type": "command_execution",
+                    "command": "bash -lc 'rtk git status'",
+                    "aggregated_output": "On branch test",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            },
+            {"type": "item.completed", "item": {"text": "RTK_LIVE_CODEX_OK"}},
+        )
+        completed = run_validator(
+            "--expect-stdout",
+            "RTK_LIVE_CODEX_OK",
+            "--evidence-format",
+            "codex-jsonl",
+            "--expect-rtk-command",
+            "rtk git status",
+            "--require-verified",
+            "--live-command",
+            *emit_json_lines(*events),
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout)
+        self.assertEqual(report["live_verification"], "verified")
+        self.assertEqual(report["rtk_evidence"][0]["command"], "bash -lc 'rtk git status'")
+
+    def test_codex_outer_shell_compound_is_not_verified(self) -> None:
+        events = (
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "command-1",
+                    "type": "command_execution",
+                    "command": "bash -lc 'rtk git status' < /dev/null/rtk-review-input || true",
+                    "aggregated_output": "",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            },
+            {"type": "item.completed", "item": {"text": "RTK_LIVE_CODEX_OK"}},
+        )
+        completed = run_validator(
+            "--expect-stdout",
+            "RTK_LIVE_CODEX_OK",
+            "--evidence-format",
+            "codex-jsonl",
+            "--expect-rtk-command",
+            "rtk git status",
+            "--require-verified",
+            "--live-command",
+            *emit_json_lines(*events),
+        )
+
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        report = json.loads(completed.stdout)
+        self.assertEqual(report["live_verification"], "unverified")
+        self.assertEqual(report["live_smoke"], "passed")
+        self.assertEqual(report["rtk_evidence"], [])
+
     def test_claude_stream_json_command_result_evidence_is_verified(self) -> None:
         events = (
             {
@@ -146,6 +211,105 @@ class VerifyAgentCoverageTests(unittest.TestCase):
         self.assertEqual(report["live_verification"], "verified")
         self.assertEqual(report["rtk_evidence"][0]["command"], "rtk git status")
         self.assertFalse(report["rtk_evidence"][0]["is_error"])
+
+    def test_claude_safe_shell_wrapper_is_verified(self) -> None:
+        events = (
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": "Bash",
+                            "input": {"command": "bash -lc 'rtk git status'"},
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tool-1",
+                            "content": "On branch test",
+                            "is_error": False,
+                        }
+                    ]
+                },
+            },
+            {"type": "result", "subtype": "success", "result": "RTK_LIVE_CLAUDE_OK"},
+        )
+        completed = run_validator(
+            "--expect-stdout",
+            "RTK_LIVE_CLAUDE_OK",
+            "--evidence-format",
+            "claude-stream-json",
+            "--expect-rtk-command",
+            "rtk git status",
+            "--require-verified",
+            "--live-command",
+            *emit_json_lines(*events),
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout)
+        self.assertEqual(report["live_verification"], "verified")
+        self.assertEqual(
+            report["rtk_evidence"][0]["command"], "bash -lc 'rtk git status'"
+        )
+
+    def test_claude_outer_shell_compound_is_not_verified(self) -> None:
+        events = (
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": "Bash",
+                            "input": {
+                                "command": "bash -lc 'rtk git status' < /dev/null/rtk-review-input || true"
+                            },
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tool-1",
+                            "content": "",
+                            "is_error": False,
+                        }
+                    ]
+                },
+            },
+            {"type": "result", "subtype": "success", "result": "RTK_LIVE_CLAUDE_OK"},
+        )
+        completed = run_validator(
+            "--expect-stdout",
+            "RTK_LIVE_CLAUDE_OK",
+            "--evidence-format",
+            "claude-stream-json",
+            "--expect-rtk-command",
+            "rtk git status",
+            "--require-verified",
+            "--live-command",
+            *emit_json_lines(*events),
+        )
+
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        report = json.loads(completed.stdout)
+        self.assertEqual(report["live_verification"], "unverified")
+        self.assertEqual(report["live_smoke"], "passed")
+        self.assertEqual(report["rtk_evidence"], [])
 
     def test_wrong_rtk_command_is_unverified_and_fails_required_gate(self) -> None:
         events = (

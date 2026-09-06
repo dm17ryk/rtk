@@ -52,17 +52,18 @@ def command_tokens(command: str) -> list[str]:
         tokens = shlex.split(command, posix=True)
     except ValueError:
         return []
-    if len(tokens) >= 3 and tokens[0].replace("\\", "/").rsplit("/", 1)[-1] in {
+    if not tokens:
+        return []
+    executable = tokens[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if executable in {
         "bash",
         "sh",
         "zsh",
-    } and tokens[1] in {"-c", "-lc"}:
-        try:
-            tokens = shlex.split(tokens[2], posix=True)
-        except ValueError:
+    }:
+        if len(tokens) != 3 or tokens[1] not in {"-c", "-lc"}:
             return []
+        return command_tokens(tokens[2])
     if tokens:
-        executable = tokens[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
         if executable == "rtk.exe":
             tokens[0] = "rtk"
     return tokens
