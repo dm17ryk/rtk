@@ -104,7 +104,7 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 ### Verify Installation
 
 ```bash
-rtk --version   # Should show "rtk 0.28.2"
+rtk --version   # Should identify Rust Token Killer
 rtk gain        # Should show the savings dashboard
 ```
 
@@ -117,7 +117,7 @@ rtk gain        # Should show the savings dashboard
 rtk init -g                     # Claude Code
 rtk init -g --copilot           # GitHub Copilot (VS Code + CLI)
 rtk init -g --gemini            # Gemini CLI
-rtk init -g --codex             # Codex (OpenAI)
+rtk init -g --codex             # Codex: native hook + instructions + MCP
 rtk init -g --agent cursor      # Cursor
 rtk init -g --agent windsurf    # Windsurf
 rtk init -g --opencode          # OpenCode
@@ -150,9 +150,12 @@ fallbacks for interactive, redirected, machine, or opaque behavior.
 Pi and Mistral Vibe are exceptions: neither currently has a native MCP client,
 so their RTK extension or hook integration is complete without an MCP entry.
 
-Hook-based agents rewrite Bash commands (e.g., `git status` -> `rtk git status`) before execution. Plugin-based agents, including Hermes, use their plugin API to rewrite commands before execution. The agent receives compact output without needing to call `rtk` explicitly.
-
-**Important:** the hook only runs on Bash tool calls. Claude Code built-in tools like `Read`, `Grep`, and `Glob` do not pass through the Bash hook, so they are not auto-rewritten. To get RTK's compact output for those workflows, use shell commands (`cat`/`head`/`tail`, `rg`/`grep`, `find`) or call `rtk read`, `rtk grep`, or `rtk find` directly.
+Hook-based agents rewrite eligible shell commands (for example, `git status` to
+`rtk git status`) before execution. Plugin-based agents use their plugin API to
+do the same. Native Read/Grep-style output adapters are host-specific and
+partial: supported result schemas can add compact, recoverable context without
+rerunning the producer, while unknown schemas and errors remain native. Direct
+routes such as `rtk read`, `rtk rg`, and `rtk find` remain the portable choice.
 
 ## How It Works
 
@@ -328,6 +331,20 @@ rtk discover --all --since 7    # All projects, last 7 days
 
 rtk session                     # Show RTK adoption across recent sessions
 ```
+
+### Integration & Recovery
+
+```bash
+rtk doctor --agent codex --format json   # Inspect integration dimensions
+rtk mcp                                  # Start the local stdio MCP server
+rtk read -l none --recovery <id>         # Read one stored lossless artifact
+rtk read -l none --recovery <id> --lines 120:160
+```
+
+Recovery reads consume an existing RTK artifact; they never rerun the producer.
+Use exact/native execution for interactive, redirected, binary, structured, or
+machine-consumed output. Exact routes preserve bytes and exit status and do not
+claim compression credit.
 
 ## Global Flags
 
@@ -505,11 +522,14 @@ rtk init -g
 
 ### Local MCP server
 
-RTK also provides a local synchronous stdio MCP server with typed command
-execution: `rtk mcp`. `rtk init` registers it automatically for selected clients
-with native MCP support. Its `run_filtered` tool accepts RTK argv arrays, while
-the Windows-only `run_cmd` tool accepts one raw CMD expression such as
-`{"expression":"echo %CD% & dir /b"}`. Both validate working directories,
+RTK also provides a local synchronous stdio MCP server: `rtk mcp`. `rtk init`
+registers it automatically for selected clients with native MCP support. Its
+tools cover command rewriting, typed filtered execution, native Windows CMD and
+PowerShell expressions, gain/discovery summaries, artifact listing/reading,
+and bounded recovery reads/searches. `run_filtered` accepts RTK argv arrays;
+`run_cmd` accepts one raw CMD expression such as
+`{"expression":"echo %CD% & dir /b"}`; `run_powershell` requires an explicit
+`powershell` (5.1) or `pwsh` (7+) host. They validate working directories,
 enforce timeout/output limits, and preserve exit codes. Because execution has
 local-machine capabilities, connect only trusted clients. See
 [the MCP guide](docs/guide/resources/mcp.md).
@@ -544,7 +564,7 @@ RTK supports 17 AI coding tools. Each integration rewrites shell commands to `rt
 | **GitHub Copilot CLI** | `rtk init -g --copilot` | PreToolUse deny-with-suggestion (CLI limitation) |
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
 | **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook |
-| **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
+| **Codex** | `rtk init -g --codex` | Native PreToolUse hook + AGENTS.md + MCP |
 | **Windsurf** | `rtk init -g --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |

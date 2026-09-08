@@ -1,6 +1,6 @@
 # Output-route inventory after semantic migration
 
-Recorded 2026-09-05 from the working tree for Task 10. This is a route
+Recorded 2026-09-06 from the Task 13 working tree. This is a route
 inventory, not a claim that every command in the ecosystem is supported.
 
 ## Current measured baseline
@@ -91,7 +91,8 @@ cargo clippy --all-targets
 cargo build --release
 ```
 
-The full suite passed on 2026-09-05 with 3,357 tests passed and 8 ignored.
+The full suite passed on 2026-09-06 with 3,372 unit tests passed and 8 ignored,
+followed by every integration-test binary with zero failures.
 The stack override is a test-process setting only; it does not change the
 release binary. This document should be updated if a remaining path is
 migrated or its exactness reason changes.

@@ -204,6 +204,38 @@ Checks:
 - Claude Code integration
 - Hook status
 
+## Codex reports an untrusted or inactive hook
+
+Run the candidate binary's read-only diagnostic first:
+
+```bash
+rtk doctor --agent codex --format json
+```
+
+Re-run `rtk init --codex` for the current project or `rtk init -g --codex`
+for the selected `CODEX_HOME`. Review the config and hook command before trusting
+the project or restarting Codex. RTK does not bypass hook trust, native sandbox
+rules, or approval policy. An unknown Codex version/schema is unsupported until
+its payload and output contract are verified.
+
+## Need exact or omitted output
+
+Interactive, redirected, binary, machine-readable, and caller-formatted output
+should stay native or use an explicit exact RTK route. Exact execution preserves
+bytes and exit status and records no false compression credit.
+
+When compact output prints a recovery ID, read the stored producer output rather
+than executing the producer again:
+
+```bash
+rtk read -l none --recovery <id>
+rtk read -l none --recovery <id> --lines 120:160
+```
+
+MCP clients can use `read_recovery` and `search_recovery` for bounded paging and
+search. If recovery storage was disabled, exceeded its limit, or could not be
+written, RTK reports recovery unavailable; it does not invent missing output.
+
 ## Still stuck?
 
 Open an issue: https://github.com/rtk-ai/rtk/issues

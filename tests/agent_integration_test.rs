@@ -73,7 +73,8 @@ fn fake_codex_host_boundary_preserves_tool_input_and_approval_surface() {
     assert_eq!(updated["command"], "rtk git status");
     assert_eq!(updated["description"], "keep");
     assert_eq!(updated["timeout_ms"], 5000);
-    assert!(response["hookSpecificOutput"]
-        .get("permissionDecision")
-        .is_none());
+    assert_eq!(
+        response["hookSpecificOutput"]["permissionDecision"],
+        "allow"
+    );
 }

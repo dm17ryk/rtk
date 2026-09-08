@@ -414,7 +414,7 @@ enum Commands {
         #[arg(long)]
         uninstall: bool,
 
-        /// Target Codex CLI (uses AGENTS.md + RTK.md, no Claude hook patching)
+        /// Target Codex CLI (native hook + AGENTS.md + RTK.md + MCP)
         #[arg(long)]
         codex: bool,
 
@@ -825,7 +825,6 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-
 
     /// Pytest test runner with compact output
     Pytest {
@@ -2856,7 +2855,6 @@ fn run_cli() -> Result<i32> {
 
         Commands::Ruff { args } => ruff_cmd::run(&args, cli.verbose)?,
 
-
         Commands::Pytest { args } => pytest_cmd::run(&args, cli.verbose)?,
 
         Commands::Mypy { args } => mypy_cmd::run(&args, cli.verbose)?,
@@ -3713,6 +3711,18 @@ mod tests {
             Err(e) => assert_eq!(e.kind(), ErrorKind::DisplayHelp),
             Ok(_) => panic!("Expected DisplayHelp error"),
         }
+    }
+
+    #[test]
+    fn init_help_describes_native_codex_integration() {
+        let error = match Cli::try_parse_from(["rtk", "init", "--help"]) {
+            Err(error) => error,
+            Ok(_) => panic!("init --help should return clap display help"),
+        };
+        let help = error.to_string();
+
+        assert!(help.contains("native hook + AGENTS.md + RTK.md + MCP"));
+        assert!(!help.contains("no Claude hook patching"));
     }
 
     #[test]

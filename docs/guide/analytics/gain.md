@@ -183,6 +183,18 @@ jobs:
       - run: git add stats/ && git commit -m "Weekly rtk stats" && git push
 ```
 
+## Coverage is not savings
+
+`rtk session` reports whether eligible shell activity used RTK; `rtk gain`
+reports byte-estimated reduction for executions RTK actually captured. A high
+filter percentage does not prove high routing coverage, and a direct route being
+available does not prove real agents used it.
+
+For audits, separate routine work from fixture, diagnostic, benchmark, and
+proxy traffic. Preserve execution/session/child identity so a resumed child or
+follow-up does not count an earlier producer twice. Exact routes with unavailable
+captured sizes remain unknown rather than being recorded as zero-byte savings.
+
 ## Quota estimate
 
 `--quota` expresses the estimated tokens saved as a fraction of a monthly subscription budget. Like every other figure in `rtk gain`, it is derived from the `bytes / 4` estimate of bash output, so treat it as an order of magnitude rather than a billing forecast.

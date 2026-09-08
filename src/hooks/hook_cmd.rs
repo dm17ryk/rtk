@@ -682,9 +682,10 @@ fn hook_log_fields(v: &Value) -> Option<(&str, &str, &str)> {
 
 /// Log the real hook decision to the tracking DB, keyed by the transcript's
 /// `tool_use_id`, so `rtk discover` can later read ground truth about historical
-/// Process the Codex hook contract without changing the host's authorization
-/// decision. The response only supplies updated input when Codex has already
-/// selected its explicit no-approval mode.
+/// Process the Codex hook contract without broadening the host's authorization.
+/// Codex requires `permissionDecision: "allow"` alongside updated input, so the
+/// response is emitted only after Codex has selected its explicit no-approval
+/// mode.
 pub fn run_codex(event: &str) -> Result<()> {
     match event {
         super::codex::SUBAGENT_START_EVENT => return Ok(()),
@@ -1677,7 +1678,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_pre_tool_use_rewrites_without_granting_permission() {
+    fn codex_pre_tool_use_marks_bypass_rewrite_as_allowed() {
         let input = r#"{"hook_event_name":"PreToolUse","permission_mode":"bypassPermissions","tool_name":"Bash","tool_input":{"command":"git status"}}"#;
         let output = crate::hooks::codex::response_from_input(input)
             .unwrap()
@@ -1687,9 +1688,7 @@ mod tests {
             output["hookSpecificOutput"]["updatedInput"]["command"],
             "rtk git status"
         );
-        assert!(output["hookSpecificOutput"]
-            .get("permissionDecision")
-            .is_none());
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
     fn claude_input_value(cmd: &str) -> Value {
