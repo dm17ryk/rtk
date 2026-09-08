@@ -21,13 +21,13 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 → [Arg("cargo"), Arg("test"), Redirect("2>&1"), Operator("&&"), Arg("git"), Arg("status")]
 ```
 
-**Compound splitting** — The rewrite engine walks the tokens, splitting on `Operator` (`&&`, `||`, `;`) and typed `Pipe` tokens (`|`, `|&`). For normal pipelines, producers and intermediate stages stay raw, and only an argument-safe final stage marked `pipeline_final_safe` is rewritten. The initial safe set is ordinary `grep` and `rg` invocations; search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. Stderr pipelines (`|&`) and pipelines containing opaque shell groups remain raw.
+**Compound splitting** — The rewrite engine walks the tokens, splitting on `Operator` (`&&`, `||`, `;`) and typed `Pipe` tokens (`|`, `|&`). For normal pipelines, intermediate stages stay raw. A final stage whose rule's `pipeline_safety` allows it (ordinary `grep` and `rg` invocations) is rewritten; search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. The producer stage is rewritten when its rule's `pipeline_safety` allows it and every downstream stage is a display-only consumer (`cat`, `head`, non-following `tail`) with no file-target redirect (#3171). Stderr pipelines (`|&`) and pipelines containing opaque shell groups remain raw.
 
 **Per-segment rewriting** — Each segment goes through:
 
 1. Strip trailing redirects (`2>&1`, `>/dev/null`) — matched via lexer tokens, set aside, re-appended after rewriting
 2. Short-circuit special cases — `head -20 file` → `rtk read file --max-lines 20`, `tail -n 5 file` → `rtk read file --tail-lines 5`. These can't go through generic prefix replacement because it would produce `rtk read -20 file` (wrong flag position)
-3. Classify the command — strip env prefixes (`sudo`, `FOO="bar baz"`), normalize paths (`/usr/bin/grep` → `grep`), strip git global opts (`git -C /tmp` → `git`), then match against 60+ regex patterns from `rules.rs`
+3. Classify the command — strip env prefixes (`FOO="bar baz"`), normalize paths (`/usr/bin/grep` → `grep`), strip git global opts (`git -C /tmp` → `git`), then match against 60+ regex patterns from `rules.rs`
 4. Apply the rewrite — find the matching rule, replace the command prefix with `rtk <cmd>`, re-prepend the env prefix, re-append the redirect suffix
 
 **Guards along the way:**
@@ -67,12 +67,12 @@ The classification logic is shared between discover and rewrite — same pattern
 
 ## Env Prefix Handling
 
-The `ENV_PREFIX` regex strips env variable assignments, `sudo`, and `env` from the front of commands. It handles:
+The `ENV_PREFIX` regex strips env variable assignments and `env` from the front of commands. `sudo` is deliberately not stripped, so sudo-prefixed commands stay unclassified and pass through unrewritten. It handles:
 - Unquoted: `FOO=bar`
 - Double-quoted with spaces: `FOO="bar baz"`
 - Single-quoted: `FOO='bar baz'`
 - Escaped quotes: `FOO="he said \"hello\""`
-- Chained: `A="x y" B=1 sudo git status`
+- Chained: `A="x y" B=1 env git status`
 
 The prefix is stripped twice: once in `classify_command()` to match the underlying command against rules, and again in `rewrite_segment()` to extract it for re-prepending to the rewritten command.
 

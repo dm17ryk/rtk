@@ -826,6 +826,7 @@ enum Commands {
         args: Vec<String>,
     },
 
+
     /// Pytest test runner with compact output
     Pytest {
         /// Pytest arguments
@@ -2854,6 +2855,7 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Ruff { args } => ruff_cmd::run(&args, cli.verbose)?,
+
 
         Commands::Pytest { args } => pytest_cmd::run(&args, cli.verbose)?,
 

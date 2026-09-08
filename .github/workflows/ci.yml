@@ -62,6 +62,8 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: Install test tools (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
