@@ -11,7 +11,8 @@ Owns: `rtk init` installation flows (6 agents via `AgentTarget` enum, now includ
 Does **not** own: the deployed hook scripts themselves (that's `hooks/`), the rewrite pattern registry (that's `discover/`), or command filtering (that's `cmds/`).
 
 Boundary notes:
-- `rewrite_cmd.rs` is a thin CLI bridge — it exists to serve hooks (hooks call `rtk rewrite` as a subprocess) and delegates entirely to `discover/registry`.
+- `decision.rs` is the single place RTK decides what a hook should do with a command — deny, defer, rewrite-and-allow, or rewrite-and-ask. All three entry points route through it: the in-process `rtk hook <agent>` hosts (`hook_cmd.rs`), the `rtk rewrite` subprocess path (`rewrite_cmd.rs`), and the `rtk hook check` diagnostic (`main.rs`). Add a gate there, not in a caller.
+- `rewrite_cmd.rs` is a thin CLI bridge — it exists to serve hooks (hooks call `rtk rewrite` as a subprocess) and renders `decision.rs`'s verdict as the exit codes those delegates branch on.
 - `trust.rs` gates project-local TOML filter execution. It lives here because the trust workflow is tied to hook-installed filter discovery, not to the core filter engine.
 
 ## Purpose
@@ -30,6 +31,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Cline | `rtk init --agent cline` | `.clinerules` | -- |
 | Codex | `rtk init --codex` | RTK.md in project or selected `$CODEX_HOME` | AGENTS.md, config.toml hook + MCP |
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
+| Trae | `rtk init --agent trae` (project) or `rtk init -g --agent trae` (global) | Native `rtk hook trae` registration | `.trae/hooks.json`; global also patches existing `~/.trae-cn/hooks.json` |
 | Pi | `rtk init --agent pi` | `.pi/extensions/rtk.ts` | -- |
 | Oh My Pi (OMP) | `rtk init --agent omp` | `.omp/extensions/rtk.ts` (shared Pi extension) | -- |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
@@ -91,6 +93,7 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 | Gemini CLI (rtk hook gemini) | No (allow/deny only) | allow (limitation — no ask mode in Gemini) |
 | Copilot CLI (rtk hook copilot) | No updatedInput | deny-with-suggestion (unchanged) |
 | Codex | Native `PreToolUse` rewrite only in `bypassPermissions`; current schema requires `permissionDecision: "allow"` with `updatedInput` | unchanged outside bypass mode (RTK cannot reproduce Codex's per-command approval) |
+| Trae (`rtk hook trae`) | Host-owned approval | Return only `updatedInput`; omit `permissionDecision` |
 | Mistral Vibe (rtk hook vibe) | No native ask surface | passthrough — Vibe's own approval prompt fires on the rewritten command |
 
 ### Implementation

@@ -12,7 +12,7 @@
 use crate::core::config::hook_rewrite_params;
 use crate::discover::lexer::contains_unattestable_construct;
 use crate::discover::registry::{has_heredoc, rewrite_command};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub const PRE_TOOL_USE_EVENT: &str = "PreToolUse";
 pub const SUBAGENT_START_EVENT: &str = "subagent-start";

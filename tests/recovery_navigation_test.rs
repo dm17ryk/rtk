@@ -166,9 +166,11 @@ fn mcp_recovery_navigation_redacts_sensitive_content() {
             "context": 1
         }),
     );
-    assert!(!multiline["result"]["structuredContent"]["matches"]
-        .to_string()
-        .contains("FAKE_TEST_TOKEN"));
+    assert!(
+        !multiline["result"]["structuredContent"]["matches"]
+            .to_string()
+            .contains("FAKE_TEST_TOKEN")
+    );
 }
 
 #[test]
@@ -217,10 +219,12 @@ fn mcp_recovery_page_bounds_oversized_lines_and_advances() {
     let search_result = &search["result"]["structuredContent"];
     assert_eq!(search_result["match_count"], 1);
     assert_eq!(search_result["truncated"], true);
-    assert!(search_result["matches"][0]["text"]
-        .as_str()
-        .expect("bounded match text")
-        .contains("[rtk: line truncated"));
+    assert!(
+        search_result["matches"][0]["text"]
+            .as_str()
+            .expect("bounded match text")
+            .contains("[rtk: line truncated")
+    );
 
     let marker_search = call_mcp(
         temp.path(),

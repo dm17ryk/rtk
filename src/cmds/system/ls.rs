@@ -4,9 +4,9 @@ use super::constants::NOISE_DIRS;
 use crate::core::ai_output::BudgetClass;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_INVENTORY;
-use crate::core::utils::resolved_command;
+use crate::core::utils::{ChildArgExt, resolved_command};
 #[cfg(windows)]
-use crate::core::utils::{resolve_host_command, HostCommand};
+use crate::core::utils::{HostCommand, resolve_host_command};
 use anyhow::Result;
 use regex::Regex;
 #[cfg(windows)]
@@ -80,7 +80,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     for flag in &flags {
         if flag.starts_with("--") {
             if *flag != "--all" {
-                cmd.arg(flag);
+                cmd.child_arg(flag);
             }
         } else {
             let stripped = flag.trim_start_matches('-');
@@ -89,17 +89,15 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
                 .filter(|c| *c != 'l' && *c != 'a' && *c != 'h')
                 .collect();
             if !extra.is_empty() {
-                cmd.arg(format!("-{}", extra));
+                cmd.child_arg(format!("-{}", extra));
             }
         }
     }
 
     if paths.is_empty() {
-        cmd.arg(".");
+        cmd.child_arg(".");
     } else {
-        for p in &paths {
-            cmd.arg(p);
-        }
+        cmd.child_args(&paths);
     }
 
     let label = if args.is_empty() {
@@ -163,7 +161,9 @@ fn windows_ls_args_supported(args: &[String]) -> bool {
             "-a" | "-A" | "-l" | "-al" | "-la" | "--all" | "--almost-all"
         ) || (arg.starts_with('-')
             && !arg.starts_with("--")
-            && arg[1..].chars().all(|flag| matches!(flag, 'a' | 'A' | 'l' | 'h'))
+            && arg[1..]
+                .chars()
+                .all(|flag| matches!(flag, 'a' | 'A' | 'l' | 'h'))
             && !arg[1..].is_empty())
     })
 }
@@ -172,10 +172,7 @@ fn windows_ls_args_supported(args: &[String]) -> bool {
 fn run_windows_native(args: &[String], verbose: u8) -> Result<i32> {
     let show_all = windows_ls_show_all(args);
     let show_long = args.iter().any(|arg| {
-        arg == "-l"
-            || (!arg.starts_with("--")
-                && arg.starts_with('-')
-                && arg[1..].contains('l'))
+        arg == "-l" || (!arg.starts_with("--") && arg.starts_with('-') && arg[1..].contains('l'))
     });
     let paths = args
         .iter()
@@ -658,12 +655,13 @@ mod tests {
             !hint.contains("full output"),
             "must not point at already-seen output: {hint}"
         );
-        // Tee availability depends on environment; when present the hint is
-        // the standard one-shot retrieval command over the hidden-only file.
+        // Recovery availability depends on environment; when present the hint
+        // is the standard one-shot retrieval command over the hidden entries.
         if hint.lines().count() > 1 {
             assert!(
-                hint.contains("[see remaining: tail -n +1 "),
-                "tee hint must be the standard tail form: {hint}"
+                hint.contains("[see remaining: tail -n +1 ")
+                    || hint.contains("hidden: rtk recall "),
+                "recovery hint must be a standard retrieval form: {hint}"
             );
         }
     }
@@ -672,15 +670,21 @@ mod tests {
     fn test_hidden_hint_note_variants() {
         let t = vec!["x  1B".to_string()];
         let f = vec!["target/".to_string()];
-        assert!(hidden_hint(&t, &[])
-            .expect("hint")
-            .starts_with("... (1 more)"));
-        assert!(hidden_hint(&[], &f)
-            .expect("hint")
-            .starts_with("... (1 filtered)"));
-        assert!(hidden_hint(&t, &f)
-            .expect("hint")
-            .starts_with("... (1 more, 1 filtered)"));
+        assert!(
+            hidden_hint(&t, &[])
+                .expect("hint")
+                .starts_with("... (1 more)")
+        );
+        assert!(
+            hidden_hint(&[], &f)
+                .expect("hint")
+                .starts_with("... (1 filtered)")
+        );
+        assert!(
+            hidden_hint(&t, &f)
+                .expect("hint")
+                .starts_with("... (1 more, 1 filtered)")
+        );
     }
 
     #[test]

@@ -1,8 +1,9 @@
 //! Filters find results by grouping files by directory.
 
 use crate::core::ai_output::{AiDocument, AiRecord, BudgetClass, Omission, Severity};
-use crate::core::{path_inventory, tracking};
 use crate::core::truncate::CAP_INVENTORY;
+use crate::core::utils::ChildArgExt;
+use crate::core::{path_inventory, tracking};
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::collections::{HashMap, HashSet};
@@ -173,21 +174,21 @@ fn dispatch(original: &[String]) -> Result<Dispatch> {
         };
         return Ok(Dispatch::Verbatim(verbatim));
     }
-    if options.is_empty() {
-        if let Some(mut parsed) = parse_subset(&paths, &expr) {
-            let repeated_max = max.is_some() && parsed.max_explicit;
-            let repeated_type =
-                file_type.is_some() && parsed.file_type != FindArgs::default().file_type;
-            if !repeated_max && !repeated_type {
-                if let Some(n) = max {
-                    parsed.max_results = n;
-                    parsed.max_explicit = true;
-                }
-                if let Some(t) = file_type {
-                    parsed.file_type = t;
-                }
-                return Ok(Dispatch::Native(parsed));
+    if options.is_empty()
+        && let Some(mut parsed) = parse_subset(&paths, &expr)
+    {
+        let repeated_max = max.is_some() && parsed.max_explicit;
+        let repeated_type =
+            file_type.is_some() && parsed.file_type != FindArgs::default().file_type;
+        if !repeated_max && !repeated_type {
+            if let Some(n) = max {
+                parsed.max_results = n;
+                parsed.max_explicit = true;
             }
+            if let Some(t) = file_type {
+                parsed.file_type = t;
+            }
+            return Ok(Dispatch::Native(parsed));
         }
     }
     Ok(Dispatch::Compress {
@@ -259,16 +260,17 @@ fn run_compress(
     let max_results = max.unwrap_or(CAP_INVENTORY);
     let max_explicit = max.is_some();
     let mut cmd = crate::core::utils::resolved_command("find");
-    cmd.args(options).args(paths);
+    cmd.child_args(options).child_args(paths);
     if !expr.is_empty() {
-        cmd.arg("(");
-        cmd.args(expr);
-        cmd.arg(")");
+        cmd.child_arg("(");
+        cmd.child_args(expr);
+        cmd.child_arg(")");
     }
     if let Some(t) = file_type {
-        cmd.arg("-type").arg(t);
+        cmd.child_arg("-type").child_arg(t);
     }
-    cmd.arg("-print0").stdin(std::process::Stdio::inherit());
+    cmd.child_arg("-print0")
+        .stdin(std::process::Stdio::inherit());
     let output = cmd.output().context("Failed to execute find")?;
     let exit_code = crate::core::utils::exit_code_from_output(&output, "find");
     {
@@ -637,7 +639,11 @@ fn render(
 ) -> String {
     files.sort();
     let ordered = display_ordered(&files);
-    let displayed = ordered.iter().take(max_results).cloned().collect::<Vec<_>>();
+    let displayed = ordered
+        .iter()
+        .take(max_results)
+        .cloned()
+        .collect::<Vec<_>>();
     let hidden = &ordered[displayed.len()..];
     let note = filtered_hint(filtered);
     let mut document = find_document(&displayed, note.as_deref());
@@ -847,7 +853,9 @@ mod tests {
     #[test]
     fn rtk_flags_mid_expression_reach_find_untouched() {
         assert_eq!(
-            class(&[".", "-name", "*.rs", "-m", "5", "-exec", "grep", "-m", "1", "x", "{}", ";"]),
+            class(&[
+                ".", "-name", "*.rs", "-m", "5", "-exec", "grep", "-m", "1", "x", "{}", ";"
+            ]),
             "verbatim"
         );
         match dispatch(&args(&[".", "-m", "5", "-mtime", "-7"])).unwrap() {
@@ -1300,13 +1308,14 @@ mod tests {
     #[test]
     fn native_run_returns_zero_on_success() {
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("RTK_TEE_DIR", tmp.path());
-        std::fs::write(tmp.path().join("a.txt"), "x").unwrap();
-        let root = tmp.path().to_string_lossy().into_owned();
-        assert_eq!(
-            run("*.txt", &root, 10, false, None, "f", false, 0).unwrap(),
-            0
-        );
+        temp_env::with_var("RTK_TEE_DIR", Some(tmp.path()), || {
+            std::fs::write(tmp.path().join("a.txt"), "x").unwrap();
+            let root = tmp.path().to_string_lossy().into_owned();
+            assert_eq!(
+                run("*.txt", &root, 10, false, None, "f", false, 0).unwrap(),
+                0
+            );
+        });
     }
 
     #[test]
@@ -1365,28 +1374,29 @@ mod tests {
     #[test]
     fn disclosure_survives_the_output_guard() {
         let tee = tempfile::tempdir().unwrap();
-        std::env::set_var("RTK_TEE_DIR", tee.path());
-        let timer = tracking::TimedExecution::start();
-        let shown = render(
-            vec!["visible.txt".to_string()],
-            50,
-            false,
-            &["secret.txt".to_string()],
-            "find . -name '*.txt'",
-            "visible.txt",
-            &timer,
-        );
-        assert!(shown.contains("(1 filtered"), "{shown}");
-        let shown = render(
-            vec![],
-            50,
-            false,
-            &["secret.txt".to_string()],
-            "find . -name secret.txt",
-            "",
-            &timer,
-        );
-        assert!(shown.contains("(1 filtered"), "{shown}");
+        temp_env::with_var("RTK_TEE_DIR", Some(tee.path()), || {
+            let timer = tracking::TimedExecution::start();
+            let shown = render(
+                vec!["visible.txt".to_string()],
+                50,
+                false,
+                &["secret.txt".to_string()],
+                "find . -name '*.txt'",
+                "visible.txt",
+                &timer,
+            );
+            assert!(shown.contains("(1 filtered"), "{shown}");
+            let shown = render(
+                vec![],
+                50,
+                false,
+                &["secret.txt".to_string()],
+                "find . -name secret.txt",
+                "",
+                &timer,
+            );
+            assert!(shown.contains("(1 filtered"), "{shown}");
+        });
     }
 
     #[cfg(unix)]

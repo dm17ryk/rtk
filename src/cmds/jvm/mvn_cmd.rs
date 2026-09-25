@@ -1,6 +1,6 @@
 //! Apache Maven filter — Surefire/Failsafe block collapse, compile error/warning
 //! dedup, package/install pipeline with mode-toggle.
-//! 
+//!
 //! Replaces the previous `src/filters/mvn-build.toml` filter with a Rust module
 //! capable of state-machine parsing (block collapse, continuation tracking,
 //! mode toggle) that TOML DSL cannot express.
@@ -438,8 +438,7 @@ fn is_lane_opener(core: &str) -> bool {
 /// Note: the `[ERROR]   Class.test:25 …` failures-summary entries (3-space
 /// indent, no `<<<` marker) do NOT match.
 fn is_per_test_subline(line: &str) -> bool {
-    line.starts_with("[ERROR] ")
-        && (line.contains("<<< FAILURE!") || line.contains("<<< ERROR!"))
+    line.starts_with("[ERROR] ") && (line.contains("<<< FAILURE!") || line.contains("<<< ERROR!"))
 }
 
 // ── English-footer guard ────────────────────────────────────────────────────
@@ -649,25 +648,23 @@ impl<'a> SurefireBlock<'a> {
         }
 
         if self.in_block {
-            if keyed {
-                if let Some(caps) = CLOSE.captures(core) {
-                    let fail = caps.get(1).map(|m| m.as_str() != "0").unwrap_or(false);
-                    let err = caps.get(2).map(|m| m.as_str() != "0").unwrap_or(false);
-                    if fail || err {
-                        let lines = std::mem::take(&mut self.block_lines);
-                        let running = self.block_running.take();
-                        self.in_block = false;
-                        return SurefireStep::FailingClose {
-                            running,
-                            lines,
-                            close: line,
-                        };
-                    }
-                    self.block_lines.clear();
-                    self.block_running = None;
+            if keyed && let Some(caps) = CLOSE.captures(core) {
+                let fail = caps.get(1).map(|m| m.as_str() != "0").unwrap_or(false);
+                let err = caps.get(2).map(|m| m.as_str() != "0").unwrap_or(false);
+                if fail || err {
+                    let lines = std::mem::take(&mut self.block_lines);
+                    let running = self.block_running.take();
                     self.in_block = false;
-                    return SurefireStep::Consumed;
+                    return SurefireStep::FailingClose {
+                        running,
+                        lines,
+                        close: line,
+                    };
                 }
+                self.block_lines.clear();
+                self.block_running = None;
+                self.in_block = false;
+                return SurefireStep::Consumed;
             }
             self.block_lines.push(line);
             return SurefireStep::Consumed;
@@ -1255,13 +1252,14 @@ fn drive_surefire_line<'a>(
     // repetition (cold-preclear finding, upstream PR #3199, third review
     // round: that inference silently shared Surefire's leftover budget with
     // a module whose only failures were integration-test ones).
-    if keyed {
-        if let Some(caps) = TEST_PLUGIN_BANNER.captures(core) {
-            summary.observe_plugin_banner(caps.get(1).map_or("", |m| m.as_str()));
-        }
+    if keyed && let Some(caps) = TEST_PLUGIN_BANNER.captures(core) {
+        summary.observe_plugin_banner(caps.get(1).map_or("", |m| m.as_str()));
     }
 
-    let step = lanes.get(idx).block.step(line, core, keyed, idx == ROOT_LANE, out);
+    let step = lanes
+        .get(idx)
+        .block
+        .step(line, core, keyed, idx == ROOT_LANE, out);
     // A lane inside a Surefire block has no pending javac continuations:
     // entering a block retires any stale armed claim, so a single lane can't
     // hold a permanent armed-vs-block tie against raw-line routing.
@@ -1276,7 +1274,10 @@ fn drive_surefire_line<'a>(
             close,
         } => {
             if classes.admit() {
-                lanes.get(idx).block.commit_failing(out, running, &lines, close);
+                lanes
+                    .get(idx)
+                    .block
+                    .commit_failing(out, running, &lines, close);
             } else {
                 lanes.get(idx).block.drop_failing();
             }
@@ -1318,7 +1319,12 @@ fn filter_surefire_with_cap(raw: &str, cap: usize, daemon: bool) -> String {
 
     for line in stripped.lines() {
         let (idx, core, keyed) = match drive_surefire_line(
-            &mut lanes, line, &mut classes, &mut summary, daemon, &mut out,
+            &mut lanes,
+            line,
+            &mut classes,
+            &mut summary,
+            daemon,
+            &mut out,
         ) {
             Some(v) => v,
             None => continue,
@@ -1566,7 +1572,12 @@ fn filter_package_with_cap(raw: &str, cap: usize, daemon: bool) -> String {
 
     for line in stripped.lines() {
         let (idx, core, keyed) = match drive_surefire_line(
-            &mut lanes, line, &mut classes, &mut summary, daemon, &mut out,
+            &mut lanes,
+            line,
+            &mut classes,
+            &mut summary,
+            daemon,
+            &mut out,
         ) {
             Some(v) => v,
             None => continue,
@@ -1712,8 +1723,7 @@ pub fn filter_quiet(raw: &str, daemon: bool) -> String {
         if CLOSE.is_match(core) {
             out.push_str(line);
             out.push('\n');
-            failure_trail =
-                core.contains("<<< FAILURE!") || core.contains("<<< ERROR!");
+            failure_trail = core.contains("<<< FAILURE!") || core.contains("<<< ERROR!");
             continue;
         }
 
@@ -1964,7 +1974,8 @@ mod tests {
         let i = include_str!("../../../tests/fixtures/mvnd_reactor_pass_raw.txt");
         let o = filter_package(i, true);
         assert!(
-            o.contains("Building child-a 1.0.0-SNAPSHOT") && o.contains("Building child-b 1.0.0-SNAPSHOT"),
+            o.contains("Building child-a 1.0.0-SNAPSHOT")
+                && o.contains("Building child-b 1.0.0-SNAPSHOT"),
             "genuine `[n/m]`-numbered module headers survive on tagged lanes; got:\n{o}"
         );
     }
@@ -2025,7 +2036,9 @@ mod tests {
                   \tat com.example.rtk.AFailTest.foo(AFailTest.java:10)\n\
                   [INFO] BUILD FAILURE\n";
         let o = filter_surefire(i, true);
-        let running = o.find("Running com.example.rtk.AFailTest").expect("Running kept");
+        let running = o
+            .find("Running com.example.rtk.AFailTest")
+            .expect("Running kept");
         let pipeline = o
             .find("Running the widget pipeline for tenant acme")
             .expect("app-log line kept, buffered inside the block");
@@ -2063,7 +2076,8 @@ mod tests {
     /// exactly there.
     #[test]
     fn daemon_building_applog_dropped_with_no_block_open() {
-        let mut i = String::from("[INFO] Scanning for projects...\n[INFO] Building web 2.1.0 [1/1]\n");
+        let mut i =
+            String::from("[INFO] Scanning for projects...\n[INFO] Building web 2.1.0 [1/1]\n");
         for n in 0..10 {
             i.push_str(&format!(
                 "[pool-1] [INFO] Building segment {n} of the data pipeline\n"
@@ -2103,7 +2117,10 @@ mod tests {
             ("same coordinates", "surefire:3.5.5:test (default-test)"),
             ("different version", "surefire:3.2.2:test (default-test)"),
             ("different execution id", "surefire:3.5.5:test (unit-tests)"),
-            ("legacy spelling", "maven-surefire-plugin:2.22.2:test (default-test)"),
+            (
+                "legacy spelling",
+                "maven-surefire-plugin:2.22.2:test (default-test)",
+            ),
         ] {
             let i = format!(
                 "[INFO] Scanning for projects...\n{}{}[INFO] BUILD FAILURE\n",
@@ -2343,11 +2360,13 @@ mod tests {
         // kept — pre-fix (stale open block swallowing the header/entries)
         // all 4 would survive.
         assert!(
-            o.contains("AMultiFailTest.first:10 a1 boom") && o.contains("BMultiFailTest.first:10 b1 boom"),
+            o.contains("AMultiFailTest.first:10 a1 boom")
+                && o.contains("BMultiFailTest.first:10 b1 boom"),
             "the first entry of each module's summary is kept; got:\n{o}"
         );
         assert!(
-            !o.contains("AMultiFailTest.second:20 a2 boom") && !o.contains("BMultiFailTest.second:20 b2 boom"),
+            !o.contains("AMultiFailTest.second:20 a2 boom")
+                && !o.contains("BMultiFailTest.second:20 b2 boom"),
             "the second entry of each module's summary is capped, not kept; got:\n{o}"
         );
 
@@ -2362,11 +2381,15 @@ mod tests {
             !o.contains("… +2 more failures"),
             "no module's tail should absorb the other's drop; got:\n{o}"
         );
-        let a_header = o.find("[child-a] [ERROR] Failures:").expect("child-a header kept");
+        let a_header = o
+            .find("[child-a] [ERROR] Failures:")
+            .expect("child-a header kept");
         let a_agg = o
             .find("[child-a] [ERROR] Tests run: 2, Failures: 2, Errors: 0, Skipped: 0\n")
             .expect("child-a AGG kept");
-        let b_header = o.find("[child-b] [ERROR] Failures:").expect("child-b header kept");
+        let b_header = o
+            .find("[child-b] [ERROR] Failures:")
+            .expect("child-b header kept");
         let b_agg = o
             .rfind("[child-b] [ERROR] Tests run: 2, Failures: 2, Errors: 0, Skipped: 0\n")
             .expect("child-b AGG kept");
@@ -2381,13 +2404,18 @@ mod tests {
 
         // Ordering: banners, Running, and the capped summary all survive in
         // a sane relative order, ending at the reactor footer.
-        let banner_a = o.find("< com.example.rtk:child-a >").expect("child-a banner kept");
+        let banner_a = o
+            .find("< com.example.rtk:child-a >")
+            .expect("child-a banner kept");
         let running_a = o
             .find("Running com.example.rtk.AMultiFailTest")
             .expect("child-a Running kept");
         let build_failure = o.rfind("BUILD FAILURE").expect("footer kept");
         assert!(
-            banner_a < running_a && running_a < a_header && a_header < a_agg && a_agg < build_failure,
+            banner_a < running_a
+                && running_a < a_header
+                && a_header < a_agg
+                && a_agg < build_failure,
             "banner < Running < header < AGG < footer; got:\n{o}"
         );
     }
@@ -2520,10 +2548,7 @@ mod tests {
     }
     #[test]
     fn phase_plugin_goal_passthrough() {
-        assert_eq!(
-            detect_phase(&s(["dependency:tree"])),
-            MvnPhase::Passthrough
-        );
+        assert_eq!(detect_phase(&s(["dependency:tree"])), MvnPhase::Passthrough);
     }
     #[test]
     fn phase_empty_passthrough() {
@@ -2647,7 +2672,9 @@ mod tests {
             "[child-a] [ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0, Time elapsed:"
         ));
         assert!(o.contains("parallel reactor diagnostic ==> expected: <1> but was: <2>"));
-        assert!(o.contains("at com.example.rtk.ParallelFailTest.reactorDiagnostic(ParallelFailTest.java:10)"));
+        assert!(o.contains(
+            "at com.example.rtk.ParallelFailTest.reactorDiagnostic(ParallelFailTest.java:10)"
+        ));
         assert!(o.contains("[child-a] [ERROR]   ParallelFailTest.reactorDiagnostic:10"));
         assert!(o.contains("[child-a] [ERROR] Tests run: 3, Failures: 1, Errors: 0, Skipped: 0"));
         // Reactor summary keeps the per-module verdicts.
@@ -2893,7 +2920,9 @@ mod tests {
         // child-b's header is legitimately empty (its only entry lost the
         // race) — but must never look *complete*: its own tail must follow
         // directly, not vanish silently.
-        let b_header = o.find("[child-b] [ERROR] Failures:").expect("child-b header kept");
+        let b_header = o
+            .find("[child-b] [ERROR] Failures:")
+            .expect("child-b header kept");
         let b_agg = o
             .find("[child-b] [ERROR] Tests run:")
             .expect("child-b AGG kept");
@@ -2969,7 +2998,9 @@ mod tests {
         for n in 1..=12 {
             i.push_str(&format!("[ERROR]   ITTest.case{n}:{n} boom it{n}\n"));
         }
-        i.push_str("[ERROR] Tests run: 12, Failures: 12, Errors: 0, Skipped: 0\n[INFO] BUILD FAILURE\n");
+        i.push_str(
+            "[ERROR] Tests run: 12, Failures: 12, Errors: 0, Skipped: 0\n[INFO] BUILD FAILURE\n",
+        );
 
         let o = filter_package(&i, false);
         assert_eq!(
@@ -3092,7 +3123,9 @@ mod tests {
         for n in 1..=12 {
             i.push_str(&format!("[ERROR]   ITTest.case{n}:{n} boom it{n}\n"));
         }
-        i.push_str("[ERROR] Tests run: 0, Failures: 0, Errors: 12, Skipped: 0\n[INFO] BUILD FAILURE\n");
+        i.push_str(
+            "[ERROR] Tests run: 0, Failures: 0, Errors: 12, Skipped: 0\n[INFO] BUILD FAILURE\n",
+        );
 
         let o = filter_package(&i, false);
         assert_eq!(
@@ -3524,7 +3557,10 @@ mod tests {
     /// has no `[WARNING]` branch but shares the same fall-through reset).
     fn assert_warning_interloper_does_not_disarm_continuation(filter: fn(&str) -> String) {
         const WARNING_INTERLOPER: [&str; 1] = ["[main] [WARNING] connection pool exhausted"];
-        for (n, m) in merges(&SWEEP_COMPILE_A, &WARNING_INTERLOPER).iter().enumerate() {
+        for (n, m) in merges(&SWEEP_COMPILE_A, &WARNING_INTERLOPER)
+            .iter()
+            .enumerate()
+        {
             let i = sweep_input(m);
             let o = filter(&i);
             assert!(
@@ -3567,7 +3603,10 @@ mod tests {
     /// position of the compile-error sequence, on all three filter paths.
     fn assert_error_interloper_does_not_disarm_continuation(filter: fn(&str) -> String) {
         const ERROR_INTERLOPER: [&str; 1] = ["[main] [ERROR] connection pool exhausted"];
-        for (n, m) in merges(&SWEEP_COMPILE_A, &ERROR_INTERLOPER).iter().enumerate() {
+        for (n, m) in merges(&SWEEP_COMPILE_A, &ERROR_INTERLOPER)
+            .iter()
+            .enumerate()
+        {
             let i = sweep_input(m);
             let o = filter(&i);
             assert!(
@@ -3750,8 +3789,7 @@ mod tests {
              [INFO] BUILD FAILURE\n";
         let o = filter(i);
         assert!(
-            o.contains("symbol:   variable bar")
-                && o.contains("location: class com.example.rtk.A"),
+            o.contains("symbol:   variable bar") && o.contains("location: class com.example.rtk.A"),
             "ambiguous continuations preserved verbatim; got:\n{o}"
         );
     }
@@ -3869,11 +3907,7 @@ mod tests {
             "passing-test Running line dropped; got:\n{}",
             o
         );
-        assert!(
-            o.contains("BUILD SUCCESS"),
-            "footer preserved; got:\n{}",
-            o
-        );
+        assert!(o.contains("BUILD SUCCESS"), "footer preserved; got:\n{}", o);
         assert!(
             o.contains("Tests run: 977, Failures: 0"),
             "aggregate preserved; got:\n{}",
@@ -3919,11 +3953,7 @@ mod tests {
             "2.x ` - in ` close-line matched; passing block dropped; got:\n{}",
             o
         );
-        assert!(
-            o.contains("BUILD SUCCESS"),
-            "footer preserved; got:\n{}",
-            o
-        );
+        assert!(o.contains("BUILD SUCCESS"), "footer preserved; got:\n{}", o);
     }
 
     /// 3.x WARNING-prefixed close line (class with only skipped tests) must
@@ -3954,8 +3984,16 @@ mod tests {
                  \n\
                  [INFO] BUILD FAILURE\n";
         let o = filter_surefire(i, false);
-        assert!(o.contains("AssertionFailedError"), "exception preserved; got:\n{}", o);
-        assert!(o.contains("at x.Foo.bar"), "user frame preserved; got:\n{}", o);
+        assert!(
+            o.contains("AssertionFailedError"),
+            "exception preserved; got:\n{}",
+            o
+        );
+        assert!(
+            o.contains("at x.Foo.bar"),
+            "user frame preserved; got:\n{}",
+            o
+        );
         assert!(
             !o.contains("at org.junit."),
             "framework frame stripped in trail; got:\n{}",
@@ -4239,7 +4277,11 @@ mod tests {
     fn surefire_keeps_compile_continuation_on_test_phase() {
         let i = include_str!("../../../tests/fixtures/mvn_test_compile_fail_slice_raw.txt");
         let o = filter_surefire(i, false);
-        assert!(o.contains("cannot find symbol"), "ERROR line preserved; got:\n{}", o);
+        assert!(
+            o.contains("cannot find symbol"),
+            "ERROR line preserved; got:\n{}",
+            o
+        );
         assert!(
             o.contains("symbol:   variable bar"),
             "indented `symbol:` continuation preserved; got:\n{}",
@@ -4261,7 +4303,11 @@ mod tests {
     fn package_still_keeps_compile_error_continuation_after_refactor() {
         let i = include_str!("../../../tests/fixtures/mvn_compile_error_slice_raw.txt");
         let o = filter_package(i, false);
-        assert!(o.contains("cannot find symbol"), "ERROR line preserved; got:\n{}", o);
+        assert!(
+            o.contains("cannot find symbol"),
+            "ERROR line preserved; got:\n{}",
+            o
+        );
         assert!(
             o.contains("symbol:   variable bar"),
             "indented `symbol:` continuation preserved; got:\n{}",
@@ -4398,8 +4444,8 @@ mod tests {
 
     #[test]
     fn package_handles_crlf_line_endings() {
-        let i_lf = include_str!("../../../tests/fixtures/mvn_install_slice_raw.txt")
-            .replace("\r\n", "\n");
+        let i_lf =
+            include_str!("../../../tests/fixtures/mvn_install_slice_raw.txt").replace("\r\n", "\n");
         let o_lf = filter_package(&i_lf, false);
         let i_crlf = i_lf.replace('\n', "\r\n");
         let o_crlf = filter_package(&i_crlf, false);
@@ -4602,11 +4648,7 @@ mod tests {
             "second per-module SUCCESS row preserved; got:\n{}",
             o
         );
-        assert!(
-            o.contains("BUILD SUCCESS"),
-            "footer preserved; got:\n{}",
-            o
-        );
+        assert!(o.contains("BUILD SUCCESS"), "footer preserved; got:\n{}", o);
     }
 
     /// `mvn install` on a multi-module reactor build where one module fails
@@ -4643,7 +4685,11 @@ mod tests {
             "resume hint preserved (actionable signal); got:\n{}",
             o
         );
-        assert!(!o.contains("[Help 1]"), "help boilerplate stripped; got:\n{}", o);
+        assert!(
+            !o.contains("[Help 1]"),
+            "help boilerplate stripped; got:\n{}",
+            o
+        );
         assert!(
             !o.contains("Re-run Maven"),
             "re-run hint stripped; got:\n{}",
@@ -4740,7 +4786,9 @@ mod tests {
     #[test]
     #[ignore]
     fn print_savings_summary() {
-        let pf = gunzip(include_bytes!("../../../tests/fixtures/mvn_test_pass_full_raw.txt.gz"));
+        let pf = gunzip(include_bytes!(
+            "../../../tests/fixtures/mvn_test_pass_full_raw.txt.gz"
+        ));
         let pf_out = filter_surefire(&pf, false);
         let pf_in_tok = count_tokens(&pf);
         let pf_out_tok = count_tokens(&pf_out);
@@ -4750,7 +4798,9 @@ mod tests {
             pf_in_tok, pf_out_tok, pf_s
         );
 
-        let inst = gunzip(include_bytes!("../../../tests/fixtures/mvn_install_full_raw.txt.gz"));
+        let inst = gunzip(include_bytes!(
+            "../../../tests/fixtures/mvn_install_full_raw.txt.gz"
+        ));
         let inst_out = filter_package(&inst, false);
         let inst_in_tok = count_tokens(&inst);
         let inst_out_tok = count_tokens(&inst_out);
@@ -4966,7 +5016,10 @@ mod tests {
         // after — `lane_rest_level`'s documented other spelling of the
         // daemon-prefixed trail terminator, alongside `[tag] [LEVEL] `).
         // Pinned so the "both spellings" contract can't rot.
-        assert_eq!(split_lane("[child-a] [INFO]", true), (Some("child-a"), "[INFO]"));
+        assert_eq!(
+            split_lane("[child-a] [INFO]", true),
+            (Some("child-a"), "[INFO]")
+        );
     }
 
     // ── daemon gate: plain `mvn` never routes through the lane layer ────────
@@ -4996,7 +5049,9 @@ mod tests {
             .find("Running the widget pipeline")
             .expect("app-log Running-shaped line kept");
         let db = o.find("connecting to db").expect("first context line kept");
-        let refused = o.find("connection refused").expect("second context line kept");
+        let refused = o
+            .find("connection refused")
+            .expect("second context line kept");
         let footer = o.rfind("BUILD FAILURE").expect("footer kept");
         assert!(
             pipeline < db && db < refused && refused < footer,
@@ -5018,7 +5073,9 @@ mod tests {
     fn timestamp_tag_does_not_mint_phantom_lanes_in_plain_mvn() {
         let mut i = String::from("[INFO] Scanning for projects...\n");
         for n in 0..300 {
-            i.push_str(&format!("[2026-08-29 10:00:00] [INFO] Building segment {n}\n"));
+            i.push_str(&format!(
+                "[2026-08-29 10:00:00] [INFO] Building segment {n}\n"
+            ));
         }
         i.push_str("[INFO] BUILD SUCCESS\n");
         let o = filter_surefire(&i, false);
@@ -5076,7 +5133,8 @@ mod tests {
                   [INFO] BUILD FAILURE\n";
         let o = filter_package_with_cap(i, 2, true);
         assert!(
-            o.contains("AMultiFailTest.one:10 a1 boom") && o.contains("AMultiFailTest.two:20 a2 boom"),
+            o.contains("AMultiFailTest.one:10 a1 boom")
+                && o.contains("AMultiFailTest.two:20 a2 boom"),
             "child-a's first two entries fill its Surefire-phase budget; got:\n{o}"
         );
         assert!(
@@ -5143,7 +5201,8 @@ mod tests {
                   [INFO] BUILD FAILURE\n";
         let o = filter_package_with_cap(i, 2, true);
         assert!(
-            o.contains("AMultiFailTest.one:10 a1 boom") && o.contains("AMultiFailTest.two:20 a2 boom"),
+            o.contains("AMultiFailTest.one:10 a1 boom")
+                && o.contains("AMultiFailTest.two:20 a2 boom"),
             "child-a's first two entries fill its Surefire-phase budget; got:\n{o}"
         );
         assert!(
@@ -5340,7 +5399,9 @@ mod tests {
                   [child-a] [INFO] \n\
                   [INFO] BUILD FAILURE\n";
         let o = filter_surefire(i, true);
-        let running = o.find("Running com.example.rtk.SlowTest").expect("Running kept");
+        let running = o
+            .find("Running com.example.rtk.SlowTest")
+            .expect("Running kept");
         let server = o
             .find("[Server] [ERROR] connection refused")
             .expect("app log line kept, buffered inside the block");
@@ -5433,7 +5494,9 @@ mod tests {
         // unrelated 255-way armed tie in `raw_owner` instead of exercising
         // the fix it targets.
         for n in 0..(MAX_LANES + 50) {
-            i.push_str(&format!("[tag{n}] [INFO] Running com.example.rtk.Tag{n}Test\n"));
+            i.push_str(&format!(
+                "[tag{n}] [INFO] Running com.example.rtk.Tag{n}Test\n"
+            ));
         }
         // One more never-seen tag, past the cap: a genuine failing test
         // class (`Running` + failing close), not just a bare `[ERROR]`
@@ -5470,8 +5533,3 @@ mod tests {
         );
     }
 }
-
-
-
-
-
