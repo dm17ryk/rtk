@@ -128,6 +128,9 @@ fn cleanup_files_except(
 
     let to_remove = entries.len() - allowed_entries;
     for entry in entries.iter().take(to_remove) {
+        // Intentional retention cleanup: only selected recovery artifacts in tee_dir;
+        // the newly committed artifact is excluded above. remove_file cannot recurse.
+        // nosemgrep: filesystem-deletion
         let _ = std::fs::remove_file(entry.path());
     }
 }

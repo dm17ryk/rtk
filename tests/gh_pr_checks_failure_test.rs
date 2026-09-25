@@ -49,7 +49,13 @@ check\tpass\t5s\thttps://example.test/job/4\t\n";
 #[test]
 fn failing_checks_are_summarised_not_dumped_raw() {
     let dir = tempfile::tempdir().expect("tempdir");
-    fake_gh(dir.path(), RED_TABLE, 1);
+    // Keep the report large enough that a summary plus its lossless recovery hint
+    // is smaller. Tiny tables deliberately retain the fork's native-output fallback.
+    let table: String = RED_TABLE
+        .lines()
+        .map(|line| format!("{line}{}\n", "verbose check description ".repeat(20)))
+        .collect();
+    fake_gh(dir.path(), &table, 1);
 
     let out = rtk_with(dir.path(), &["gh", "pr", "checks", "123"]);
     let stdout = String::from_utf8_lossy(&out.stdout);

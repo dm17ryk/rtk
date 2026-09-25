@@ -134,7 +134,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $rewrite_output_path = Join-Path $env:RUNNER_TEMP ("rtk-rewrite-$PID-$([guid]::NewGuid().ToString('N')).out")
           try {
-            $rewrite_process = Start-Process -FilePath $rtk -ArgumentList @('rewrite', 'git status') -Wait -PassThru -NoNewWindow -RedirectStandardOutput $rewrite_output_path
+            $rewrite_process = Start-Process -FilePath $rtk -ArgumentList @('rewrite', '"git status"') -Wait -PassThru -NoNewWindow -RedirectStandardOutput $rewrite_output_path
             $rewrite_status = $rewrite_process.ExitCode
             $rewrite_output = [System.IO.File]::ReadAllText($rewrite_output_path)
           } finally {
@@ -143,7 +143,7 @@ jobs:
           if ($rewrite_status -ne 0 -and $rewrite_status -ne 3) {
             throw "unexpected rtk rewrite exit code: $rewrite_status"
           }
-          if (($rewrite_output -join "`n") -ne "rtk git status") {
+          if ($rewrite_output.TrimEnd() -ne "rtk git status") {
             throw "unexpected rtk rewrite output: $($rewrite_output -join "`n")"
           }
       - name: Smoke-test isolated Codex installation lifecycle (Unix)
@@ -244,7 +244,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $rewrite_output_path = Join-Path $env:RUNNER_TEMP ("rtk-rewrite-$PID-$([guid]::NewGuid().ToString('N')).out")
           try {
-            $rewrite_process = Start-Process -FilePath $rtk -ArgumentList @('rewrite', 'dir') -Wait -PassThru -NoNewWindow -RedirectStandardOutput $rewrite_output_path
+            $rewrite_process = Start-Process -FilePath $rtk -ArgumentList @('rewrite', '"git status"') -Wait -PassThru -NoNewWindow -RedirectStandardOutput $rewrite_output_path
             $rewrite_status = $rewrite_process.ExitCode
             $rewrite_output = [System.IO.File]::ReadAllText($rewrite_output_path)
           } finally {
@@ -253,7 +253,7 @@ jobs:
           if ($rewrite_status -ne 0 -and $rewrite_status -ne 3) {
             throw "unexpected rtk rewrite exit code: $rewrite_status"
           }
-          if (($rewrite_output -join "`n") -ne "rtk ls") {
+          if ($rewrite_output.TrimEnd() -ne "rtk git status") {
             throw "unexpected rtk rewrite output: $($rewrite_output -join "`n")"
           }
           & $rtk cmd "echo rtk-cmd-smoke & dir /b"
@@ -555,10 +555,15 @@ jobs:
       - name: Gather PR context
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           PR_NUM=${{ github.event.pull_request.number }}
-          gh pr diff "$PR_NUM" --name-only > changed_files.txt
-          gh pr diff "$PR_NUM" | head -c 12000 > diff.txt
+          # Local Git has no API diff-size limit. Truncate after writing, so head
+          # cannot interrupt the producer with SIGPIPE under pipefail.
+          git diff --no-ext-diff --name-only "$PR_BASE_SHA...$PR_HEAD_SHA" > changed_files.txt
+          git diff --no-ext-diff "$PR_BASE_SHA...$PR_HEAD_SHA" > full_diff.txt
+          head -c 12000 full_diff.txt > diff.txt
           gh pr view "$PR_NUM" --json title,body --jq '"PR Title: \(.title)\nPR Description: \(.body)"' > pr_info.txt
 
       - name: Build prompt files
