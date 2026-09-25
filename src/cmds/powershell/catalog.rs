@@ -254,8 +254,10 @@ mod tests {
     fn unknown_commands_are_generic_and_manifest_entries_have_strategies() {
         assert_eq!(strategy_for("My-ProfileFunction"), AdapterStrategy::Generic);
         assert_eq!(strategy_for("Write-Output"), AdapterStrategy::Identity);
-        assert!(entries()
-            .iter()
-            .all(|entry| !entry.canonical_name.is_empty()));
+        assert!(
+            entries()
+                .iter()
+                .all(|entry| !entry.canonical_name.is_empty())
+        );
     }
 }

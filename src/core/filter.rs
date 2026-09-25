@@ -216,17 +216,17 @@ impl FilterStrategy for MinimalFilter {
             }
 
             // Skip single-line comments (but keep doc comments)
-            if let Some(line_comment) = patterns.line {
-                if trimmed.starts_with(line_comment) {
-                    // Keep doc comments
-                    if let Some(doc) = patterns.doc_line {
-                        if trimmed.starts_with(doc) {
-                            result.push_str(line);
-                            result.push('\n');
-                        }
-                    }
-                    continue;
+            if let Some(line_comment) = patterns.line
+                && trimmed.starts_with(line_comment)
+            {
+                // Keep doc comments
+                if let Some(doc) = patterns.doc_line
+                    && trimmed.starts_with(doc)
+                {
+                    result.push_str(line);
+                    result.push('\n');
                 }
+                continue;
             }
 
             // Skip empty lines at this point, we'll normalize later
@@ -286,19 +286,19 @@ impl FilterStrategy for MinimalFilter {
                 continue;
             }
 
-            if let Some(line_comment) = patterns.line {
-                if trimmed.starts_with(line_comment) {
-                    if patterns
-                        .doc_line
-                        .is_some_and(|doc| trimmed.starts_with(doc))
-                    {
-                        result.push(FilteredLine {
-                            original_line,
-                            text: line.to_string(),
-                        });
-                    }
-                    continue;
+            if let Some(line_comment) = patterns.line
+                && trimmed.starts_with(line_comment)
+            {
+                if patterns
+                    .doc_line
+                    .is_some_and(|doc| trimmed.starts_with(doc))
+                {
+                    result.push(FilteredLine {
+                        original_line,
+                        text: line.to_string(),
+                    });
                 }
+                continue;
             }
 
             if trimmed.is_empty() {
@@ -509,6 +509,12 @@ pub fn smart_truncate_lines(lines: &[FilteredLine], max_lines: usize) -> Vec<Fil
 }
 
 pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> String {
+    // A zero budget shows nothing, matching `--tail-lines 0`/`--head-lines 0`.
+    // Returning early also keeps `max_lines - 1` below from underflowing.
+    if max_lines == 0 {
+        return String::new();
+    }
+
     let lines: Vec<&str> = content.lines().collect();
     if lines.len() <= max_lines {
         return content.to_string();

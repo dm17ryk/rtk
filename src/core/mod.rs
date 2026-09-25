@@ -1,16 +1,20 @@
 //! Building blocks shared across all RTK modules.
 
 pub mod ai_output;
+pub mod arg_tokenizer;
 pub mod args_utils;
 pub mod config;
 pub mod constants;
 pub mod display_helpers;
 pub mod filter;
 pub mod guard;
+mod lossless_tee;
 pub mod path_inventory;
+pub mod retriever;
 pub mod runner;
 pub mod stream;
 pub mod tee;
+pub mod tee_file;
 pub mod telemetry;
 pub mod telemetry_cmd;
 pub mod toml_filter;
@@ -20,7 +24,7 @@ pub mod utils;
 
 #[cfg(test)]
 mod path_inventory_tests {
-    use super::ai_output::{render, BudgetClass, Omission};
+    use super::ai_output::{BudgetClass, Omission, render};
     use super::path_inventory::{canonical_groups, common_root, document};
 
     #[test]

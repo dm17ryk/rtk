@@ -113,14 +113,12 @@ impl ClaudeProvider {
                 }
 
                 // Apply mtime filter
-                if let Some(cutoff_time) = cutoff {
-                    if let Ok(meta) = fs::metadata(file_path) {
-                        if let Ok(mtime) = meta.modified() {
-                            if mtime < cutoff_time {
-                                continue;
-                            }
-                        }
-                    }
+                if let Some(cutoff_time) = cutoff
+                    && let Ok(meta) = fs::metadata(file_path)
+                    && let Ok(mtime) = meta.modified()
+                    && mtime < cutoff_time
+                {
+                    continue;
                 }
 
                 sessions.push(file_path.to_path_buf());
@@ -213,18 +211,17 @@ impl SessionProvider for ClaudeProvider {
                         for block in content {
                             if block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
                                 && block.get("name").and_then(|n| n.as_str()) == Some("Bash")
-                            {
-                                if let (Some(id), Some(cmd)) = (
+                                && let (Some(id), Some(cmd)) = (
                                     block.get("id").and_then(|i| i.as_str()),
                                     block.pointer("/input/command").and_then(|c| c.as_str()),
-                                ) {
-                                    pending_tool_uses.push((
-                                        id.to_string(),
-                                        cmd.to_string(),
-                                        sequence_counter,
-                                    ));
-                                    sequence_counter += 1;
-                                }
+                                )
+                            {
+                                pending_tool_uses.push((
+                                    id.to_string(),
+                                    cmd.to_string(),
+                                    sequence_counter,
+                                ));
+                                sequence_counter += 1;
                             }
                         }
                     }
@@ -235,28 +232,26 @@ impl SessionProvider for ClaudeProvider {
                         entry.pointer("/message/content").and_then(|c| c.as_array())
                     {
                         for block in content {
-                            if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
-                                if let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str())
-                                {
-                                    // Get content, length, and error status
-                                    let content =
-                                        block.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                            if block.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+                                && let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str())
+                            {
+                                // Get content, length, and error status
+                                let content =
+                                    block.get("content").and_then(|c| c.as_str()).unwrap_or("");
 
-                                    let output_len = content.len();
-                                    let is_error = block
-                                        .get("is_error")
-                                        .and_then(|e| e.as_bool())
-                                        .unwrap_or(false);
+                                let output_len = content.len();
+                                let is_error = block
+                                    .get("is_error")
+                                    .and_then(|e| e.as_bool())
+                                    .unwrap_or(false);
 
-                                    // Store first ~1000 chars of content for error detection
-                                    let content_preview: String =
-                                        content.chars().take(1000).collect();
+                                // Store first ~1000 chars of content for error detection
+                                let content_preview: String = content.chars().take(1000).collect();
 
-                                    tool_results.insert(
-                                        id.to_string(),
-                                        (output_len, content_preview, is_error),
-                                    );
-                                }
+                                tool_results.insert(
+                                    id.to_string(),
+                                    (output_len, content_preview, is_error),
+                                );
                             }
                         }
                     }
@@ -332,13 +327,12 @@ impl SessionProvider for CodexProvider {
                     continue;
                 }
             }
-            if let Some(cutoff) = cutoff {
-                if fs::metadata(path)
+            if let Some(cutoff) = cutoff
+                && fs::metadata(path)
                     .and_then(|metadata| metadata.modified())
                     .is_ok_and(|modified| modified < cutoff)
-                {
-                    continue;
-                }
+            {
+                continue;
             }
             result.push(path.to_path_buf());
         }
@@ -450,23 +444,22 @@ fn collect_codex_records(
     if matches!(
         record_type,
         "function_call_output" | "tool_result" | "function_output" | "custom_tool_call_output"
-    ) {
-        if let Some(call_id) = call_id {
-            let output = object
-                .get("output")
-                .or_else(|| object.get("content"))
-                .map(codex_output_text)
-                .unwrap_or_default();
-            let is_error = object
-                .get("is_error")
-                .or_else(|| object.get("isError"))
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false);
-            results.insert(
-                call_id.to_string(),
-                (output.len(), output.chars().take(1000).collect(), is_error),
-            );
-        }
+    ) && let Some(call_id) = call_id
+    {
+        let output = object
+            .get("output")
+            .or_else(|| object.get("content"))
+            .map(codex_output_text)
+            .unwrap_or_default();
+        let is_error = object
+            .get("is_error")
+            .or_else(|| object.get("isError"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        results.insert(
+            call_id.to_string(),
+            (output.len(), output.chars().take(1000).collect(), is_error),
+        );
     }
 
     for child in object.values() {

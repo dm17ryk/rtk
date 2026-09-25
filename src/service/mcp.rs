@@ -1,15 +1,15 @@
 //! Synchronous stdio MCP adapter for RTK.
 
 use super::{
-    debug_enabled, redact_sensitive, redact_sensitive_lines, rewrite, run_filtered_with_request,
-    OutputRequest, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS,
+    DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS, OutputRequest, debug_enabled, redact_sensitive,
+    redact_sensitive_lines, rewrite, run_filtered_with_request,
 };
 use crate::core::config::Config;
 use crate::core::tracking::Tracker;
 use crate::hooks::agent_policy;
 use anyhow::{Context, Result};
 use regex::Regex;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
@@ -29,7 +29,20 @@ enum ResponseMode {
     Legacy,
 }
 
-pub fn run() -> Result<()> {
+static CLI_RESPONSE_MODE: std::sync::OnceLock<ResponseMode> = std::sync::OnceLock::new();
+
+pub fn run(mode: &str) -> Result<()> {
+    let mode = match mode {
+        "compact" => ResponseMode::Compact,
+        "legacy" => ResponseMode::Legacy,
+        _ => anyhow::bail!("response-mode must be compact or legacy"),
+    };
+    CLI_RESPONSE_MODE
+        .set(mode)
+        .map_err(|_| anyhow::anyhow!("MCP server already initialized"))?;
+    if debug_enabled() {
+        eprintln!("[rtk-debug] mcp.start response_mode={mode:?}");
+    }
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut output = stdout.lock();
@@ -256,6 +269,9 @@ fn response_mode(args: &Value) -> Result<ResponseMode> {
 }
 
 fn default_response_mode() -> ResponseMode {
+    if let Some(mode) = CLI_RESPONSE_MODE.get() {
+        return *mode;
+    }
     match std::env::var("RTK_MCP_RESPONSE_MODE").ok().as_deref() {
         Some("legacy") => ResponseMode::Legacy,
         _ => ResponseMode::Compact,
@@ -1055,18 +1071,22 @@ mod tests {
             response["result"]["instructions"],
             agent_policy::MCP_INSTRUCTIONS
         );
-        assert!(response["result"]["instructions"]
-            .as_str()
-            .is_some_and(|instructions| instructions.contains("last-resort fallbacks")));
+        assert!(
+            response["result"]["instructions"]
+                .as_str()
+                .is_some_and(|instructions| instructions.contains("last-resort fallbacks"))
+        );
     }
 
     #[test]
     fn initialized_notification_has_no_response() {
-        assert!(handle_request(&json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized"
-        }))
-        .is_none());
+        assert!(
+            handle_request(&json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            }))
+            .is_none()
+        );
     }
 
     #[test]
@@ -1082,9 +1102,11 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == "run_filtered")
             .expect("run_filtered tool");
-        assert!(run_filtered["description"]
-            .as_str()
-            .is_some_and(|description| description.contains("Do not wrap supported commands")));
+        assert!(
+            run_filtered["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("Do not wrap supported commands"))
+        );
         assert_eq!(
             run_filtered["inputSchema"]["properties"]["max_tokens"]["minimum"],
             json!(64)
@@ -1116,9 +1138,11 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == "run_cmd")
             .expect("run_cmd tool");
-        assert!(run_cmd["description"]
-            .as_str()
-            .is_some_and(|description| description.contains("rtk cmd")));
+        assert!(
+            run_cmd["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("rtk cmd"))
+        );
         assert_eq!(run_cmd["inputSchema"]["required"], json!(["expression"]));
         assert_eq!(
             run_cmd["inputSchema"]["properties"]["expression"]["type"],
@@ -1162,9 +1186,11 @@ mod tests {
     #[test]
     fn run_cmd_requires_a_raw_expression() {
         let error = call_tool("run_cmd", &json!({})).expect_err("missing expression");
-        assert!(error
-            .to_string()
-            .contains("expression must be a non-empty string"));
+        assert!(
+            error
+                .to_string()
+                .contains("expression must be a non-empty string")
+        );
     }
 
     #[cfg(not(windows))]
@@ -1196,9 +1222,11 @@ mod tests {
         }))
         .expect("tools/call response");
         assert_eq!(response["error"]["code"], -32602);
-        assert!(response["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("not supported")));
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("not supported"))
+        );
     }
 
     #[test]
@@ -1223,16 +1251,20 @@ mod tests {
         let command = discover_command(&json!({ "since_days": 3, "limit": 7 })).expect("command");
         assert_eq!(
             command,
-            ["discover", "--all", "--since", "3", "--limit", "7", "--format", "json"]
+            [
+                "discover", "--all", "--since", "3", "--limit", "7", "--format", "json"
+            ]
         );
     }
 
     #[test]
     fn discover_project_scope_does_not_add_all() {
         let command = discover_command(&json!({ "project": "D:-work-project" })).expect("command");
-        assert!(command
-            .windows(2)
-            .any(|pair| pair == ["--project", "D:-work-project"]));
+        assert!(
+            command
+                .windows(2)
+                .any(|pair| pair == ["--project", "D:-work-project"])
+        );
         assert!(!command.iter().any(|arg| arg == "--all"));
     }
 }

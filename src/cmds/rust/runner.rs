@@ -74,10 +74,8 @@ fn is_shell_assignment(word: &str) -> bool {
         return false;
     };
     let mut characters = name.chars();
-    matches!(
-        characters.next(),
-        Some('_' | 'A'..='Z' | 'a'..='z')
-    ) && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+    matches!(characters.next(), Some('_' | 'A'..='Z' | 'a'..='z'))
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
 fn build_shell_command(command: &str) -> Command {

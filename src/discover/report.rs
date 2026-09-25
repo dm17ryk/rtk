@@ -1,8 +1,8 @@
 //! Data types for reporting which commands RTK can and cannot optimize.
 
 use crate::hooks::constants::{
-    CLAUDE_DIR, COPILOT_HOOK_FILE, CURSOR_DIR, GITHUB_DIR, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
-    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_SUBDIR, REWRITE_HOOK_FILE,
+    CLAUDE_DIR, COPILOT_HOOK_FILE, CURSOR_DIR, GITHUB_DIR, HERMES_DIR, HERMES_PLUGIN_MANIFEST_FILE,
+    HERMES_PLUGIN_NAME, HERMES_PLUGINS_SUBDIR, HOOKS_SUBDIR, REWRITE_HOOK_FILE,
 };
 use serde::Serialize;
 use std::path::Path;
@@ -10,7 +10,7 @@ use std::path::Path;
 /// RTK support status for a command.
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RtkStatus {
-    /// Dedicated handler with filtering (e.g., git status → git.rs:run_status())
+    /// Dedicated handler with filtering (e.g., git status → git_cmd.rs:run_status())
     Existing,
     /// Works via external_subcommand passthrough, no filtering (e.g., cargo fmt → Other)
     Passthrough,
@@ -598,9 +598,11 @@ mod tests {
         assert_eq!(json["agent_status"]["hermes_plugin_installed"], true);
         assert_eq!(json["agent_status"]["copilot_hook_installed"], true);
         assert_eq!(json["hook_rewrites_visible"], false);
-        assert!(json["transcript_notice"]
-            .as_str()
-            .is_some_and(|notice| notice.contains("not confirmed misses")));
+        assert!(
+            json["transcript_notice"]
+                .as_str()
+                .is_some_and(|notice| notice.contains("not confirmed misses"))
+        );
     }
 
     #[test]

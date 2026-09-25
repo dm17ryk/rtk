@@ -1,4 +1,4 @@
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
 /// Read-only integration inspection. Presence is deliberately not promoted to live verification.
@@ -55,9 +55,11 @@ pub fn inspect(agent: &str) -> Map<String, Value> {
     report.insert("hook_trust".into(), hook_trust);
     report.insert(
         "binary".into(),
-        json!(std::env::current_exe()
-            .ok()
-            .map(|path| path.display().to_string())),
+        json!(
+            std::env::current_exe()
+                .ok()
+                .map(|path| path.display().to_string())
+        ),
     );
     report.insert("profile".into(), profile);
     report.insert("live_verification".into(), live_verification);

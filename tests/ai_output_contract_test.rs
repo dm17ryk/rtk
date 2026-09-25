@@ -96,12 +96,12 @@ fn code_mask(source: &str) -> Vec<u8> {
                 .iter()
                 .position(|byte| *byte == b'\'')
                 .map(|offset| index + 1 + offset);
-            if let Some(end) = closing {
-                if !input[index + 1..end].contains(&b'\n') {
-                    blank(&mut mask, index, end + 1);
-                    index = end + 1;
-                    continue;
-                }
+            if let Some(end) = closing
+                && !input[index + 1..end].contains(&b'\n')
+            {
+                blank(&mut mask, index, end + 1);
+                index = end + 1;
+                continue;
             }
             index += 1;
         } else {
