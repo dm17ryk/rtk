@@ -1581,9 +1581,25 @@ pub fn run(
     if matches!(engine, Engine::Rg) {
         let (_, rg_paths, _, _, _) = extract_pattern_path(args, Engine::Rg);
         let route = classify_rg(args);
-        let reads_piped_stdin =
-            stdin_is_readable() && (rg_paths.is_empty() || rg_paths.iter().any(|path| path == "-"));
-        if reads_piped_stdin && !matches!(route, RgRoute::Inventory) {
+        // Only --files ignores stdin. The other inventory modes (-l and
+        // --files-without-match) still search it and must inherit the input.
+        let lists_files = arg_tokenizer::before_dashdash(&help_tokens)
+            .iter()
+            .any(|token| token.kind == TokenKind::Long && token.text == "files");
+        let reads_piped_stdin = !lists_files
+            && stdin_is_readable()
+            && (rg_paths.is_empty() || rg_paths.iter().any(|path| path == "-"));
+        if crate::service::debug_enabled() {
+            eprintln!(
+                "[rtk-debug] search.rg.route mode={route:?} lists_files={lists_files} reads_stdin={reads_piped_stdin} decision={}",
+                if reads_piped_stdin {
+                    "exact-streaming"
+                } else {
+                    "classified-route"
+                }
+            );
+        }
+        if reads_piped_stdin {
             return run_rg_exact(args, verbose, ExactReason::Streaming);
         }
         return match route {

@@ -184,12 +184,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Full Rust suite (Unix; includes protocol and installation migration tests)
         if: matrix.os != 'windows-latest'
-        run: cargo test --all
+        run: cargo test --all --no-fail-fast
       - name: Full Rust suite (Windows; includes protocol and installation migration tests)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          cargo test --all
+          cargo test --all --no-fail-fast
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Deterministic agent fixture validator (Unix)
         if: matrix.os != 'windows-latest'
@@ -282,7 +282,7 @@ jobs:
           if ($before -ne $after) { throw "PowerShell manifest snapshot drifted; regenerate and commit it." }
           cargo test service::mcp -- --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --all
+          cargo test --all --no-fail-fast
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   live-codex:

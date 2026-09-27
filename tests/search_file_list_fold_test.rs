@@ -1,5 +1,5 @@
-//! `-l` / `-L` / `--files` passthrough folds the directory prefix every path shares into a
-//! `<prefix> (N files)` header. Any other shape flag on top of the list leaves it verbatim.
+//! Grep file lists fold their common prefix; ripgrep uses the semantic inventory.
+//! Shape flags and searches of piped stdin retain native output.
 #![cfg(unix)]
 
 use std::path::Path;
@@ -174,22 +174,23 @@ fn no_match_list_exits_1_with_empty_stdout() {
 }
 
 #[test]
-fn rg_l_and_files_fold() {
+fn rg_l_and_files_emit_semantic_inventory() {
     if !rg_available() {
         return;
     }
     let dir = fixture();
     let src = dir.path().join("src");
-    let prefix = src_prefix(dir.path());
+    let root = src.display();
 
     let out = rtk()
         .args(["rg", "-l", "needle", src.to_str().unwrap()])
         .output()
         .expect("rtk rg");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.starts_with(&format!("{prefix} (3 files)\n")),
-        "{stdout}"
+    assert!(out.status.success(), "stderr: {:?}", out.stderr);
+    assert_eq!(
+        stdout,
+        format!("status=inventory files=3 dirs=2 root={root}\na/{{bar.rs,foo.rs}}\nb/{{baz.rs}}\n")
     );
 
     let out = rtk()
@@ -197,13 +198,13 @@ fn rg_l_and_files_fold() {
         .output()
         .expect("rtk rg");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.starts_with(&format!("{prefix} (4 files)\n")),
-        "{stdout}"
+    assert!(out.status.success(), "stderr: {:?}", out.stderr);
+    assert_eq!(
+        stdout,
+        format!(
+            "status=inventory files=4 dirs=2 root={root}\na/{{bar.rs,foo.rs}}\nb/{{baz.rs,none.rs}}\n"
+        )
     );
-    let mut tails: Vec<&str> = stdout.lines().skip(1).collect();
-    tails.sort_unstable();
-    assert_eq!(tails, ["a/bar.rs", "a/foo.rs", "b/baz.rs", "b/none.rs"]);
 }
 
 #[test]
