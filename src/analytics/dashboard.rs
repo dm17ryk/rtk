@@ -2,7 +2,7 @@
 
 use crate::core::config::Config;
 use crate::core::display_helpers::format_duration;
-use crate::core::tracking::{current_project_path_string, GainSummary, Tracker};
+use crate::core::tracking::{GainSummary, Tracker, current_project_path_string};
 use crate::core::utils::format_tokens;
 use crate::hooks::hook_check::{self, HookStatus};
 use anyhow::{Context, Result};
@@ -13,12 +13,12 @@ use crossterm::{
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs},
-    Frame, Terminal,
 };
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;

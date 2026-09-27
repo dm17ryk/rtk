@@ -121,11 +121,11 @@ fn split_columns(line: &str) -> Vec<&str> {
             whitespace += 1;
             continue;
         }
-        if whitespace >= 2 {
-            if let Some(column_start) = start.take() {
-                let column_end = whitespace_start.unwrap_or(index);
-                columns.push(line[column_start..column_end].trim());
-            }
+        if whitespace >= 2
+            && let Some(column_start) = start.take()
+        {
+            let column_end = whitespace_start.unwrap_or(index);
+            columns.push(line[column_start..column_end].trim());
         }
         if start.is_none() {
             start = Some(index);

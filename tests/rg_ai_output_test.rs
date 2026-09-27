@@ -16,6 +16,99 @@ fn rtk() -> Command {
 }
 
 #[test]
+fn file_list_searches_preserve_piped_stdin_and_native_exit_codes() {
+    if !rg_available() {
+        return;
+    }
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let temp = tempdir().unwrap();
+    for args in [
+        vec!["-l", "needle"],
+        vec!["--files-with-matches", "needle"],
+        vec!["--files-without-match", "absent"],
+        vec!["-l", "needle", "-"],
+        vec!["-l", "-e", "--files"],
+        vec!["-l", "--", "--files"],
+        vec!["-l", "absent"],
+    ] {
+        let run = |mut command: Command| {
+            let mut child = command
+                .args(&args)
+                .current_dir(temp.path())
+                .env("RTK_NO_TRACK", "1")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"needle\n--files\n")
+                .unwrap();
+            child.wait_with_output().unwrap()
+        };
+        let native = run(Command::new("rg"));
+        let mut wrapped = rtk();
+        wrapped.arg("rg");
+        let output = run(wrapped);
+        assert_eq!(
+            output.status.code(),
+            native.status.code(),
+            "args: {args:?}; stderr: {:?}",
+            output.stderr
+        );
+        assert_eq!(output.stdout, native.stdout, "args: {args:?}");
+        assert_eq!(output.stderr, native.stderr, "args: {args:?}");
+    }
+}
+
+#[test]
+fn files_inventory_ignores_piped_input() {
+    if !rg_available() {
+        return;
+    }
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let temp = tempdir().unwrap();
+    let directory = temp.path().join("inventory");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("item.txt"), "content\n").unwrap();
+    let database = temp.path().join("tracking.db");
+    let mut child = rtk()
+        .args(["rg", "--files"])
+        .current_dir(&directory)
+        .env("RTK_DB_PATH", &database)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"not a path\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "stderr: {:?}", output.stderr);
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "item.txt");
+    let contract: String = Connection::open(&database)
+        .unwrap()
+        .query_row(
+            "SELECT output_contract FROM commands ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(contract, "ai_owned");
+}
+
+#[test]
 fn recognized_rg_text_search_uses_compact_ai_records() {
     if !rg_available() {
         return;

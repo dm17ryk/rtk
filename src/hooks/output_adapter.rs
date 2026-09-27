@@ -5,7 +5,7 @@
 //! PostToolUse contract; callers must not treat it as replacement output.
 
 use crate::core::filter::{self, FilterLevel, Language};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{self, Read, Write};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

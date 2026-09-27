@@ -36,17 +36,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             if exit_code != 0 && filtered == MYPY_CLEAN {
                 let filtered = clean.trim().to_string();
                 return Ok(runner::document_from_filtered(
-                    raw,
-                    &filtered,
-                    "mypy",
-                    exit_code,
+                    raw, &filtered, "mypy", exit_code,
                 ));
             }
             Ok(runner::document_from_filtered(
-                raw,
-                &filtered,
-                "mypy",
-                exit_code,
+                raw, &filtered, "mypy", exit_code,
             ))
         },
         runner::RunOptions::default(),
@@ -101,12 +95,12 @@ pub fn filter_mypy_output(output: &str) -> String {
 
             if severity == "note" {
                 // Attach note to preceding error if same file and line
-                if let Some(last) = errors.last_mut() {
-                    if last.file == file {
-                        last.context_lines.push(message);
-                        i += 1;
-                        continue;
-                    }
+                if let Some(last) = errors.last_mut()
+                    && last.file == file
+                {
+                    last.context_lines.push(message);
+                    i += 1;
+                    continue;
                 }
                 // Standalone note with no parent -- display as fileless
                 fileless_lines.push(line.to_string());
@@ -125,13 +119,14 @@ pub fn filter_mypy_output(output: &str) -> String {
             // Capture continuation note lines
             i += 1;
             while i < lines.len() {
-                if let Some(next_caps) = MYPY_DIAG.captures(lines[i]) {
-                    if &next_caps[3] == "note" && next_caps[1] == err.file {
-                        let note_msg = next_caps[4].to_string();
-                        err.context_lines.push(note_msg);
-                        i += 1;
-                        continue;
-                    }
+                if let Some(next_caps) = MYPY_DIAG.captures(lines[i])
+                    && &next_caps[3] == "note"
+                    && next_caps[1] == err.file
+                {
+                    let note_msg = next_caps[4].to_string();
+                    err.context_lines.push(note_msg);
+                    i += 1;
+                    continue;
                 }
                 break;
             }

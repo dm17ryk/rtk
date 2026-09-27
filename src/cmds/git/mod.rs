@@ -1,2 +1,6 @@
-// Command modules in this directory are discovered at compile time.
-automod::dir!(pub "src/cmds/git");
+pub mod diff_cmd;
+pub mod gh_cmd;
+pub mod gh_route;
+pub mod git_cmd;
+pub mod glab_cmd;
+pub mod gt_cmd;

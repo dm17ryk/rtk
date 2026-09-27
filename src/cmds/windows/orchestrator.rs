@@ -1,10 +1,10 @@
 //! Public and hidden execution paths for CMD expressions.
 
 use super::adapters;
-use super::catalog::{builtins, AdapterStrategy, BuiltinCommand};
+use super::catalog::{AdapterStrategy, BuiltinCommand, builtins};
 use super::external_manifest::classify_external;
-use super::parser::{parse_expression, OperatorKind};
-use anyhow::{bail, Context, Result};
+use super::parser::{OperatorKind, parse_expression};
+use anyhow::{Context, Result, bail};
 use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
@@ -178,21 +178,19 @@ pub fn prepare_invocation(args: &[OsString], cmd_executable: &Path) -> Result<In
         Invocation::Direct(direct)
     } else if needs_hidden_transport {
         let mut hidden = prepare_hidden_transport(expression_args)?;
-        if let Invocation::HiddenTransport { expression, .. } = &hidden {
-            if hidden_transport_command_line_utf16_len(cmd_executable, expression)
+        if let Invocation::HiddenTransport { expression, .. } = &hidden
+            && hidden_transport_command_line_utf16_len(cmd_executable, expression)
                 > CMD_COMMAND_LINE_UTF16_LIMIT
-            {
-                hidden = prepare_hidden_transport_forced(expression_args)?;
-            }
+        {
+            hidden = prepare_hidden_transport_forced(expression_args)?;
         }
-        if let Invocation::HiddenTransport { expression, .. } = &hidden {
-            if hidden_transport_command_line_utf16_len(cmd_executable, expression)
+        if let Invocation::HiddenTransport { expression, .. } = &hidden
+            && hidden_transport_command_line_utf16_len(cmd_executable, expression)
                 > CMD_COMMAND_LINE_UTF16_LIMIT
-            {
-                bail!(
-                    "CMD hidden transport exceeds the 8191 UTF-16 command-line limit; shorten the arguments or pass one raw expression"
-                );
-            }
+        {
+            bail!(
+                "CMD hidden transport exceeds the 8191 UTF-16 command-line limit; shorten the arguments or pass one raw expression"
+            );
         }
         hidden
     } else {
@@ -666,11 +664,11 @@ pub fn run_segment(encoded: &str) -> Result<i32> {
     } else {
         SegmentStdout::Native(output.stdout.clone())
     };
-    if let SegmentStdout::Lossless(commit) = &stdout {
-        if let Ok(raw) = std::str::from_utf8(&output.stdout) {
-            let shown = std::str::from_utf8(commit.as_bytes()).unwrap_or_default();
-            timer.track(&source, "rtk cmd (filtered segment)", raw, shown);
-        }
+    if let SegmentStdout::Lossless(commit) = &stdout
+        && let Ok(raw) = std::str::from_utf8(&output.stdout)
+    {
+        let shown = std::str::from_utf8(commit.as_bytes()).unwrap_or_default();
+        timer.track(&source, "rtk cmd (filtered segment)", raw, shown);
     }
     io::stdout()
         .write_all(stdout.as_bytes())

@@ -28,8 +28,7 @@ terminal-facing filters. This tool is Windows-only. Use one expression string su
 dir /b`; use raw `cmd.exe` (or `rtk proxy cmd.exe`) when exact output, interactive input, \
 redirection, machine consumption, batch files, or opaque control syntax must remain native.";
 
-pub const RUN_POWERSHELL_DESCRIPTION: &str =
-    "Execute one raw Windows PowerShell expression through \
+pub const RUN_POWERSHELL_DESCRIPTION: &str = "Execute one raw Windows PowerShell expression through \
 `rtk powershell` (Desktop 5.1) or `rtk pwsh` (PowerShell 7+). The route preserves native \
 PowerShell parsing and streams, filtering only confident terminal-facing success output. Use the \
 native host for interactive input, -File, -EncodedCommand, -NoExit, XML/machine output, \

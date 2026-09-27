@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, and Mistral Vibe
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, and Trae
 sidebar:
   order: 3
 ---
@@ -35,6 +35,7 @@ Agent runs "cargo test"
 | Agent | Integration tier | Can rewrite transparently? |
 |-------|-----------------|---------------------------|
 | Claude Code | Shell hook (`PreToolUse`) | Yes |
+| Trae | Rust binary (`PreToolUse`, matcher `RunCommand`) | Yes |
 | VS Code Copilot Chat | Shell hook (`PreToolUse`) | Yes |
 | GitHub Copilot CLI | Shell hook (`PreToolUse`) | Yes |
 | Cursor | Shell hook (`preToolUse`) | Yes |
@@ -70,6 +71,30 @@ Restart Claude Code. Verify:
 ```bash
 rtk init --show    # shows hook status
 ```
+
+### Trae
+
+```bash
+rtk init --agent trae             # project-scoped (.trae/hooks.json)
+rtk init --global --agent trae    # user-scoped (~/.trae/hooks.json)
+```
+
+Global installation also updates `~/.trae-cn/hooks.json` when the `.trae-cn` directory already exists. Both modes install the native `rtk hook trae` command as a `PreToolUse` hook for `RunCommand`.
+
+Configuration files and hook input may include a UTF-8 BOM. Existing `rtk.exe hook trae` registrations are also recognized during install and uninstall.
+
+If a global install fails while writing a target, the error lists any targets already updated. After fixing the reported filesystem error, rerun the install; completed targets will not receive duplicate hooks.
+
+The hook returns `hookSpecificOutput.updatedInput`, preserving fields such as `description` and `timeout` while replacing only `command`. It deliberately omits `permissionDecision`, leaving command approval to Trae. Commands containing command substitution, process substitution, heredocs, or file-target redirects are left unchanged so Trae evaluates the original command natively.
+
+Uninstall:
+
+```bash
+rtk init --uninstall --agent trae
+rtk init --uninstall --global --agent trae
+```
+
+Uninstall removes only RTK-managed hook entries; unrelated Trae hooks and configuration are preserved.
 
 ### Cursor
 
@@ -175,6 +200,14 @@ openclaw plugins install ./openclaw
 ```
 
 Plugin in the `openclaw/` directory. Uses the `before_tool_call` hook, delegates to `rtk rewrite`.
+
+**Permissions.** RTK keeps the deny gate; OpenClaw owns approval. The plugin runs `rtk rewrite` with `RTK_REWRITE_HOST=openclaw`, which tells RTK that this host applies its own exec policy (`tools.exec.mode`, `security`, `ask`) to whatever the hook returns. RTK therefore does not prompt for a command that matched **no** rule, instead of raising a second approval derived from Claude Code's `settings.json` on a runtime that never opted into it ([#3908](https://github.com/rtk-ai/rtk/issues/3908)).
+
+A command matching a `permissions.deny` rule in those same Claude Code settings files is still refused, and the plugin blocks the tool call — naming the host only relaxes a *default* ask. As in Claude Code, a rule matches the command as written rather than every way of invoking the program (`Bash(git push *)` does not stop `git -C . push`), so a deny rule is not a security boundary. A command matching a `permissions.ask` rule you wrote still prompts when RTK rewrites it, because RTK keeps returning exit 3 for it. Commands containing a command substitution or a redirect to a file are never rewritten, on any host.
+
+The exec tool's own checks see the rewritten command. OpenClaw carries hook adjustments forward into the parameters passed to the exec tool, so `tools.exec.mode`, `tools.exec.security`, `tools.exec.ask` and the exec-approvals allowlist are all matched against `rtk git push`, not `git push`; write those rules against the `rtk` form. That was already true before the permission change. A trusted tool policy (`api.registerTrustedToolPolicy(...)`) is the exception: OpenClaw runs trusted policies before ordinary `before_tool_call` hooks, so one of those still sees the original command.
+
+No minimum rtk version: an rtk that predates `RTK_REWRITE_HOST` ignores it and keeps its previous behaviour, which is a prompt rather than a missing gate — an older rtk prompts for more commands, since it cannot collapse the default ask.
 
 ### Hermes
 
@@ -286,6 +319,18 @@ and `--require-verified`. The verifier marks a zero-exit marker-only run as
 command/result event for that direct RTK command is verified. Requested
 model/effort and host-observed model/effort must be recorded separately.
 
+Project-scoped install writes `RTK.md` to the project root, a name RTK does not own there, so it marks the files it wrote. An `RTK.md` is RTK's when it carries that marker, when it opens with the heading RTK wrote before the marker existed, or when it is byte-for-byte one of the payloads RTK shipped in between: install replaces it and uninstall removes it. Any other `RTK.md` is yours — install moves it to `RTK.md.bak` (numbered if that name is taken) and says so, and uninstall keeps it and tells you where it is. In global scope `RTK.md` lives in `$CODEX_HOME` and is always RTK's.
+
+Project-scoped install also refuses, without writing anything, when `.codex/hooks.json` or the `hooks.json.bak` it would write beside it resolves outside the project through a symlink, since registering a hook there would run commands from a directory you never named. Uninstall leaves such a hook registered rather than reaching outside for it, and says so. Use the global scope, with `$CODEX_HOME` set if you want a different directory, to configure Codex outside the project.
+
+`AGENTS.md` and `RTK.md` are not restricted this way, and git stores symlinks, so a repository you clone can ship either as a link pointing outside the clone.
+
+A symlinked `AGENTS.md` is followed and left in place: install appends its `@RTK.md` line to whatever the link names, wherever that is, and the file it rewrites ends up owned by you and readable only by you. That line is inert text, unlike `.codex/hooks.json`, which registers a hook that runs shell commands.
+
+A symlinked `RTK.md` depends on what it points at. If the target is not one RTK wrote, the link itself is moved to `RTK.md.bak` and a fresh file takes its place, so nothing outside is touched. If the target is one RTK wrote — a shared or global `RTK.md`, say — install follows the link and rewrites that file in full.
+
+If you install RTK into repositories you have not read, check what `AGENTS.md` and `RTK.md` are first.
+
 ### Kilo Code
 
 ```bash
@@ -335,8 +380,8 @@ Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any o
 
 Rules file integrations (Cline, Windsurf, Kilo Code, Antigravity) rely on the
 model following instructions. Full hook integrations (Claude Code, Codex,
-Cursor, Gemini) rewrite supported top-level commands before execution within
-their host-specific permission boundaries. Plugin integrations (OpenCode, Pi)
+Cursor, Gemini, Trae, Factory Droid) rewrite supported top-level commands before execution within
+their host-specific permission boundaries. Plugin integrations (OpenCode, Pi, Hermes, OMP)
 use in-place mutation via the agent's extension API. Generated instructions and
 MCP server guidance additionally tell agents not to hide supported commands
 inside a PowerShell or Command Prompt wrapper.

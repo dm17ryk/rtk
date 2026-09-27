@@ -458,10 +458,9 @@ fn collect_match_patterns() -> Vec<String> {
             status,
             crate::hooks::trust::TrustStatus::Trusted
                 | crate::hooks::trust::TrustStatus::EnvOverride
-        ) {
-            if let Some(content) = content {
-                patterns.extend(match_patterns_in(&content));
-            }
+        ) && let Some(content) = content
+        {
+            patterns.extend(match_patterns_in(&content));
         }
     }
     patterns.extend(match_patterns_in(BUILTIN_TOML));
@@ -641,10 +640,10 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
             .join("\n");
         for rule in &filter.match_output {
             if rule.pattern.is_match(&blob) {
-                if let Some(ref unless_re) = rule.unless {
-                    if unless_re.is_match(&blob) {
-                        continue; // errors/warnings present — skip this rule
-                    }
+                if let Some(ref unless_re) = rule.unless
+                    && unless_re.is_match(&blob)
+                {
+                    continue; // errors/warnings present — skip this rule
                 }
                 lossy_sources.extend(lines.iter().filter_map(|line| line.source_index));
                 return (
@@ -662,19 +661,15 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
     match &filter.line_filter {
         LineFilter::Strip(set) => lines.retain(|line| {
             let keep = !set.is_match(&line.text);
-            if !keep {
-                if let Some(source_index) = line.source_index {
-                    lossy_sources.insert(source_index);
-                }
+            if !keep && let Some(source_index) = line.source_index {
+                lossy_sources.insert(source_index);
             }
             keep
         }),
         LineFilter::Keep(set) => lines.retain(|line| {
             let keep = set.is_match(&line.text);
-            if !keep {
-                if let Some(source_index) = line.source_index {
-                    lossy_sources.insert(source_index);
-                }
+            if !keep && let Some(source_index) = line.source_index {
+                lossy_sources.insert(source_index);
             }
             keep
         }),
@@ -736,34 +731,34 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
             });
             head_cut = Some(head);
         }
-    } else if let Some(tail) = filter.tail_lines {
-        if total > tail {
-            let omitted = total - tail;
-            lossy_sources.extend(lines[..omitted].iter().filter_map(|line| line.source_index));
-            lines.drain(..omitted);
-            lines.insert(
-                0,
-                TrackedLine {
-                    source_index: None,
-                    text: format!("... ({} lines omitted)", omitted),
-                },
-            );
-        }
+    } else if let Some(tail) = filter.tail_lines
+        && total > tail
+    {
+        let omitted = total - tail;
+        lossy_sources.extend(lines[..omitted].iter().filter_map(|line| line.source_index));
+        lines.drain(..omitted);
+        lines.insert(
+            0,
+            TrackedLine {
+                source_index: None,
+                text: format!("... ({} lines omitted)", omitted),
+            },
+        );
     }
 
     // 7. max_lines — absolute cap applied after head/tail (includes omit messages)
     let mut max_cut: Option<usize> = None;
-    if let Some(max) = filter.max_lines {
-        if lines.len() > max {
-            let dropped = lines.len() - max;
-            lossy_sources.extend(lines[max..].iter().filter_map(|line| line.source_index));
-            lines.truncate(max);
-            lines.push(TrackedLine {
-                source_index: None,
-                text: format!("... ({} lines truncated)", dropped),
-            });
-            max_cut = Some(max);
-        }
+    if let Some(max) = filter.max_lines
+        && lines.len() > max
+    {
+        let dropped = lines.len() - max;
+        lossy_sources.extend(lines[max..].iter().filter_map(|line| line.source_index));
+        lines.truncate(max);
+        lines.push(TrackedLine {
+            source_index: None,
+            text: format!("... ({} lines truncated)", dropped),
+        });
+        max_cut = Some(max);
     }
 
     // 8. on_empty
@@ -772,10 +767,10 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
         .map(|line| line.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    if result.trim().is_empty() {
-        if let Some(ref msg) = filter.on_empty {
-            result = msg.clone();
-        }
+    if result.trim().is_empty()
+        && let Some(ref msg) = filter.on_empty
+    {
+        result = msg.clone();
     }
 
     let omitted_items = lossy_sources.len();
@@ -901,10 +896,10 @@ fn collect_test_outcomes(
 
     // Run tests
     for (filter_name, tests) in file.tests {
-        if let Some(name) = filter_name_opt {
-            if filter_name != name {
-                continue;
-            }
+        if let Some(name) = filter_name_opt
+            && filter_name != name
+        {
+            continue;
         }
 
         tested_filter_names.insert(filter_name.clone());
@@ -2276,8 +2271,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            64,
-            "Expected exactly 64 built-in filters, got {}. \
+            63,
+            "Expected exactly 63 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -2318,9 +2313,11 @@ match_command = "^make\\b"
         let unanchored =
             "schema_version = 1\n[filters.mytool]\nmatch_command = \"(?:^|/)mytool\\\\b\"\n";
         assert!(match_patterns_in(unanchored).is_empty());
-        assert!(TomlFilterRegistry::parse_and_compile(unanchored, "test")
-            .expect("schema is valid")
-            .is_empty());
+        assert!(
+            TomlFilterRegistry::parse_and_compile(unanchored, "test")
+                .expect("schema is valid")
+                .is_empty()
+        );
 
         let anchored = "schema_version = 1\n[filters.mytool]\nmatch_command = \"^mytool\\\\b\"\n";
         assert_eq!(match_patterns_in(anchored), vec!["^mytool\\b".to_string()]);
@@ -2383,11 +2380,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 64 existing filters still present + 1 new = 65
+        // All 63 existing filters still present + 1 new = 64
         assert_eq!(
             filters.len(),
-            65,
-            "Expected 65 filters after concat (64 built-in + 1 new)"
+            64,
+            "Expected 64 filters after concat (63 built-in + 1 new)"
         );
 
         // New filter is discoverable

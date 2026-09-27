@@ -1,6 +1,6 @@
 //! Public PowerShell host invocation and conservative output filtering.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::ffi::OsString;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::adapters;
 use super::catalog::{self, AdapterStrategy};
-use super::parser::{parse_expression, ParsedScript};
+use super::parser::{ParsedScript, parse_expression};
 use super::transport::OutputSpool;
 
 static PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -106,11 +106,11 @@ pub fn prepare_invocation(args: &[OsString]) -> Invocation {
             break;
         }
         host_args.push(args[index].clone());
-        if host_option_takes_value(&lower) {
-            if let Some(value) = args.get(index + 1) {
-                host_args.push(value.clone());
-                index += 1;
-            }
+        if host_option_takes_value(&lower)
+            && let Some(value) = args.get(index + 1)
+        {
+            host_args.push(value.clone());
+            index += 1;
         }
         index += 1;
     }
@@ -265,21 +265,21 @@ pub fn run(host: PowerShellHost, args: &[OsString]) -> Result<i32> {
         } => {
             let parsed = parse_expression(&expression);
             let decision = classify_for_host(host, &parsed, &expression, &host_args);
-            if filtering_requested() {
-                if let RewriteDecision::Filter { adapter } = decision {
-                    return run_filtered_command(
-                        &executable,
-                        host,
-                        &host_args,
-                        &expression,
-                        parsed
-                            .command_names()
-                            .first()
-                            .map(String::as_str)
-                            .unwrap_or("unknown"),
-                        adapter,
-                    );
-                }
+            if filtering_requested()
+                && let RewriteDecision::Filter { adapter } = decision
+            {
+                return run_filtered_command(
+                    &executable,
+                    host,
+                    &host_args,
+                    &expression,
+                    parsed
+                        .command_names()
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("unknown"),
+                    adapter,
+                );
             }
             run_command(&executable, host, &host_args, &expression)
         }
@@ -375,7 +375,7 @@ fn run_filtered_command(
             return run_command(executable, host, host_args, expression);
         }
         Err(error) => {
-            return Err(error).with_context(|| format!("Failed to execute {}", host.executable()))
+            return Err(error).with_context(|| format!("Failed to execute {}", host.executable()));
         }
     };
 
@@ -528,7 +528,7 @@ impl OrderedCaptureSpool {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "unknown capture stream",
-                    ))
+                    ));
                 }
             }
         }
@@ -574,12 +574,12 @@ fn capture_ordered_output(
     for chunk in receiver {
         spool.append(chunk.stream, &chunk.bytes)?;
         if !overflowed {
-            if let Some(total) = captured_bytes.checked_add(chunk.bytes.len()) {
-                if total <= MAX_CAPTURED_BYTES {
-                    captured_bytes = total;
-                    chunks.push(chunk);
-                    continue;
-                }
+            if let Some(total) = captured_bytes.checked_add(chunk.bytes.len())
+                && total <= MAX_CAPTURED_BYTES
+            {
+                captured_bytes = total;
+                chunks.push(chunk);
+                continue;
             }
             overflowed = true;
             chunks.clear();

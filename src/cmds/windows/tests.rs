@@ -1,18 +1,19 @@
 use super::adapters::{filter_display, is_display_form, supports_adapter};
 use super::catalog::{
-    builtins, validate_catalog, validate_command_catalogs, AdapterStrategy, CommandMode,
+    AdapterStrategy, CommandMode, builtins, validate_catalog, validate_command_catalogs,
 };
 use super::external_manifest::{
-    classify_external, external_commands, official_source_metadata, official_top_level_coverage,
-    validate_external_manifest, validate_external_manifest_rows, CatalogDisposition, CommandModes,
-    ExternalCommand, ExternalRoute, ExternalStatus, ExternalStrategy, Presence, VersionStatus,
-    OFFICIAL_SOURCE_ENTRY_COUNT, OFFICIAL_SOURCE_FIXTURE_SHA256, OFFICIAL_SOURCE_RAW_SHA256,
+    CatalogDisposition, CommandModes, ExternalCommand, ExternalRoute, ExternalStatus,
+    ExternalStrategy, OFFICIAL_SOURCE_ENTRY_COUNT, OFFICIAL_SOURCE_FIXTURE_SHA256,
+    OFFICIAL_SOURCE_RAW_SHA256, Presence, VersionStatus, classify_external, external_commands,
+    official_source_metadata, official_top_level_coverage, validate_external_manifest,
+    validate_external_manifest_rows,
 };
 use super::orchestrator::{
-    prepare_invocation as prepare_with_cmd, recognize_command, rewrite_expression,
-    CommandRecognition, Invocation, SEGMENT_RUNNER,
+    CommandRecognition, Invocation, SEGMENT_RUNNER, prepare_invocation as prepare_with_cmd,
+    recognize_command, rewrite_expression,
 };
-use super::parser::{parse_expression, OpaqueReason, OperatorKind, Span};
+use super::parser::{OpaqueReason, OperatorKind, Span, parse_expression};
 use std::ffi::OsString;
 use std::path::Path;
 
@@ -878,9 +879,11 @@ fn hidden_transport_moves_long_operands_out_of_the_cmd_source() {
         expression.len() < 2_000,
         "long operands must be transported, not interpolated"
     );
-    assert!(environment
-        .iter()
-        .any(|(_, value)| value == &OsString::from(long_operand.as_str())));
+    assert!(
+        environment
+            .iter()
+            .any(|(_, value)| value == &OsString::from(long_operand.as_str()))
+    );
 }
 
 #[test]
@@ -929,9 +932,11 @@ fn public_cmd_reconstruction_preserves_percent_and_hides_line_break_transport() 
         let key = key.to_string_lossy();
         assert!(expression.contains(&format!("set \"{key}=\"")));
     }
-    assert!(environment
-        .iter()
-        .all(|(key, _)| !key.to_string_lossy().starts_with("RTK_CMD_ARG_")));
+    assert!(
+        environment
+            .iter()
+            .all(|(key, _)| !key.to_string_lossy().starts_with("RTK_CMD_ARG_"))
+    );
 }
 
 #[test]
@@ -965,18 +970,22 @@ fn hidden_line_break_transport_does_not_collide_with_user_environment() {
     let Invocation::HiddenTransport { environment, .. } = result.unwrap() else {
         panic!("line breaks require hidden transport");
     };
-    assert!(environment
-        .iter()
-        .all(|(key, _)| Some(key.to_string_lossy().as_ref()) != first_key.borrow().as_deref()));
+    assert!(
+        environment
+            .iter()
+            .all(|(key, _)| Some(key.to_string_lossy().as_ref()) != first_key.borrow().as_deref())
+    );
 }
 
 #[test]
 fn hidden_transport_rejects_unsafe_quoted_external_values_and_nested_cmd_syntax() {
-    assert!(prepare_invocation(&[
-        OsString::from("definitely-not-installed.exe"),
-        OsString::from("first\r\n\"quoted\""),
-    ])
-    .is_err());
+    assert!(
+        prepare_invocation(&[
+            OsString::from("definitely-not-installed.exe"),
+            OsString::from("first\r\n\"quoted\""),
+        ])
+        .is_err()
+    );
     let nested = [
         OsString::from("cmd.exe"),
         OsString::from("/D"),
@@ -1129,10 +1138,12 @@ fn rewrite_fails_open_for_input_redirection_even_when_the_parser_is_not_opaque()
     let parsed = parse_expression(source);
 
     assert_eq!(parsed.opaque_reason, None);
-    assert!(parsed
-        .operators
-        .iter()
-        .any(|operator| operator.kind == OperatorKind::RedirectInput));
+    assert!(
+        parsed
+            .operators
+            .iter()
+            .any(|operator| operator.kind == OperatorKind::RedirectInput)
+    );
     assert_eq!(rewrite_expression(source, Path::new(r"C:\rtk.exe")), source);
 }
 

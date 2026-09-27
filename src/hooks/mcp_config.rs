@@ -6,7 +6,7 @@
 
 use crate::hooks::init::InitContext;
 use anyhow::{Context, Result};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -782,10 +782,10 @@ fn insert_jsonc_member(
     insertion.push('\n');
 
     output.insert_str(insertion_start, &insertion);
-    if let Some(last) = members.last() {
-        if last.comma.is_none() {
-            output.insert(last.value_end, ',');
-        }
+    if let Some(last) = members.last()
+        && last.comma.is_none()
+    {
+        output.insert(last.value_end, ',');
     }
     Ok(output)
 }
@@ -1672,6 +1672,7 @@ mod tests {
             InitContext {
                 verbose: 1,
                 dry_run: true,
+                ..Default::default()
             },
             &env,
         )
@@ -1704,12 +1705,16 @@ mod tests {
         install_with_env(McpClient::Cline, false, InitContext::default(), &env).unwrap();
 
         let storage = env.vscode_user_dir.join("globalStorage");
-        assert!(storage
-            .join("saoudrizwan.claude-dev/settings/cline_mcp_settings.json")
-            .exists());
-        assert!(storage
-            .join("rooveterinaryinc.roo-cline/settings/mcp_settings.json")
-            .exists());
+        assert!(
+            storage
+                .join("saoudrizwan.claude-dev/settings/cline_mcp_settings.json")
+                .exists()
+        );
+        assert!(
+            storage
+                .join("rooveterinaryinc.roo-cline/settings/mcp_settings.json")
+                .exists()
+        );
     }
 
     #[test]

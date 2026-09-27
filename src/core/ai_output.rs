@@ -519,15 +519,15 @@ fn render_semantic(document: &AiDocument, max_tokens: usize) -> RenderedOutput {
         emitted_internal_omissions,
         &records[emitted..],
     );
-    if lines.is_empty() {
-        if let Some(omission) = &omission {
-            let line = format!(
-                "omitted items={} groups={}",
-                omission.items, omission.groups
-            );
-            if crate::core::tracking::estimate_tokens(&line) <= max_tokens {
-                lines.push(line);
-            }
+    if lines.is_empty()
+        && let Some(omission) = &omission
+    {
+        let line = format!(
+            "omitted items={} groups={}",
+            omission.items, omission.groups
+        );
+        if crate::core::tracking::estimate_tokens(&line) <= max_tokens {
+            lines.push(line);
         }
     }
 

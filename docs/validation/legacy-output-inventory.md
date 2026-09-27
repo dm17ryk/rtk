@@ -3,6 +3,12 @@
 Recorded 2026-09-06 from the Task 13 working tree. This is a route
 inventory, not a claim that every command in the ecosystem is supported.
 
+The direct-output fingerprint fixture was refreshed on 2026-09-25 while resolving
+PR #17 against upstream `feac25d`. This includes the `git_cmd.rs` rename,
+Rust 2024 formatting, upstream `ast-grep` output, and byte-preserving read-window
+writes. The semantic runner and lossless recovery guarantees remain in place;
+the historical measurements below were not recomputed.
+
 ## Current measured baseline
 
 The local RTK database was queried with `rtk gain -f json` after the focused
@@ -54,8 +60,8 @@ without changing behavior.
 
 | Location / route | Contract reason | Verification or guard |
 |---|---|---|
-| `src/cmds/git/git.rs` `checkout` | Established action acknowledgement is deliberately stable (`ok <branch>` / restored-file count); adding semantic status/facts would change a small, non-high-volume user contract. | Existing checkout integration tests; native exit code remains authoritative. |
-| `src/cmds/git/git.rs` mutation and explicit-format branches | Writes, explicit stat/word/blob output, and caller-selected formats must retain native output and timing. | `ExactReason` passthrough branches plus Git unit suite. |
+| `src/cmds/git/git_cmd.rs` `checkout` | Established action acknowledgement is deliberately stable (`ok <branch>` / restored-file count); adding semantic status/facts would change a small, non-high-volume user contract. | Existing checkout integration tests; native exit code remains authoritative. |
+| `src/cmds/git/git_cmd.rs` mutation and explicit-format branches | Writes, explicit stat/word/blob output, and caller-selected formats must retain native output and timing. | `ExactReason` passthrough branches plus Git unit suite. |
 | `src/cmds/git/gt_cmd.rs` | `gt` has no stable RTK semantic parser in this checkout; unknown output must remain transparent. | Native capture/passthrough and exit propagation tests. |
 | `src/cmds/go/go_cmd.rs` `run_other` and `go tool golangci-lint` | Unknown Go subcommands and version-dependent golangci v1/v2 JSON have different executable/exit contracts. | Version parser and golangci fixture tests; unsupported commands stay native. |
 | `src/cmds/cloud/aws_cmd.rs` | Several actions have command-specific JSON/text/machine modes and provider-specific failures; the direct adapter preserves AWS's selected mode. | AWS filter/parser tests and machine-format bypasses. |

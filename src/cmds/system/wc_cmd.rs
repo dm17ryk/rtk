@@ -7,25 +7,22 @@
 /// - `wc -c file.py`  → `978`
 /// - `wc -l *.py`     → table with common path prefix stripped
 use crate::core::runner::{self, RunOptions};
-use crate::core::utils::resolved_command;
+use crate::core::utils::{ChildArgExt, resolved_command};
 #[cfg(windows)]
-use crate::core::utils::{resolve_host_command, HostCommand};
+use crate::core::utils::{HostCommand, resolve_host_command};
 use anyhow::Result;
 #[cfg(windows)]
 use std::io::Read;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     #[cfg(windows)]
-    if matches!(resolve_host_command("wc"), HostCommand::Missing)
-        && windows_wc_args_supported(args)
+    if matches!(resolve_host_command("wc"), HostCommand::Missing) && windows_wc_args_supported(args)
     {
         return run_windows_native(args, verbose);
     }
 
     let mut cmd = resolved_command("wc");
-    for arg in args {
-        cmd.arg(arg);
-    }
+    cmd.child_args(args);
 
     if verbose > 0 {
         eprintln!("Running: wc {}", args.join(" "));
@@ -60,7 +57,9 @@ fn windows_wc_args_supported(args: &[String]) -> bool {
             "-l" | "-w" | "-c" | "-m" | "--lines" | "--words" | "--bytes" | "--chars"
         ) || (arg.starts_with('-')
             && !arg.starts_with("--")
-            && arg[1..].chars().all(|flag| matches!(flag, 'l' | 'w' | 'c' | 'm'))
+            && arg[1..]
+                .chars()
+                .all(|flag| matches!(flag, 'l' | 'w' | 'c' | 'm'))
             && !arg[1..].is_empty())
     })
 }
@@ -86,8 +85,8 @@ fn run_windows_native(args: &[String], verbose: u8) -> Result<i32> {
         rows.push(format_windows_counts(counts, &mode, None));
     } else {
         for file in files {
-            let bytes = std::fs::read(file)
-                .map_err(|error| anyhow::anyhow!("wc: {}: {}", file, error))?;
+            let bytes =
+                std::fs::read(file).map_err(|error| anyhow::anyhow!("wc: {}: {}", file, error))?;
             let counts = windows_counts(&bytes);
             rows.push(format_windows_counts(counts, &mode, Some(file)));
             total.0 += counts.0;
@@ -104,8 +103,7 @@ fn run_windows_native(args: &[String], verbose: u8) -> Result<i32> {
     if verbose > 0 {
         eprintln!(
             "[rtk-debug] windows-wc backend=native files={} mode={:?}",
-            file_count,
-            mode
+            file_count, mode
         );
     }
     println!("{}", rendered);

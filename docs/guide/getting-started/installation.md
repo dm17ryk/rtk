@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: Install RTK via curl, Homebrew, Cargo, or from source, and verify the correct version
+description: Install RTK via curl, Homebrew, winget, Cargo, or from source, and verify the correct version
 sidebar:
   order: 1
 ---
@@ -35,6 +35,12 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
 
 ```bash
 brew install rtk-ai/tap/rtk
+```
+
+## winget (Windows)
+
+```powershell
+winget install rtk-ai.rtk
 ```
 
 ## Cargo
@@ -98,4 +104,5 @@ without RTK.md or MCP.
 rtk init -g --uninstall    # remove hook, RTK.md, settings, and RTK's MCP entry
 cargo uninstall rtk         # remove binary (if installed via Cargo)
 brew uninstall rtk          # remove binary (if installed via Homebrew)
+winget uninstall rtk-ai.rtk # remove binary (if installed via winget)
 ```

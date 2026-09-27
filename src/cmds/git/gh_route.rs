@@ -129,9 +129,7 @@ pub(crate) fn classify(args: &[OsString]) -> GhRoute {
         ["pr", "diff", rest @ ..] if valid_args(rest, 0, 1, PR_DIFF_FLAGS) => {
             FilteredGhCommand::PrDiff
         }
-        ["issue", "list" | "ls", rest @ ..]
-            if valid_args(rest, 0, 0, ISSUE_LIST_FLAGS) =>
-        {
+        ["issue", "list" | "ls", rest @ ..] if valid_args(rest, 0, 0, ISSUE_LIST_FLAGS) => {
             FilteredGhCommand::IssueList
         }
         ["issue", "view", rest @ ..] if valid_args(rest, 1, 1, ISSUE_VIEW_FLAGS) => {
@@ -171,9 +169,9 @@ fn valid_args(
         }
 
         if arg.starts_with('-') && arg != "-" {
-            let (flag_name, inline_value) = arg.split_once('=').map_or((arg, None), |(name, value)| {
-                (name, Some(value))
-            });
+            let (flag_name, inline_value) = arg
+                .split_once('=')
+                .map_or((arg, None), |(name, value)| (name, Some(value)));
             let Some(spec) = allowed_flags
                 .iter()
                 .find(|spec| spec.long == flag_name || spec.short == Some(flag_name))
@@ -187,9 +185,7 @@ fn valid_args(
                 }
                 if inline_value.is_none() {
                     index += 1;
-                    if index >= args.len()
-                        || (args[index].starts_with('-') && args[index] != "-")
-                    {
+                    if index >= args.len() || (args[index].starts_with('-') && args[index] != "-") {
                         return false;
                     }
                 }
@@ -211,7 +207,7 @@ fn valid_args(
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, FilteredGhCommand, GhRoute};
+    use super::{FilteredGhCommand, GhRoute, classify};
     use std::ffi::OsString;
 
     fn argv(args: &[&str]) -> Vec<OsString> {
@@ -230,17 +226,47 @@ mod tests {
         let cases = [
             (&["pr", "list"][..], filtered(FilteredGhCommand::PrList, 2)),
             (&["pr", "ls"][..], filtered(FilteredGhCommand::PrList, 2)),
-            (&["pr", "view", "42"][..], filtered(FilteredGhCommand::PrView, 2)),
-            (&["pr", "checks"][..], filtered(FilteredGhCommand::PrChecks, 2)),
-            (&["pr", "status"][..], filtered(FilteredGhCommand::PrStatus, 2)),
-            (&["pr", "diff", "42"][..], filtered(FilteredGhCommand::PrDiff, 2)),
-            (&["issue", "list"][..], filtered(FilteredGhCommand::IssueList, 2)),
-            (&["issue", "ls"][..], filtered(FilteredGhCommand::IssueList, 2)),
-            (&["issue", "view", "42"][..], filtered(FilteredGhCommand::IssueView, 2)),
-            (&["run", "list"][..], filtered(FilteredGhCommand::RunList, 2)),
+            (
+                &["pr", "view", "42"][..],
+                filtered(FilteredGhCommand::PrView, 2),
+            ),
+            (
+                &["pr", "checks"][..],
+                filtered(FilteredGhCommand::PrChecks, 2),
+            ),
+            (
+                &["pr", "status"][..],
+                filtered(FilteredGhCommand::PrStatus, 2),
+            ),
+            (
+                &["pr", "diff", "42"][..],
+                filtered(FilteredGhCommand::PrDiff, 2),
+            ),
+            (
+                &["issue", "list"][..],
+                filtered(FilteredGhCommand::IssueList, 2),
+            ),
+            (
+                &["issue", "ls"][..],
+                filtered(FilteredGhCommand::IssueList, 2),
+            ),
+            (
+                &["issue", "view", "42"][..],
+                filtered(FilteredGhCommand::IssueView, 2),
+            ),
+            (
+                &["run", "list"][..],
+                filtered(FilteredGhCommand::RunList, 2),
+            ),
             (&["run", "ls"][..], filtered(FilteredGhCommand::RunList, 2)),
-            (&["run", "view", "12345"][..], filtered(FilteredGhCommand::RunView, 2)),
-            (&["repo", "view"][..], filtered(FilteredGhCommand::RepoView, 2)),
+            (
+                &["run", "view", "12345"][..],
+                filtered(FilteredGhCommand::RunView, 2),
+            ),
+            (
+                &["repo", "view"][..],
+                filtered(FilteredGhCommand::RepoView, 2),
+            ),
         ];
 
         for (args, expected) in cases {
@@ -251,97 +277,354 @@ mod tests {
     #[test]
     fn accepts_documented_selector_flags_for_filtered_routes() {
         let cases = [
-            (&["pr", "list", "--author", "@me", "--draft", "-R", "o/r"][..], FilteredGhCommand::PrList),
-            (&["pr", "view", "feature", "--repo=o/r"][..], FilteredGhCommand::PrView),
-            (&["pr", "checks", "42", "--required", "-R", "o/r"][..], FilteredGhCommand::PrChecks),
-            (&["pr", "status", "--conflict-status", "--repo", "o/r"][..], FilteredGhCommand::PrStatus),
-            (&["pr", "diff", "42", "--exclude", "generated/*", "-R", "o/r"][..], FilteredGhCommand::PrDiff),
-            (&["issue", "list", "--label", "bug", "--limit=50", "-R", "o/r"][..], FilteredGhCommand::IssueList),
-            (&["issue", "view", "42", "--repo", "o/r"][..], FilteredGhCommand::IssueView),
-            (&["run", "list", "--all", "-w", "ci.yml", "--limit", "50", "-R", "o/r"][..], FilteredGhCommand::RunList),
-            (&["run", "view", "12345", "--attempt", "2", "--exit-status", "-R", "o/r"][..], FilteredGhCommand::RunView),
-            (&["repo", "view", "o/r", "--branch", "main"][..], FilteredGhCommand::RepoView),
+            (
+                &["pr", "list", "--author", "@me", "--draft", "-R", "o/r"][..],
+                FilteredGhCommand::PrList,
+            ),
+            (
+                &["pr", "view", "feature", "--repo=o/r"][..],
+                FilteredGhCommand::PrView,
+            ),
+            (
+                &["pr", "checks", "42", "--required", "-R", "o/r"][..],
+                FilteredGhCommand::PrChecks,
+            ),
+            (
+                &["pr", "status", "--conflict-status", "--repo", "o/r"][..],
+                FilteredGhCommand::PrStatus,
+            ),
+            (
+                &["pr", "diff", "42", "--exclude", "generated/*", "-R", "o/r"][..],
+                FilteredGhCommand::PrDiff,
+            ),
+            (
+                &["issue", "list", "--label", "bug", "--limit=50", "-R", "o/r"][..],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "view", "42", "--repo", "o/r"][..],
+                FilteredGhCommand::IssueView,
+            ),
+            (
+                &[
+                    "run", "list", "--all", "-w", "ci.yml", "--limit", "50", "-R", "o/r",
+                ][..],
+                FilteredGhCommand::RunList,
+            ),
+            (
+                &[
+                    "run",
+                    "view",
+                    "12345",
+                    "--attempt",
+                    "2",
+                    "--exit-status",
+                    "-R",
+                    "o/r",
+                ][..],
+                FilteredGhCommand::RunView,
+            ),
+            (
+                &["repo", "view", "o/r", "--branch", "main"][..],
+                FilteredGhCommand::RepoView,
+            ),
         ];
 
         for (args, command) in cases {
-            assert_eq!(classify(&argv(args)), filtered(command, 2), "args: {args:?}");
+            assert_eq!(
+                classify(&argv(args)),
+                filtered(command, 2),
+                "args: {args:?}"
+            );
         }
     }
 
     #[test]
     fn accepts_every_safe_selector_spelling() {
         let cases: &[(&[&str], &[&str], FilteredGhCommand)] = &[
-            (&["pr", "list"], &["--app", "dependabot"], FilteredGhCommand::PrList),
-            (&["pr", "list"], &["--assignee", "@me"], FilteredGhCommand::PrList),
+            (
+                &["pr", "list"],
+                &["--app", "dependabot"],
+                FilteredGhCommand::PrList,
+            ),
+            (
+                &["pr", "list"],
+                &["--assignee", "@me"],
+                FilteredGhCommand::PrList,
+            ),
             (&["pr", "list"], &["-a", "@me"], FilteredGhCommand::PrList),
-            (&["pr", "list"], &["--author", "@me"], FilteredGhCommand::PrList),
+            (
+                &["pr", "list"],
+                &["--author", "@me"],
+                FilteredGhCommand::PrList,
+            ),
             (&["pr", "list"], &["-A", "@me"], FilteredGhCommand::PrList),
-            (&["pr", "list"], &["--base", "main"], FilteredGhCommand::PrList),
+            (
+                &["pr", "list"],
+                &["--base", "main"],
+                FilteredGhCommand::PrList,
+            ),
             (&["pr", "list"], &["-B", "main"], FilteredGhCommand::PrList),
             (&["pr", "list"], &["--draft"], FilteredGhCommand::PrList),
             (&["pr", "list"], &["-d"], FilteredGhCommand::PrList),
-            (&["pr", "list"], &["--head", "feature"], FilteredGhCommand::PrList),
-            (&["pr", "list"], &["-H", "feature"], FilteredGhCommand::PrList),
-            (&["pr", "list"], &["--label", "bug"], FilteredGhCommand::PrList),
+            (
+                &["pr", "list"],
+                &["--head", "feature"],
+                FilteredGhCommand::PrList,
+            ),
+            (
+                &["pr", "list"],
+                &["-H", "feature"],
+                FilteredGhCommand::PrList,
+            ),
+            (
+                &["pr", "list"],
+                &["--label", "bug"],
+                FilteredGhCommand::PrList,
+            ),
             (&["pr", "list"], &["-l", "bug"], FilteredGhCommand::PrList),
-            (&["pr", "list"], &["--limit", "50"], FilteredGhCommand::PrList),
+            (
+                &["pr", "list"],
+                &["--limit", "50"],
+                FilteredGhCommand::PrList,
+            ),
             (&["pr", "list"], &["-L", "50"], FilteredGhCommand::PrList),
-            (&["pr", "list"], &["--search", "review:required"], FilteredGhCommand::PrList),
-            (&["pr", "list"], &["-S", "review:required"], FilteredGhCommand::PrList),
-            (&["pr", "list"], &["--state", "all"], FilteredGhCommand::PrList),
+            (
+                &["pr", "list"],
+                &["--search", "review:required"],
+                FilteredGhCommand::PrList,
+            ),
+            (
+                &["pr", "list"],
+                &["-S", "review:required"],
+                FilteredGhCommand::PrList,
+            ),
+            (
+                &["pr", "list"],
+                &["--state", "all"],
+                FilteredGhCommand::PrList,
+            ),
             (&["pr", "list"], &["-s", "all"], FilteredGhCommand::PrList),
-            (&["pr", "view", "42"], &["--repo", "o/r"], FilteredGhCommand::PrView),
-            (&["pr", "checks", "42"], &["--required"], FilteredGhCommand::PrChecks),
-            (&["pr", "status"], &["--conflict-status"], FilteredGhCommand::PrStatus),
+            (
+                &["pr", "view", "42"],
+                &["--repo", "o/r"],
+                FilteredGhCommand::PrView,
+            ),
+            (
+                &["pr", "checks", "42"],
+                &["--required"],
+                FilteredGhCommand::PrChecks,
+            ),
+            (
+                &["pr", "status"],
+                &["--conflict-status"],
+                FilteredGhCommand::PrStatus,
+            ),
             (&["pr", "status"], &["-c"], FilteredGhCommand::PrStatus),
-            (&["pr", "diff", "42"], &["--exclude", "generated/*"], FilteredGhCommand::PrDiff),
-            (&["pr", "diff", "42"], &["-e", "generated/*"], FilteredGhCommand::PrDiff),
-            (&["issue", "list"], &["--app", "dependabot"], FilteredGhCommand::IssueList),
-            (&["issue", "list"], &["--assignee", "@me"], FilteredGhCommand::IssueList),
-            (&["issue", "list"], &["-a", "@me"], FilteredGhCommand::IssueList),
-            (&["issue", "list"], &["--author", "@me"], FilteredGhCommand::IssueList),
-            (&["issue", "list"], &["-A", "@me"], FilteredGhCommand::IssueList),
-            (&["issue", "list"], &["--label", "bug"], FilteredGhCommand::IssueList),
-            (&["issue", "list"], &["-l", "bug"], FilteredGhCommand::IssueList),
-            (&["issue", "list"], &["--limit", "50"], FilteredGhCommand::IssueList),
-            (&["issue", "list"], &["-L", "50"], FilteredGhCommand::IssueList),
-            (&["issue", "list"], &["--mention", "octocat"], FilteredGhCommand::IssueList),
-            (&["issue", "list"], &["--milestone", "v1"], FilteredGhCommand::IssueList),
-            (&["issue", "list"], &["-m", "v1"], FilteredGhCommand::IssueList),
-            (&["issue", "list"], &["--search", "no:assignee"], FilteredGhCommand::IssueList),
-            (&["issue", "list"], &["-S", "no:assignee"], FilteredGhCommand::IssueList),
-            (&["issue", "list"], &["--state", "all"], FilteredGhCommand::IssueList),
-            (&["issue", "list"], &["-s", "all"], FilteredGhCommand::IssueList),
-            (&["issue", "list"], &["--type", "Bug"], FilteredGhCommand::IssueList),
-            (&["issue", "view", "42"], &["-R", "o/r"], FilteredGhCommand::IssueView),
+            (
+                &["pr", "diff", "42"],
+                &["--exclude", "generated/*"],
+                FilteredGhCommand::PrDiff,
+            ),
+            (
+                &["pr", "diff", "42"],
+                &["-e", "generated/*"],
+                FilteredGhCommand::PrDiff,
+            ),
+            (
+                &["issue", "list"],
+                &["--app", "dependabot"],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "list"],
+                &["--assignee", "@me"],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "list"],
+                &["-a", "@me"],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "list"],
+                &["--author", "@me"],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "list"],
+                &["-A", "@me"],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "list"],
+                &["--label", "bug"],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "list"],
+                &["-l", "bug"],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "list"],
+                &["--limit", "50"],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "list"],
+                &["-L", "50"],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "list"],
+                &["--mention", "octocat"],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "list"],
+                &["--milestone", "v1"],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "list"],
+                &["-m", "v1"],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "list"],
+                &["--search", "no:assignee"],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "list"],
+                &["-S", "no:assignee"],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "list"],
+                &["--state", "all"],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "list"],
+                &["-s", "all"],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "list"],
+                &["--type", "Bug"],
+                FilteredGhCommand::IssueList,
+            ),
+            (
+                &["issue", "view", "42"],
+                &["-R", "o/r"],
+                FilteredGhCommand::IssueView,
+            ),
             (&["run", "list"], &["--all"], FilteredGhCommand::RunList),
             (&["run", "list"], &["-a"], FilteredGhCommand::RunList),
-            (&["run", "list"], &["--branch", "main"], FilteredGhCommand::RunList),
-            (&["run", "list"], &["-b", "main"], FilteredGhCommand::RunList),
-            (&["run", "list"], &["--commit", "abc123"], FilteredGhCommand::RunList),
-            (&["run", "list"], &["-c", "abc123"], FilteredGhCommand::RunList),
-            (&["run", "list"], &["--created", "today"], FilteredGhCommand::RunList),
-            (&["run", "list"], &["--event", "push"], FilteredGhCommand::RunList),
-            (&["run", "list"], &["-e", "push"], FilteredGhCommand::RunList),
-            (&["run", "list"], &["--limit", "50"], FilteredGhCommand::RunList),
+            (
+                &["run", "list"],
+                &["--branch", "main"],
+                FilteredGhCommand::RunList,
+            ),
+            (
+                &["run", "list"],
+                &["-b", "main"],
+                FilteredGhCommand::RunList,
+            ),
+            (
+                &["run", "list"],
+                &["--commit", "abc123"],
+                FilteredGhCommand::RunList,
+            ),
+            (
+                &["run", "list"],
+                &["-c", "abc123"],
+                FilteredGhCommand::RunList,
+            ),
+            (
+                &["run", "list"],
+                &["--created", "today"],
+                FilteredGhCommand::RunList,
+            ),
+            (
+                &["run", "list"],
+                &["--event", "push"],
+                FilteredGhCommand::RunList,
+            ),
+            (
+                &["run", "list"],
+                &["-e", "push"],
+                FilteredGhCommand::RunList,
+            ),
+            (
+                &["run", "list"],
+                &["--limit", "50"],
+                FilteredGhCommand::RunList,
+            ),
             (&["run", "list"], &["-L", "50"], FilteredGhCommand::RunList),
-            (&["run", "list"], &["--status", "failure"], FilteredGhCommand::RunList),
-            (&["run", "list"], &["-s", "failure"], FilteredGhCommand::RunList),
-            (&["run", "list"], &["--user", "@me"], FilteredGhCommand::RunList),
+            (
+                &["run", "list"],
+                &["--status", "failure"],
+                FilteredGhCommand::RunList,
+            ),
+            (
+                &["run", "list"],
+                &["-s", "failure"],
+                FilteredGhCommand::RunList,
+            ),
+            (
+                &["run", "list"],
+                &["--user", "@me"],
+                FilteredGhCommand::RunList,
+            ),
             (&["run", "list"], &["-u", "@me"], FilteredGhCommand::RunList),
-            (&["run", "list"], &["--workflow", "ci.yml"], FilteredGhCommand::RunList),
-            (&["run", "list"], &["-w", "ci.yml"], FilteredGhCommand::RunList),
-            (&["run", "view", "123"], &["--attempt", "2"], FilteredGhCommand::RunView),
-            (&["run", "view", "123"], &["-a", "2"], FilteredGhCommand::RunView),
-            (&["run", "view", "123"], &["--exit-status"], FilteredGhCommand::RunView),
-            (&["repo", "view", "o/r"], &["--branch", "main"], FilteredGhCommand::RepoView),
-            (&["repo", "view", "o/r"], &["-b", "main"], FilteredGhCommand::RepoView),
+            (
+                &["run", "list"],
+                &["--workflow", "ci.yml"],
+                FilteredGhCommand::RunList,
+            ),
+            (
+                &["run", "list"],
+                &["-w", "ci.yml"],
+                FilteredGhCommand::RunList,
+            ),
+            (
+                &["run", "view", "123"],
+                &["--attempt", "2"],
+                FilteredGhCommand::RunView,
+            ),
+            (
+                &["run", "view", "123"],
+                &["-a", "2"],
+                FilteredGhCommand::RunView,
+            ),
+            (
+                &["run", "view", "123"],
+                &["--exit-status"],
+                FilteredGhCommand::RunView,
+            ),
+            (
+                &["repo", "view", "o/r"],
+                &["--branch", "main"],
+                FilteredGhCommand::RepoView,
+            ),
+            (
+                &["repo", "view", "o/r"],
+                &["-b", "main"],
+                FilteredGhCommand::RepoView,
+            ),
         ];
 
         for (prefix, flag_args, command) in cases {
             let mut args = prefix.to_vec();
             args.extend_from_slice(flag_args);
-            assert_eq!(classify(&argv(&args)), filtered(*command, 2), "args: {args:?}");
+            assert_eq!(
+                classify(&argv(&args)),
+                filtered(*command, 2),
+                "args: {args:?}"
+            );
         }
     }
 
@@ -355,7 +638,11 @@ mod tests {
             &["pr", "list", "--draft=true"][..],
             &["pr", "checks", "--required=true"][..],
         ] {
-            assert_eq!(classify(&argv(args)), GhRoute::Passthrough, "args: {args:?}");
+            assert_eq!(
+                classify(&argv(args)),
+                GhRoute::Passthrough,
+                "args: {args:?}"
+            );
         }
     }
 
@@ -413,7 +700,11 @@ mod tests {
         ];
 
         for args in cases {
-            assert_eq!(classify(&argv(args)), GhRoute::Passthrough, "args: {args:?}");
+            assert_eq!(
+                classify(&argv(args)),
+                GhRoute::Passthrough,
+                "args: {args:?}"
+            );
         }
     }
 

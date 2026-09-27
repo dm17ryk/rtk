@@ -66,10 +66,10 @@ fn dir_uses_supported_detailed_layout(arguments: &str) -> bool {
             continue;
         }
         if !in_quotes && character.is_whitespace() {
-            if let Some(start) = token_start.take() {
-                if !dir_switch_token_is_supported(&arguments[start..index]) {
-                    return false;
-                }
+            if let Some(start) = token_start.take()
+                && !dir_switch_token_is_supported(&arguments[start..index])
+            {
+                return false;
             }
         } else if !in_quotes && token_start.is_none() {
             token_start = Some(index);
