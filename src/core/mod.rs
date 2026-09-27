@@ -12,6 +12,7 @@ mod lossless_tee;
 pub mod path_inventory;
 pub mod retriever;
 pub mod runner;
+pub mod shell;
 pub mod stream;
 pub mod tee;
 pub mod tee_file;

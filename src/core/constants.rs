@@ -38,4 +38,6 @@ pub const RTK_META_COMMANDS: &[&str] = &[
     "mcp",
     "dashboard",
     "doctor",
+    "err",
+    "summary",
 ];

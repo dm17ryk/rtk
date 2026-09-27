@@ -160,7 +160,13 @@ exit 2"#,
 #[test]
 fn lint_issues_are_summarised_and_exit_zero() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let issues = r#"{"Issues":[{"FromLinter":"errcheck","Text":"unchecked","Pos":{"Filename":"main.go","Line":1,"Column":1},"SourceLines":["x()"],"Severity":""}]}"#;
+    // Keep the native payload larger than its summary so the never-worse
+    // guard exercises summarisation rather than its intentional raw fallback.
+    let issues = serde_json::json!({"Issues":[{
+        "FromLinter":"errcheck", "Text":"unchecked",
+        "Pos":{"Filename":"main.go","Line":1,"Column":1},
+        "SourceLines":["x() // source context ".repeat(30)], "Severity":""
+    }]});
     fake_golangci(dir.path(), &format!("echo '{issues}'\nexit 1"));
 
     let out = rtk_with(dir.path(), &["golangci-lint", "run"]);

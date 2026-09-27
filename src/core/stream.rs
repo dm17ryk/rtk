@@ -747,8 +747,13 @@ pub fn run_streaming_with_line_cap(
         StdinMode::Inherit => {
             cmd.stdin(Stdio::inherit());
         }
-        StdinMode::Filter(_) | StdinMode::Null => {
+        StdinMode::Filter(_) => {
             cmd.stdin(Stdio::piped());
+        }
+        StdinMode::Null => {
+            // A closed pipe is still readable stdin to tools such as ripgrep,
+            // which would search that empty pipe instead of the working directory.
+            cmd.stdin(Stdio::null());
         }
     }
     cmd.stdout(Stdio::piped());

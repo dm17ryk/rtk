@@ -22,6 +22,6 @@ src/cmds/system/ls.rs	prints=1	stdout_handles=0	fingerprint=2228312b7fc4ed1d
 src/cmds/system/pipe_cmd.rs	prints=1	stdout_handles=1	fingerprint=89389e737db59be8
 src/cmds/system/read.rs	prints=2	stdout_handles=3	fingerprint=3d342a5ceb051053
 src/cmds/system/search.rs	prints=4	stdout_handles=0	fingerprint=f02d3f941fc3a38c
-src/cmds/system/summary.rs	prints=1	stdout_handles=0	fingerprint=b4067b75ea6a1edc
+src/cmds/system/summary.rs	prints=2	stdout_handles=0	fingerprint=782c795e016c9671
 src/cmds/system/wc_cmd.rs	prints=1	stdout_handles=0	fingerprint=2e5ab82564afa879
 src/cmds/windows/orchestrator.rs	prints=0	stdout_handles=1	fingerprint=1f93a3e04a94b2c9
