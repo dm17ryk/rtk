@@ -2104,6 +2104,15 @@ fn selected_mcp_client(
     }
 }
 
+fn is_native_test_expression(command: &[String]) -> bool {
+    // `!` and `(` are also shell syntax. Route to the native utility only
+    // when the expression following those prefixes starts with an operator.
+    command
+        .iter()
+        .find(|arg| !matches!(arg.as_str(), "!" | "("))
+        .is_some_and(|arg| arg.starts_with('-'))
+}
+
 fn run_cli() -> Result<i32> {
     // Fire-and-forget telemetry ping (1/day, non-blocking)
     core::telemetry::maybe_ping();
@@ -2431,8 +2440,25 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Test { command } => {
-            let cmd = command.join(" ");
-            runner::run_test(&cmd, cli.verbose)?
+            let native = is_native_test_expression(&command);
+            if service::debug_enabled() {
+                eprintln!(
+                    "[rtk-debug] test.route decision={} argc={} argv={command:?}",
+                    if native {
+                        "native-expression"
+                    } else {
+                        "test-runner"
+                    },
+                    command.len()
+                );
+            }
+            if native {
+                let args: Vec<OsString> = command.into_iter().map(OsString::from).collect();
+                core::runner::run_passthrough("test", &args, cli.verbose)?
+            } else {
+                let cmd = command.join(" ");
+                runner::run_test(&cmd, cli.verbose)?
+            }
         }
 
         Commands::Json {
@@ -3623,6 +3649,24 @@ mod tests {
     use super::*;
     use clap::Parser;
     use std::cell::Cell;
+
+    #[test]
+    fn native_test_expression_routes_operators_but_keeps_shell_commands() {
+        for (args, native) in [
+            (vec!["-d", "dir"], true),
+            (vec!["-f", "a file"], true),
+            (vec!["!", "-d", "dir"], true),
+            (vec!["(", "!", "-d", "dir", ")"], true),
+            (vec!["!", "false"], false),
+            (vec!["(", "true", ")"], false),
+            (vec!["cargo", "test"], false),
+            (vec!["!", "("], false),
+            (vec![], false),
+        ] {
+            let command: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+            assert_eq!(is_native_test_expression(&command), native, "{args:?}");
+        }
+    }
 
     #[test]
     fn lossy_toml_document_preserves_text_and_exact_counts() {
