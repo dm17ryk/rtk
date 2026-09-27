@@ -6,7 +6,7 @@
 //! branch on it -- and `rewrite_cmd`'s in-module `exit_code_protocol` asserts
 //! against a hand-copied `expected_exit_code()` table without ever calling
 //! `run()`. These tests spawn the real binary in a sandboxed
-//! HOME/CLAUDE_CONFIG_DIR and pin the actual `(exit code, stdout)` pairs,
+//! HOME/USERPROFILE/CLAUDE_CONFIG_DIR/CODEX_HOME and pin the actual `(exit code, stdout)` pairs,
 //! including the #1155 invariant that a `Default` verdict exits 3 and never 0.
 
 use std::path::PathBuf;
@@ -73,6 +73,8 @@ impl Sandbox {
             .args(args)
             .current_dir(&self.project)
             .env("HOME", &self.home)
+            .env("USERPROFILE", &self.home)
+            .env("CODEX_HOME", self.home.join(".codex"))
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
             .env("CLAUDE_CONFIG_DIR", &self.claude_home)
             .env("RTK_DB_PATH", self.project.join("rtk.db"))
@@ -138,6 +140,8 @@ impl Sandbox {
             .args(["hook", "claude"])
             .current_dir(&self.project)
             .env("HOME", &self.home)
+            .env("USERPROFILE", &self.home)
+            .env("CODEX_HOME", self.home.join(".codex"))
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
             .env("CLAUDE_CONFIG_DIR", &self.claude_home)
             .env("RTK_DB_PATH", self.project.join("rtk.db"))
@@ -482,9 +486,14 @@ mod hook_check {
             "antigravity",
             "kimi",
         ] {
-            let (code, stdout, _) = sb.run(&["hook", "check", "--agent", agent, "git status"]);
+            let (code, stdout, stderr) = sb.run(&["hook", "check", "--agent", agent, "git status"]);
             if agent == "codex" {
-                assert_eq!(code, 0);
+                // Codex reports installation status, so a bare sandbox is not ready.
+                assert_eq!(
+                    code, 1,
+                    "agent: {agent}; stdout: {stdout}; stderr: {stderr}"
+                );
+                assert!(stdout.contains("Codex PreToolUse hook: missing-config"));
                 assert!(stdout.contains("only permission_mode=bypassPermissions"));
                 assert!(stdout.contains("unchanged (permission mode is supplied by Codex)"));
                 continue;
@@ -494,6 +503,51 @@ mod hook_check {
                 (0, "rtk git status"),
                 "agent: {agent}"
             );
+        }
+    }
+
+    #[test]
+    fn codex_check_reports_sandbox_installation_status_and_permission_policy() {
+        let installed = r#"
+[[hooks.PreToolUse]]
+matcher = "Bash"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "rtk hook codex"
+"#;
+        for (config, status, expected_code) in [
+            (None, "missing-config", 1),
+            (Some(""), "missing-hook", 1),
+            (Some(installed), "ready", 0),
+        ] {
+            let sb = Sandbox::bare();
+            if let Some(config) = config {
+                let codex_home = sb.home.join(".codex");
+                std::fs::create_dir_all(&codex_home).expect("mkdir sandbox Codex home");
+                std::fs::write(codex_home.join("config.toml"), config)
+                    .expect("write sandbox Codex config");
+            }
+            for command in [None, Some("git status")] {
+                let mut args = vec!["hook", "check", "--agent", "codex"];
+                if let Some(command) = command {
+                    args.push(command);
+                }
+                let (code, stdout, stderr) = sb.run(&args);
+                assert_eq!(
+                    code, expected_code,
+                    "status: {status}; args: {args:?}; stdout: {stdout}; stderr: {stderr}"
+                );
+                let mut expected = format!(
+                    "Codex PreToolUse hook: {status}\n\
+                     Codex rewrite policy: only permission_mode=bypassPermissions; approval-mode calls remain unchanged\n"
+                );
+                if command.is_some() {
+                    expected.push_str(
+                        "Codex command check: unchanged (permission mode is supplied by Codex)\n",
+                    );
+                }
+                assert_eq!(stdout, expected, "status: {status}; args: {args:?}");
+            }
         }
     }
 
