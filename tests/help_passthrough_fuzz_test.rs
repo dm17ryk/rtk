@@ -529,6 +529,17 @@ fn a_tools_own_dash_h_is_still_filtered() {
     std::fs::write(dir.join("two.txt"), "y\n").expect("write");
     let path = dir.to_string_lossy().into_owned();
 
+    // Make filtering observable even when the semantic renderer correctly
+    // replays a tiny native listing because compact framing would cost more.
+    std::fs::create_dir(dir.join("node_modules")).expect("noise directory");
+    for i in 0..40 {
+        std::fs::write(
+            dir.join("node_modules").join(format!("noise_{i}.txt")),
+            "noise",
+        )
+        .expect("noise file");
+    }
+
     for (tool, args) in [("ls", vec!["-h", &path]), ("tree", vec!["-h", &path])] {
         let Some(native) = on_path(tool) else {
             continue;

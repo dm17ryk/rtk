@@ -55,6 +55,23 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     let is_format = args.iter().any(|a| a == "format");
     let is_analyze_graph = is_analyze_graph_invocation(args);
+    if is_analyze_graph {
+        // Graph consumers need the complete JSON, including its original framing.
+        if verbose > 0 {
+            eprintln!(
+                "ruff route=native reason=analyze-graph args={}",
+                display_args(args)
+            );
+        }
+        let argv = args
+            .iter()
+            .map(std::ffi::OsString::from)
+            .collect::<Vec<_>>();
+        return runner::run_passthrough("ruff", &argv, verbose);
+    }
+    if verbose > 0 {
+        eprintln!("ruff route=semantic check={is_check} format={is_format}");
+    }
 
     let mut cmd = resolved_command("ruff");
 

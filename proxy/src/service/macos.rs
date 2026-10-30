@@ -91,6 +91,7 @@ pub fn uninstall() -> Result<bool> {
         return Ok(false);
     }
     let _ = Command::new("launchctl").arg("unload").arg(&path).status();
+    // nosemgrep: filesystem-deletion -- Explicit uninstall removes only the fixed rtk-proxy launch agent written by install.
     std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
     Ok(true)
 }

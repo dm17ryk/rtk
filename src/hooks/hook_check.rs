@@ -660,6 +660,7 @@ mod tests {
             );
 
             // Once removed, check_and_warn warns and touches the daily marker
+            // nosemgrep: filesystem-deletion -- Test-only removal of fixtures inside the isolated temporary profile.
             std::fs::remove_file(&opencode_plugin).unwrap();
             check_and_warn();
             assert!(
@@ -722,6 +723,7 @@ mod tests {
                 !is_any_agent_configured(),
                 "unregistered cursor script must not count as configured"
             );
+            // nosemgrep: filesystem-deletion -- Test-only removal of fixtures inside the isolated temporary profile.
             std::fs::remove_file(cursor_hooks.join("rtk-rewrite.sh")).unwrap();
 
             std::fs::write(
@@ -730,6 +732,7 @@ mod tests {
             )
             .unwrap();
             assert!(is_any_agent_configured(), "cursor hooks.json");
+            // nosemgrep: filesystem-deletion -- Test-only removal of fixtures inside the isolated temporary profile.
             std::fs::remove_file(home.join(".cursor/hooks.json")).unwrap();
             assert!(!is_any_agent_configured(), "cursor removed");
         });
@@ -762,6 +765,7 @@ mod tests {
             assert!(!is_any_agent_configured(), "gemini non-shell matcher");
 
             // Unregistered script file alone must be rejected
+            // nosemgrep: filesystem-deletion -- Test-only removal of fixtures inside the isolated temporary profile.
             std::fs::remove_file(home.join(".gemini/settings.json")).unwrap();
             let gemini_hooks = home.join(".gemini/hooks");
             std::fs::create_dir_all(&gemini_hooks).unwrap();
@@ -778,6 +782,7 @@ mod tests {
             )
             .unwrap();
             assert!(is_any_agent_configured(), "codex configured");
+            // nosemgrep: filesystem-deletion -- Test-only removal of fixtures inside the isolated temporary profile.
             std::fs::remove_file(home.join(".codex/hooks.json")).unwrap();
             assert!(!is_any_agent_configured(), "codex removed");
         });
@@ -815,6 +820,7 @@ mod tests {
             std::fs::create_dir_all(plugin_init.parent().unwrap()).unwrap();
             std::fs::write(&plugin_init, "# plugin\n").unwrap();
             assert!(is_any_agent_configured(), "hermes plugin file arm");
+            // nosemgrep: filesystem-deletion -- Test-only removal of fixtures inside the isolated temporary profile.
             std::fs::remove_file(&plugin_init).unwrap();
             assert!(!is_any_agent_configured(), "hermes plugin file removed");
 
@@ -842,6 +848,7 @@ mod tests {
             )
             .unwrap();
             assert!(is_any_agent_configured(), "pi local");
+            // nosemgrep: filesystem-deletion -- Test-only removal of fixtures inside the isolated temporary profile.
             std::fs::remove_file(user_dirs::in_working_dir(".pi/extensions/rtk.ts")).unwrap();
             assert!(!is_any_agent_configured(), "pi local removed");
 
@@ -852,6 +859,7 @@ mod tests {
             )
             .unwrap();
             assert!(is_any_agent_configured(), "pi global");
+            // nosemgrep: filesystem-deletion -- Test-only removal of fixtures inside the isolated temporary profile.
             std::fs::remove_file(
                 user_dirs::home()
                     .unwrap()
@@ -867,6 +875,7 @@ mod tests {
             )
             .unwrap();
             assert!(is_any_agent_configured(), "omp local");
+            // nosemgrep: filesystem-deletion -- Test-only removal of fixtures inside the isolated temporary profile.
             std::fs::remove_file(user_dirs::in_working_dir(".omp/extensions/rtk.ts")).unwrap();
             assert!(!is_any_agent_configured(), "omp local removed");
 
@@ -877,6 +886,7 @@ mod tests {
             )
             .unwrap();
             assert!(is_any_agent_configured(), "omp global");
+            // nosemgrep: filesystem-deletion -- Test-only removal of fixtures inside the isolated temporary profile.
             std::fs::remove_file(
                 user_dirs::home()
                     .unwrap()

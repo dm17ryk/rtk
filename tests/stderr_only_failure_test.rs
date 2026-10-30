@@ -348,11 +348,10 @@ fn filtered_report_ends_with_exactly_one_newline() {
     );
 }
 
-/// ruff's `[]` is the empty form of the JSON rtk asked ruff for, so the clean-run summary
-/// replaces it even though it is longer, and is printed with its one terminator. ruff runs
-/// without a tee label: this is the plain print path, not the recovery-hint one.
+/// The semantic contract replays tiny native output when its summary would
+/// cost more tokens. The empty Ruff JSON keeps exactly its native terminator.
 #[test]
-fn injected_clean_output_prints_the_summary_once_terminated() {
+fn injected_clean_output_keeps_the_smaller_native_json_once_terminated() {
     let dir = tempfile::tempdir().expect("tempdir");
     fake_tool(dir.path(), "ruff", "echo '[]'");
 
@@ -360,7 +359,7 @@ fn injected_clean_output_prints_the_summary_once_terminated() {
 
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "Ruff: No issues found\n",
+        "[]\n",
         "{}",
         context(&out)
     );

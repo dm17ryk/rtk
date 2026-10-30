@@ -352,6 +352,7 @@ pub fn set_eval_candidate(name: Option<&str>) -> std::io::Result<()> {
             }
             std::fs::write(&path, format!("{{\"candidate\":{:?}}}", name))
         }
+        // nosemgrep: filesystem-deletion -- Clear RTK-owned evaluation state when the candidate is unset.
         None => match std::fs::remove_file(&path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
@@ -853,6 +854,7 @@ pub fn write_status(loaded: &LoadedPipeline) {
         return;
     };
     if loaded.diagnostics.is_empty() && !loaded.fell_back {
+        // nosemgrep: filesystem-deletion -- Remove RTK-owned stale pipeline diagnostics after a clean load.
         let _ = std::fs::remove_file(&path);
         return;
     }

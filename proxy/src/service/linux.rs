@@ -54,6 +54,7 @@ pub fn uninstall() -> Result<bool> {
     let _ = Command::new("systemctl")
         .args(["--user", "disable", "--now", UNIT_NAME])
         .status();
+    // nosemgrep: filesystem-deletion -- Explicit uninstall removes only the fixed rtk-proxy user unit written by install.
     std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
     let _ = Command::new("systemctl")
         .args(["--user", "daemon-reload"])

@@ -84,6 +84,7 @@ fn move_file(from: &std::path::Path, to: &std::path::Path) -> Option<()> {
         return Some(());
     }
     std::fs::copy(from, to).ok()?;
+    // nosemgrep: filesystem-deletion -- Remove the stray database source only after its copy to the canonical path succeeded.
     let _ = std::fs::remove_file(from);
     Some(())
 }

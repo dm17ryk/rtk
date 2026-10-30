@@ -364,11 +364,11 @@ mod unix {
                 )
             }),
             // Codex's shell tool is `Bash`, and the payload must name a
-            // permission mode; `"tool_name":"shell"` is ignored outright, so a
+            // bypass permission mode; `"tool_name":"shell"` is ignored outright, so a
             // row sending that would pass whatever the Codex path decides.
             ("codex", |cmd| {
                 format!(
-                    r#"{{"hook_event_name":"PreToolUse","tool_name":"Bash","permission_mode":"default","tool_input":{{"command":{}}}}}"#,
+                    r#"{{"hook_event_name":"PreToolUse","tool_name":"Bash","permission_mode":"bypassPermissions","tool_input":{{"command":{}}}}}"#,
                     json_string(cmd)
                 )
             }),

@@ -2490,6 +2490,7 @@ mod tests {
                 if fs::read_to_string(&hook_path).is_ok() {
                     perms.set_mode(0o644);
                     let _ = fs::set_permissions(&hook_path, perms);
+                    // nosemgrep: filesystem-deletion -- Test-only fixture replacement inside the isolated temporary profile.
                     fs::remove_file(&hook_path).expect("remove file");
                     fs::create_dir_all(&hook_path).expect("create dir at hook_path");
                     assert_eq!(

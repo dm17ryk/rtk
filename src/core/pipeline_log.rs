@@ -60,6 +60,7 @@ pub fn set_enabled(on: bool) -> std::io::Result<()> {
         }
         std::fs::write(&marker, b"")
     } else {
+        // nosemgrep: filesystem-deletion -- Disable logging by removing only its RTK-owned enable marker.
         match std::fs::remove_file(&marker) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),

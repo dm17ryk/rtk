@@ -872,6 +872,7 @@ pub fn run_promote(name: &str, discard: bool, force: bool) -> Result<i32> {
         }
     };
     if discard {
+        // nosemgrep: filesystem-deletion -- Explicit discard removes the validated named shadow pipeline, never an arbitrary path.
         std::fs::remove_file(&spath).with_context(|| format!("remove {}", spath.display()))?;
         clear_candidate();
         println!("discarded the shadow install of `{name}` — nothing was ever applied");

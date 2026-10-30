@@ -1,13 +1,12 @@
-//! `--` handling for `rtk gh`. clap carves the `subcommand` positional out of the same trailing
-//! region as `args`, so restoring the stripped `--` over `args` alone shifts the region one token
-//! and duplicates the subcommand. The one `--` clap strips is rtk's own option terminator —
-//! `trailing_var_arg` keeps every later one — so it must not reach gh. Stubs `gh` on PATH with a
-//! script that records its argv.
-
-#![cfg(unix)]
+//! Native argument boundaries for the fork's universal `rtk gh` route.
+//! Clap consumes RTK's leading option terminator. Once the gh arguments have
+//! started, every later `--` belongs to gh and must remain byte-for-byte intact.
+//! Explicit boundaries select passthrough without injecting output flags.
+//! Stubs `gh` on PATH with a script that records its argv.
 
 mod common;
 
+#[cfg(unix)]
 fn shell_quote(path: &std::path::Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
@@ -18,25 +17,35 @@ fn gh_argv(args: &[&str]) -> Vec<String> {
     let argv_file = dir.path().join("argv.txt");
     let stub_path = dir.path().join("gh");
 
+    #[cfg(unix)]
+    {
+        std::fs::write(
+            &stub_path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nexit 0\n",
+                shell_quote(&argv_file)
+            ),
+        )
+        .expect("write stub");
+        let mut perms = std::fs::metadata(&stub_path)
+            .expect("stat stub")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&stub_path, perms).expect("chmod stub");
+    }
+    #[cfg(windows)]
     std::fs::write(
-        &stub_path,
+        stub_path.with_extension("cmd"),
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nexit 0\n",
-            shell_quote(&argv_file)
+            "@echo off\r\n(for %%A in (%*) do @echo %%~A) > \"{}\"\r\nexit /b 0\r\n",
+            argv_file.display()
         ),
     )
     .expect("write stub");
-    let mut perms = std::fs::metadata(&stub_path)
-        .expect("stat stub")
-        .permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-    std::fs::set_permissions(&stub_path, perms).expect("chmod stub");
-
-    let path_with_stub = format!(
-        "{}:{}",
-        dir.path().display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let path_with_stub = std::env::join_paths(std::iter::once(dir.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .expect("PATH with gh stub");
 
     let out = common::rtk_command()
         .env("PATH", path_with_stub)
@@ -72,17 +81,17 @@ fn gh_double_dash_before_subcommand_is_dropped() {
 }
 
 #[test]
-fn gh_double_dash_after_subcommand_is_dropped() {
+fn gh_double_dash_after_subcommand_is_preserved() {
     let argv = gh_argv(&["gh", "api", "--", "repos/o/r"]);
-    assert_eq!(argv, vec!["api", "repos/o/r"]);
+    assert_eq!(argv, vec!["api", "--", "repos/o/r"]);
 }
 
 #[test]
-fn gh_double_dash_after_subcommand_is_dropped_before_a_flag() {
-    // gh reads everything past `--` as a positional, so this spelling is `accepts 1 arg(s),
-    // received 3` on gh 2.46 and 2.100 while `gh api repos/o/r --jq .name` works.
+fn gh_double_dash_after_subcommand_is_preserved_before_a_flag() {
+    // Once gh arguments have started, RTK preserves the native boundary, even
+    // when gh itself rejects the spelling. A wrapper must not repair user argv.
     let argv = gh_argv(&["gh", "api", "--", "repos/o/r", "--jq", ".name"]);
-    assert_eq!(argv, vec!["api", "repos/o/r", "--jq", ".name"]);
+    assert_eq!(argv, vec!["api", "--", "repos/o/r", "--jq", ".name"]);
 }
 
 #[test]
@@ -122,15 +131,10 @@ fn gh_lone_escaped_flag_is_not_hoisted_on_the_run_grammar() {
 }
 
 #[test]
-fn gh_lone_escaped_identifier_is_still_hoisted() {
-    // Unescaping a token gh reads as a positional anyway is what lets rtk inject `--json`
-    // rather than pass the command through.
+fn gh_lone_escaped_identifier_keeps_native_boundary() {
+    // Explicit native boundaries choose passthrough; no JSON flags are injected.
     let argv = gh_argv(&["gh", "pr", "view", "--", "42"]);
-    assert_eq!(argv[..3], ["pr", "view", "42"]);
-    assert!(
-        argv.iter().any(|a| a == "--json"),
-        "the escaped identifier must still be hoisted: {argv:?}"
-    );
+    assert_eq!(argv, vec!["pr", "view", "--", "42"]);
 }
 
 #[test]

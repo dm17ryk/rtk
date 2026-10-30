@@ -829,7 +829,7 @@ mod command_tests {
             .split_once("::")
             .expect("a module inside the crate");
         let exe = std::env::current_exe().expect("the test executable");
-        // nosemgrep: dynamic-command-execution — this test binary, run again with hello.cmd on PATH
+        // nosemgrep: dynamic-command-execution, path-env-manipulation -- Re-run this test binary with its temporary hello.cmd fixture first on PATH.
         let output = std::process::Command::new(exe)
             .arg("--exact")
             .arg(format!("{module}::a_cmd_wrapper_on_path_is_run"))
