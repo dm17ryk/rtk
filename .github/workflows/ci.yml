@@ -104,6 +104,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # This runs the same integration tests as the Linux matrix job. Their
+      # native search and fish-shell cases need the same tools in both editions.
+      - name: Install test tools (Ubuntu)
+        run: sudo apt-get update && sudo apt-get install -y ripgrep fish
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --no-default-features --all-targets
       - run: cargo test --no-default-features
