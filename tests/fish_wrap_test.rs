@@ -4,6 +4,68 @@
 
 mod common;
 
+const SWAP_RULE: &str = r#"[upstream.haiku]
+provider = "anthropic"
+model = "claude-haiku-4-5"
+
+[task.check-build]
+kind = "digest"
+upstream = "haiku"
+
+[[hook.before_tool.shell]]
+name = "swap-git"
+when = { command_matches = "git status" }
+action = "route"
+task = "check-build"
+mode = "swap"
+"#;
+
+fn assert_swap_matches_edition(output: &std::process::Output) {
+    assert!(output.status.success(), "hook failed: {output:?}");
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("hook response JSON");
+    let command = payload["hookSpecificOutput"]["updatedInput"]["command"]
+        .as_str()
+        .expect("rewritten command");
+    if cfg!(feature = "engine") {
+        assert!(
+            command.starts_with("rtk check-build "),
+            "pipeline swap must fire: {command}"
+        );
+    } else {
+        assert_eq!(
+            command, "rtk git status",
+            "Apache-only hooks must ignore engine pipeline rules"
+        );
+    }
+}
+
+/// Exercise the edition boundary even on platforms where the fish-shell tests
+/// do not run. A configured engine pipeline is inert in the Apache-only build.
+#[test]
+fn pipeline_swap_respects_the_build_edition() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let config = common::tempdir();
+    std::fs::write(config.path().join("pipeline.toml"), SWAP_RULE).expect("pipeline fixture");
+    let mut child = common::rtk_command()
+        .args(["hook", "claude"])
+        .env("RTK_CONFIG_DIR", config.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Claude hook");
+    child
+        .stdin
+        .take()
+        .expect("hook stdin")
+        .write_all(br#"{"tool_name":"Bash","tool_input":{"command":"git status"}}"#)
+        .expect("write hook payload");
+    assert_swap_matches_edition(&child.wait_with_output().expect("hook response"));
+}
+
 #[cfg(unix)]
 mod unix {
     use std::process::{Command, Output};
@@ -441,35 +503,20 @@ mod unix {
         if which::which("fish").is_err() {
             return;
         }
-        const RULE: &str = r#"[upstream.haiku]
-provider = "anthropic"
-model = "claude-haiku-4-5"
 
-[task.check-build]
-kind = "digest"
-upstream = "haiku"
-
-[[hook.before_tool.shell]]
-name = "swap-git"
-when = { command_matches = "git status" }
-action = "route"
-task = "check-build"
-mode = "swap"
-"#;
         // dirs::config_dir() resolves differently per platform; cover both.
         let home = home_with(&[
-            ("rtk/pipeline.toml", RULE),
-            ("Library/Application Support/rtk/pipeline.toml", RULE),
+            ("rtk/pipeline.toml", super::SWAP_RULE),
+            (
+                "Library/Application Support/rtk/pipeline.toml",
+                super::SWAP_RULE,
+            ),
         ]);
 
-        // The control: a plain command the rule matches is swapped, so the
-        // rule is live and the gate is the thing being exercised.
+        // Full builds apply the live swap rule; Apache-only builds keep the
+        // ordinary rewrite. Both editions must still refuse to swap a fish script.
         let swapped = hook_stdin("claude", &claude_payload("git status"), &home);
-        assert!(
-            String::from_utf8_lossy(&swapped.stdout).contains("rtk check-build"),
-            "control: the swap rule must fire: {}",
-            String::from_utf8_lossy(&swapped.stdout)
-        );
+        super::assert_swap_matches_edition(&swapped);
 
         // A fish chain the same rule matches is not swapped into `sh -c`.
         let output = hook_stdin("claude", &claude_payload(FISH_CHAIN), &home);

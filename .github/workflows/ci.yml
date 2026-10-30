@@ -110,7 +110,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ripgrep fish
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --no-default-features --all-targets
-      - run: cargo test --no-default-features
+      - run: cargo test --no-default-features --no-fail-fast
       # Match the crate-name column, not the whole line: the checkout path
       # can contain 'rtk-engine', which would match every line's path and
       # fail a clean tree.
