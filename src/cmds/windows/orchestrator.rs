@@ -37,9 +37,9 @@ impl SegmentStdout {
 
 #[cfg(debug_assertions)]
 fn observe_test_lossless_publication(stdout: &SegmentStdout) {
-    let (Some(path), Ok(directory)) = (
+    let (Some(path), Some(directory)) = (
         stdout.lossless_path(),
-        std::env::var("RTK_TEST_TEE_PUBLICATION_DIR"),
+        crate::core::user_env::var("RTK_TEST_TEE_PUBLICATION_DIR"),
     ) else {
         return;
     };
@@ -213,11 +213,19 @@ fn is_nested_cmd_syntax(character: char) -> bool {
 }
 
 fn prepare_hidden_transport(arguments: &[String]) -> Result<Invocation> {
-    prepare_hidden_transport_with_options(arguments, |key| std::env::var_os(key).is_some(), false)
+    prepare_hidden_transport_with_options(
+        arguments,
+        |key| crate::core::user_env::var_os(key).is_some(),
+        false,
+    )
 }
 
 fn prepare_hidden_transport_forced(arguments: &[String]) -> Result<Invocation> {
-    prepare_hidden_transport_with_options(arguments, |key| std::env::var_os(key).is_some(), true)
+    prepare_hidden_transport_with_options(
+        arguments,
+        |key| crate::core::user_env::var_os(key).is_some(),
+        true,
+    )
 }
 
 fn resolve_direct_external(arguments: &[String]) -> Option<std::path::PathBuf> {
@@ -587,7 +595,7 @@ pub(crate) fn rewrite_expression_for_command_line(
 
 fn agent_output_requested() -> bool {
     matches!(
-        std::env::var("RTK_OUTPUT_AUDIENCE").ok().as_deref(),
+        crate::core::user_env::var("RTK_OUTPUT_AUDIENCE").as_deref(),
         Some("agent")
     )
 }

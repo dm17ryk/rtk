@@ -1,10 +1,12 @@
 //! End-to-end checks for the native Codex hook protocol.
 
+mod common;
+
 use std::io::Write;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 fn run_hook(args: &[&str], input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut child = common::rtk_command()
         .args(args)
         .env("LC_ALL", "C")
         .stdin(Stdio::piped())

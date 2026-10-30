@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 /// Read-only integration inspection. Presence is deliberately not promoted to live verification.
 pub fn inspect(agent: &str) -> Map<String, Value> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let codex_home = std::env::var_os("CODEX_HOME")
+    let home = crate::core::user_dirs::home().unwrap_or_else(|| PathBuf::from("."));
+    let codex_home = crate::core::user_dirs::env_path("CODEX_HOME")
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| home.join(".codex"));

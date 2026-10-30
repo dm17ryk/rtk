@@ -795,6 +795,7 @@ mod tests {
                 avg_savings_pct: 80.0,
                 supported_avg_savings_pct: 80.0,
                 error_count: 0,
+                oversized_excluded: 0,
                 total_time_ms: 50,
                 avg_time_ms: 25,
                 by_command: vec![

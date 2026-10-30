@@ -1,3 +1,5 @@
+mod common;
+
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -10,7 +12,7 @@ fn install_test_rtk(bin_dir: &Path) {
     std::fs::create_dir_all(bin_dir).unwrap();
     let name = if cfg!(windows) { "rtk.exe" } else { "rtk" };
     let destination = bin_dir.join(name);
-    std::fs::copy(env!("CARGO_BIN_EXE_rtk"), &destination).unwrap();
+    std::fs::copy(common::rtk_bin(), &destination).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

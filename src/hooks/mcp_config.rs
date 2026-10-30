@@ -71,25 +71,30 @@ struct McpEnvironment {
 
 impl McpEnvironment {
     fn discover() -> Result<Self> {
-        let home = dirs::home_dir().context(if cfg!(windows) {
+        let home = crate::core::user_dirs::home().context(if cfg!(windows) {
             "Cannot determine home directory. Is %USERPROFILE% set?"
         } else {
             "Cannot determine home directory. Is $HOME set?"
         })?;
-        let config_dir = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
+        let config_dir = crate::core::user_dirs::config()
+            .and_then(|dir| dir.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| home.join(".config"));
 
         Ok(Self {
             vscode_user_dir: config_dir.join("Code").join("User"),
             home,
-            cwd: std::env::current_dir().context("Cannot determine current directory")?,
+            cwd: crate::core::user_dirs::current_dir()
+                .context("Cannot determine current directory")?,
             config_dir,
             rtk_exe: std::env::current_exe()
                 .context("Cannot determine the installed RTK executable path")?,
-            codex_home: nonempty_env_path("CODEX_HOME"),
-            copilot_home: nonempty_env_path("COPILOT_HOME"),
-            hermes_home: nonempty_env_path("HERMES_HOME"),
-            factory_home_override: nonempty_env_path("FACTORY_HOME_OVERRIDE"),
-            kimi_code_home: nonempty_env_path("KIMI_CODE_HOME"),
+            codex_home: nonempty_env_path(crate::core::user_dirs::env_path("CODEX_HOME")),
+            copilot_home: nonempty_env_path(crate::core::user_dirs::env_path("COPILOT_HOME")),
+            hermes_home: nonempty_env_path(crate::core::user_dirs::env_path("HERMES_HOME")),
+            factory_home_override: nonempty_env_path(crate::core::user_dirs::env_path(
+                "FACTORY_HOME_OVERRIDE",
+            )),
+            kimi_code_home: nonempty_env_path(crate::core::user_dirs::env_path("KIMI_CODE_HOME")),
         })
     }
 
@@ -127,10 +132,8 @@ impl McpEnvironment {
     }
 }
 
-fn nonempty_env_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+fn nonempty_env_path(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

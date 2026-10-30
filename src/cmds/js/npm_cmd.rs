@@ -2,6 +2,7 @@
 
 use crate::core::ai_output::BudgetClass;
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
 use std::io::IsTerminal;
@@ -161,7 +162,7 @@ fn run_filtered(
         cmd.env("SKIP_ENV_VALIDATION", "1");
     }
 
-    let args_display = args.join(" ");
+    let args_display = display_args(args);
     if verbose > 0 {
         eprintln!("Running: {} {}", name, args_display);
     }

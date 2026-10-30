@@ -1,5 +1,7 @@
+mod common;
+
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tempfile::tempdir;
 
@@ -15,7 +17,7 @@ fn copy_executable(source: &Path, destination: &Path) {
 }
 
 fn run_unknown_helper(helper: &Path, database: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_rtk"))
+    common::rtk_command()
         .arg(helper)
         .arg("--version")
         .env("RTK_DB_PATH", database)
@@ -31,7 +33,7 @@ fn unknown_exact_fallback_persists_contract_and_reason() {
     } else {
         "exact-helper"
     });
-    copy_executable(Path::new(env!("CARGO_BIN_EXE_rtk")), &helper);
+    copy_executable(common::rtk_bin(), &helper);
     let database = temp.path().join("history.db");
 
     let output = run_unknown_helper(&helper, &database);
@@ -82,7 +84,7 @@ fn toml_semantic_fallback_persists_emission_metadata() {
     let database = temp.path().join("history.db");
     let tee_dir = temp.path().join("lossless artifacts");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let output = common::rtk_command()
         .arg(&helper)
         .args(helper_args)
         .env("RTK_DB_PATH", &database)

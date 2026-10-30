@@ -1,8 +1,10 @@
 //! Bounded, ID-based source and recovery navigation checks.
 
+mod common;
+
 use serde_json::Value;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 fn artifact() -> (tempfile::TempDir, String) {
     let temp = tempfile::tempdir().expect("recovery directory");
@@ -22,7 +24,7 @@ fn artifact() -> (tempfile::TempDir, String) {
 }
 
 fn call_mcp(tee_dir: &std::path::Path, name: &str, arguments: Value) -> Value {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut child = common::rtk_command()
         .arg("mcp")
         .env("RTK_TEE_DIR", tee_dir)
         .stdin(Stdio::piped())
@@ -50,7 +52,7 @@ fn call_mcp(tee_dir: &std::path::Path, name: &str, arguments: Value) -> Value {
 #[test]
 fn cli_range_reads_original_lines_from_a_recovery_id() {
     let (temp, id) = artifact();
-    let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let output = common::rtk_command()
         .args([
             "read",
             "-l",
@@ -277,7 +279,7 @@ fn mcp_recovery_reader_keeps_buffer_boundary_newlines() {
 fn invalid_ranges_fail_without_falling_back_to_a_full_read() {
     let (temp, id) = artifact();
     for range in ["0:5", "10:3", "120", "120:"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let output = common::rtk_command()
             .args(["read", "-l", "none", "--recovery", &id, "--lines", range])
             .env("RTK_TEE_DIR", temp.path())
             .output()

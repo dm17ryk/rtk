@@ -272,7 +272,7 @@ fn default_response_mode() -> ResponseMode {
     if let Some(mode) = CLI_RESPONSE_MODE.get() {
         return *mode;
     }
-    match std::env::var("RTK_MCP_RESPONSE_MODE").ok().as_deref() {
+    match crate::core::user_env::var("RTK_MCP_RESPONSE_MODE").as_deref() {
         Some("legacy") => ResponseMode::Legacy,
         _ => ResponseMode::Compact,
     }

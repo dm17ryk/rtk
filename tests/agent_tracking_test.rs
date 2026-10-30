@@ -1,12 +1,14 @@
 //! Tracking migration and execution-identity checks at process boundaries.
 
+mod common;
+
 use rusqlite::Connection;
 use serde_json::Value;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 fn run_rtk(db: &std::path::Path, args: &[&str], input: Option<&str>) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rtk"));
+    let mut command = common::rtk_command();
     command
         .args(args)
         .env("RTK_DB_PATH", db)
@@ -29,7 +31,7 @@ fn run_rtk(db: &std::path::Path, args: &[&str], input: Option<&str>) -> std::pro
 }
 
 fn call_mcp(db: &std::path::Path) -> Value {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut child = common::rtk_command()
         .arg("mcp")
         .env("RTK_DB_PATH", db)
         .env("RTK_TEE", "0")
@@ -45,7 +47,7 @@ fn call_mcp(db: &std::path::Path) -> Value {
         "params": {
             "name": "run_filtered",
             "arguments": {
-                "rtk_args": ["read", "tests/fixtures/agent_git_status_clean.txt", "-l", "none"],
+                "rtk_args": ["read", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/agent_git_status_clean.txt"), "-l", "none"],
                 "response_mode": "legacy"
             }
         }
@@ -111,7 +113,10 @@ fn old_schema_is_migrated_without_losing_history_and_new_runs_are_linked() {
             "read",
             "-l",
             "none",
-            "tests/fixtures/agent_git_status_clean.txt",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/agent_git_status_clean.txt"
+            ),
         ],
         None,
     );

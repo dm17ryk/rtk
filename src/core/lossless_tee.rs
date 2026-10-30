@@ -4,7 +4,6 @@
 //! the emission contract. Legacy failure hints and SQLite recall live in `tee` and
 //! `retriever`; these artifacts retain the fork's shell-neutral `read --recovery` API.
 
-use super::constants::RTK_DATA_DIR;
 use crate::core::config::Config;
 use std::path::PathBuf;
 use std::sync::{
@@ -63,7 +62,7 @@ fn short_hash(s: &str) -> String {
 
 /// Get the tee directory, respecting config and env overrides.
 pub(crate) fn get_tee_dir(config: &Config) -> Option<PathBuf> {
-    get_tee_dir_with_env(config, std::env::var_os("RTK_TEE_DIR"))
+    get_tee_dir_with_env(config, crate::core::user_env::var_os("RTK_TEE_DIR"))
 }
 
 fn get_tee_dir_with_env(
@@ -81,7 +80,7 @@ fn get_tee_dir_with_env(
     }
 
     // Default: ~/.local/share/rtk/tee/
-    dirs::data_local_dir().map(|d| d.join(RTK_DATA_DIR).join("tee"))
+    crate::core::user_dirs::data().map(|d| d.join("tee"))
 }
 
 /// Rotate old tee files: keep only the last `max_files`, delete oldest.
@@ -193,7 +192,7 @@ fn acquire_lossless_tee_commit_lock(tee_dir: &std::path::Path) -> Option<std::fs
 
 #[cfg(debug_assertions)]
 fn wait_for_test_lossless_tee_commit_lock() {
-    let Ok(directory) = std::env::var("RTK_TEST_TEE_COMMIT_HOLD_DIR") else {
+    let Some(directory) = crate::core::user_env::var("RTK_TEST_TEE_COMMIT_HOLD_DIR") else {
         return;
     };
     let directory = std::path::Path::new(&directory);
@@ -209,7 +208,7 @@ fn wait_for_test_lossless_tee_commit_lock() {
 
 #[cfg(debug_assertions)]
 fn observe_test_lossless_tee_lock_attempt() {
-    let Ok(directory) = std::env::var("RTK_TEST_TEE_COMMIT_HOLD_DIR") else {
+    let Some(directory) = crate::core::user_env::var("RTK_TEST_TEE_COMMIT_HOLD_DIR") else {
         return;
     };
     let marker =
@@ -219,7 +218,7 @@ fn observe_test_lossless_tee_lock_attempt() {
 
 #[cfg(debug_assertions)]
 fn observe_test_lossless_tee_commit(path: &std::path::Path, max_files: usize) {
-    let Ok(directory) = std::env::var("RTK_TEST_TEE_COMMIT_OBSERVATION_DIR") else {
+    let Some(directory) = crate::core::user_env::var("RTK_TEST_TEE_COMMIT_OBSERVATION_DIR") else {
         return;
     };
     if path.is_file() {
@@ -231,8 +230,7 @@ fn observe_test_lossless_tee_commit(path: &std::path::Path, max_files: usize) {
 
 #[cfg(debug_assertions)]
 fn lossless_tee_max_files_for_test(configured: usize) -> usize {
-    std::env::var("RTK_TEST_TEE_MAX_FILES")
-        .ok()
+    crate::core::user_env::var("RTK_TEST_TEE_MAX_FILES")
         .and_then(|value| value.parse().ok())
         .unwrap_or(configured)
 }
@@ -593,7 +591,7 @@ pub(crate) fn resolve_lossless_recovery(identifier: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 fn display_path(path: &std::path::Path) -> String {
-    if let Some(home) = dirs::home_dir()
+    if let Some(home) = crate::core::user_dirs::home()
         && let Ok(relative) = path.strip_prefix(&home)
     {
         return format!("~/{}", relative.display());
@@ -1368,7 +1366,7 @@ mod tests {
 
     #[test]
     fn test_display_shell_path_uses_home_var_for_home_paths_with_spaces() {
-        let Some(home) = dirs::home_dir() else {
+        let Some(home) = crate::core::user_dirs::home() else {
             return;
         };
         let path = home
@@ -1386,7 +1384,7 @@ mod tests {
 
     #[test]
     fn test_format_hint_avoids_backslash_escaped_whitespace() {
-        let Some(home) = dirs::home_dir() else {
+        let Some(home) = crate::core::user_dirs::home() else {
             return;
         };
         let path = home
@@ -1471,7 +1469,7 @@ directory = "/tmp/rtk-tee"
     #[test]
     fn test_force_tee_hint_respects_env_disable() {
         // When RTK_TEE=0, force_tee_hint should return None
-        temp_env::with_var("RTK_TEE", Some("0"), || {
+        crate::core::user_env::with_vars(&[("RTK_TEE", Some("0"))], || {
             let large_output = "x".repeat(1000);
             let hint = force_tee_hint(&large_output, "test_cmd");
             assert!(hint.is_none(), "Should respect RTK_TEE=0");

@@ -3,16 +3,18 @@
 //! These tests use a fake Codex home and the locally built RTK binary.  They
 //! never start a real model or consume an agent/API request.
 
+mod common;
+
 use serde_json::Value;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 fn run_rtk(
     args: &[&str],
     input: Option<&str>,
     codex_home: Option<&std::path::Path>,
 ) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rtk"));
+    let mut command = common::rtk_command();
     command.args(args).env("LC_ALL", "C");
     if let Some(home) = codex_home {
         command.env("CODEX_HOME", home);

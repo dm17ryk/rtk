@@ -57,7 +57,6 @@ pub enum Language {
     Java,
     Ruby,
     Shell,
-    /// Data formats (JSON, YAML, TOML, XML, CSV) — no comment stripping
     Data,
     Unknown,
 }
@@ -456,15 +455,6 @@ impl FilterStrategy for MinimalFilter {
 
 pub struct AggressiveFilter;
 
-static IMPORT_PATTERN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(use |import |from |require\(|#include)").unwrap());
-static FUNC_SIGNATURE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"^(pub\s+)?(async\s+)?(fn|def|function|func|class|struct|enum|trait|interface|type)\s+\w+",
-    )
-    .unwrap()
-});
-
 impl FilterStrategy for AggressiveFilter {
     fn filter(&self, content: &str, lang: &Language) -> String {
         // Data formats (JSON, YAML, etc.) must never be code-filtered
@@ -481,14 +471,14 @@ impl FilterStrategy for AggressiveFilter {
             let trimmed = line.trim();
 
             // Always keep imports
-            if IMPORT_PATTERN.is_match(trimmed) {
+            if rtk_text::is_import_line(trimmed) {
                 result.push_str(line);
                 result.push('\n');
                 continue;
             }
 
             // Always keep function/struct/class signatures
-            if FUNC_SIGNATURE.is_match(trimmed) {
+            if rtk_text::is_func_signature(trimmed) {
                 result.push_str(line);
                 result.push('\n');
                 in_impl_body = true;
@@ -548,8 +538,8 @@ impl FilterStrategy for AggressiveFilter {
         for line in minimal {
             let trimmed = line.text.trim();
 
-            if IMPORT_PATTERN.is_match(trimmed) || FUNC_SIGNATURE.is_match(trimmed) {
-                in_impl_body = FUNC_SIGNATURE.is_match(trimmed);
+            if rtk_text::is_import_line(trimmed) || rtk_text::is_func_signature(trimmed) {
+                in_impl_body = rtk_text::is_func_signature(trimmed);
                 if in_impl_body {
                     brace_depth = 0;
                 }
@@ -597,8 +587,8 @@ pub fn get_filter(level: FilterLevel) -> Box<dyn FilterStrategy> {
 
 fn is_structurally_important(line: &str) -> bool {
     let trimmed = line.trim();
-    FUNC_SIGNATURE.is_match(trimmed)
-        || IMPORT_PATTERN.is_match(trimmed)
+    rtk_text::is_func_signature(trimmed)
+        || rtk_text::is_import_line(trimmed)
         || trimmed.starts_with("pub ")
         || trimmed.starts_with("export ")
         || trimmed == "}"
@@ -631,43 +621,18 @@ pub fn smart_truncate_lines(lines: &[FilteredLine], max_lines: usize) -> Vec<Fil
     result
 }
 
-pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> String {
-    // A zero budget shows nothing, matching `--tail-lines 0`/`--head-lines 0`.
-    // Returning early also keeps `max_lines - 1` below from underflowing.
-    if max_lines == 0 {
-        return String::new();
-    }
-
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.len() <= max_lines {
-        return content.to_string();
-    }
-
-    let numbered = lines
-        .iter()
-        .enumerate()
-        .map(|(index, text)| FilteredLine {
-            original_line: index + 1,
-            text: (*text).to_string(),
-        })
-        .collect::<Vec<_>>();
-    let selected = smart_truncate_lines(&numbered, max_lines);
-    let kept_lines = selected.len();
-    let mut result = selected
-        .iter()
-        .map(|line| line.text.clone())
-        .collect::<Vec<_>>();
-
-    // Single end-of-output marker: not code syntax, unambiguous to AI agents.
-    // Invariant: kept_lines + N == lines.len() (N = lines not shown)
-    result.push(format!("[{} more lines]", lines.len() - kept_lines));
-
-    result.join("\n")
-}
+pub use rtk_text::smart_truncate;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn language_from_extension_covers_data_formats() {
+        assert_eq!(Language::from_extension("rs"), Language::Rust);
+        assert_eq!(Language::from_extension("lock"), Language::Data);
+        assert_eq!(Language::from_extension("xyz"), Language::Unknown);
+    }
 
     #[test]
     fn test_filter_level_parsing() {
@@ -1014,7 +979,7 @@ fn main() {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let output = smart_truncate(&content, max_lines, &Language::Rust);
+        let output = smart_truncate(&content, max_lines);
 
         // Extract the overflow message
         let overflow_line = output
@@ -1050,7 +1015,7 @@ fn main() {
         // 10 plain-text lines, max_lines=3: smart logic keeps first max_lines/2=1 line.
         // (None of the lines match FUNC_SIGNATURE or IMPORT_PATTERN patterns.)
         let input = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n";
-        let output = smart_truncate(input, 3, &Language::Unknown);
+        let output = smart_truncate(input, 3);
         // Must NOT contain old-style "// ... N lines omitted" annotations
         assert!(
             !output.contains("// ..."),
@@ -1065,7 +1030,7 @@ fn main() {
     #[test]
     fn test_smart_truncate_no_truncation_when_under_limit() {
         let input = "a\nb\nc\n";
-        let output = smart_truncate(input, 10, &Language::Unknown);
+        let output = smart_truncate(input, 10);
         assert_eq!(output, input);
         assert!(!output.contains("more lines"));
     }
@@ -1073,7 +1038,7 @@ fn main() {
     #[test]
     fn test_smart_truncate_exact_limit() {
         let input = "a\nb\nc";
-        let output = smart_truncate(input, 3, &Language::Unknown);
+        let output = smart_truncate(input, 3);
         assert_eq!(output, input);
     }
     #[test]

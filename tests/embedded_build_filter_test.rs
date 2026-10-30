@@ -1,11 +1,13 @@
 //! Build/analysis route contracts using an installed native executable.
 
+mod common;
+
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[test]
 fn compiler_route_preserves_selected_executable_and_exit_status() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let output = common::rtk_command()
         .args(["compiler", "--program", "cargo", "--", "--version"])
         .output()
         .expect("run compiler route");
@@ -16,7 +18,7 @@ fn compiler_route_preserves_selected_executable_and_exit_status() {
 
 #[test]
 fn compiler_machine_diagnostic_mode_is_not_summarized() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let output = common::rtk_command()
         .args([
             "compiler",
             "--program",
@@ -36,7 +38,7 @@ fn compiler_machine_diagnostic_mode_is_not_summarized() {
 
 #[test]
 fn build_route_forwards_stdin_to_the_embedded_tool() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut child = common::rtk_command()
         .args(["cmake", "-E", "cat", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

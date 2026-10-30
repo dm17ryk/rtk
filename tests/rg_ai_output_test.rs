@@ -1,3 +1,5 @@
+mod common;
+
 use std::process::Command;
 
 use rusqlite::Connection;
@@ -12,7 +14,7 @@ fn rg_available() -> bool {
 }
 
 fn rtk() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_rtk"))
+    common::rtk_command()
 }
 
 #[test]

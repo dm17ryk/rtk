@@ -1,22 +1,26 @@
 #![cfg(windows)]
 
+mod common;
+
 use std::fs;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 fn native_cmd(expression: &str) -> Output {
-    Command::new("cmd.exe")
+    let candidate = common::rtk_command();
+    common::native_command("cmd.exe")
+        .current_dir(candidate.get_current_dir().expect("isolated project"))
         .args(["/D", "/S", "/C", expression])
         .output()
         .expect("native cmd.exe should start")
 }
 
 fn rtk_cmd(expression: &str) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_rtk"))
+    common::rtk_command()
         .args(["cmd", expression])
         .output()
         .expect("rtk cmd should start")
@@ -71,12 +75,12 @@ fn dir_stdout_without_live_free_space(stdout: &[u8]) -> String {
 }
 
 fn assert_cmd_parity_in(expression: &str, current_dir: &Path) {
-    let native = Command::new("cmd.exe")
+    let native = common::native_command("cmd.exe")
         .current_dir(current_dir)
         .args(["/D", "/S", "/C", expression])
         .output()
         .expect("native cmd.exe should start");
-    let rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let rtk = common::rtk_command()
         .current_dir(current_dir)
         .args(["cmd", expression])
         .output()
@@ -135,7 +139,7 @@ fn multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_comm
     let injected = directory.path().join("must-not-exist.txt");
     let payload = format!(r#"safe" & echo injected > {}"#, injected.display());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let output = common::rtk_command()
         .args(["cmd", "echo", &payload])
         .output()
         .expect("rtk cmd should start");
@@ -148,11 +152,11 @@ fn multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_comm
     );
 
     let nested_payload = "nested \"quoted\" value";
-    let nested = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let nested = common::rtk_command()
         .args(["cmd", "cmd.exe", "/D", "/C", "echo", nested_payload])
         .output()
         .expect("nested CMD should start");
-    let native_nested = Command::new("cmd.exe")
+    let native_nested = common::native_command("cmd.exe")
         .args(["/D", "/C", "echo", nested_payload])
         .output()
         .expect("native nested CMD should start");
@@ -162,7 +166,7 @@ fn multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_comm
 
     let nested_injected = directory.path().join("nested-must-not-exist.txt");
     let nested_payload = format!("'safe & echo injected > {}'", nested_injected.display());
-    let nested = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let nested = common::rtk_command()
         .args(["cmd", "cmd.exe", "/D", "/C", "echo", &nested_payload])
         .output()
         .expect("nested CMD should start");
@@ -177,7 +181,7 @@ fn multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_comm
         let marker = directory
             .path()
             .join(format!("nested-operator-{index}.txt"));
-        let nested = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let nested = common::rtk_command()
             .args([
                 "cmd",
                 "cmd.exe",
@@ -205,7 +209,7 @@ fn multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_comm
         let absolute_marker = directory
             .path()
             .join(format!("absolute-cmd-operator-{index}.txt"));
-        let absolute = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let absolute = common::rtk_command()
             .args([
                 "cmd",
                 &spelled_cmd,
@@ -232,7 +236,7 @@ fn multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_comm
     fs::create_dir(&nested_directory).unwrap();
     let nested_file = nested_directory.join("nested.txt");
     fs::write(&nested_file, "nested file payload\r\n").unwrap();
-    let nested = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let nested = common::rtk_command()
         .args([
             "cmd",
             "cmd.exe",
@@ -243,7 +247,7 @@ fn multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_comm
         ])
         .output()
         .expect("nested CMD should start");
-    let native_nested = Command::new("cmd.exe")
+    let native_nested = common::native_command("cmd.exe")
         .args(["/D", "/C", "type", nested_file.to_str().unwrap()])
         .output()
         .expect("native nested CMD should start");
@@ -254,7 +258,7 @@ fn multi_argument_embedded_quote_and_metacharacters_do_not_execute_an_extra_comm
 
 #[test]
 fn multi_argument_empty_and_bang_values_match_default_cmd_semantics() {
-    let empty_rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let empty_rtk = common::rtk_command()
         .args(["cmd", "echo", ""])
         .output()
         .expect("rtk cmd should start");
@@ -263,7 +267,7 @@ fn multi_argument_empty_and_bang_values_match_default_cmd_semantics() {
     assert!(empty_rtk.stderr.is_empty());
 
     let bang_native = native_cmd("echo !RTK_CMD_UNSET!");
-    let bang_rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let bang_rtk = common::rtk_command()
         .args(["cmd", "echo", "!RTK_CMD_UNSET!"])
         .output()
         .expect("rtk cmd should start");
@@ -277,7 +281,7 @@ fn multi_argument_python_argv_matches_native_for_spaces_quotes_and_metacharacter
     let directory = tempdir().unwrap();
     let injected = directory.path().join("argv-injected.txt");
     let code = "import json, sys; print(json.dumps(sys.argv[1:]))";
-    let rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let rtk = common::rtk_command()
         .args([
             "cmd",
             "python",
@@ -319,7 +323,7 @@ fn multi_argument_python_argv_matches_native_for_spaces_quotes_and_metacharacter
 #[test]
 fn multi_argument_commands_do_not_expose_transport_environment_variables() {
     let prefix_native = native_cmd("set RTK_CMD_ARG_");
-    let prefix_rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let prefix_rtk = common::rtk_command()
         .args(["cmd", "set", "RTK_CMD_ARG_"])
         .output()
         .expect("rtk cmd should start");
@@ -328,7 +332,7 @@ fn multi_argument_commands_do_not_expose_transport_environment_variables() {
     assert_eq!(prefix_rtk.stderr, prefix_native.stderr);
 
     let bare_native = native_cmd("cmd.exe /D /C set");
-    let bare_rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let bare_rtk = common::rtk_command()
         .args(["cmd", "cmd.exe", "/D", "/C", "set"])
         .output()
         .expect("rtk cmd should start");
@@ -337,7 +341,7 @@ fn multi_argument_commands_do_not_expose_transport_environment_variables() {
     assert_eq!(bare_rtk.stderr, bare_native.stderr);
     assert!(!String::from_utf8_lossy(&bare_rtk.stdout).contains("RTK_CMD_ARG_"));
 
-    let hidden_rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let hidden_rtk = common::rtk_command()
         .args(["cmd", "cmd.exe", "/D", "/C", "set\r\n"])
         .output()
         .expect("rtk cmd nested syntax check should start");
@@ -353,7 +357,7 @@ fn multi_argument_percent_and_crlf_payloads_remain_data() {
         "100% complete & echo injected > {}",
         percent_injected.display()
     );
-    let percent_output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let percent_output = common::rtk_command()
         .args(["cmd", "echo", &percent_payload])
         .output()
         .expect("rtk cmd should start");
@@ -372,7 +376,7 @@ fn multi_argument_percent_and_crlf_payloads_remain_data() {
         "first line\r\n& echo injected > {}",
         crlf_injected.display()
     );
-    let crlf_output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let crlf_output = common::rtk_command()
         .args(["cmd", "echo", &crlf_payload])
         .output()
         .expect("rtk cmd should start");
@@ -384,7 +388,7 @@ fn multi_argument_percent_and_crlf_payloads_remain_data() {
     );
 
     let quoted_crlf_payload = "first \"quoted\" line\r\nsecond line";
-    let quoted_crlf_output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let quoted_crlf_output = common::rtk_command()
         .args(["cmd", "echo", quoted_crlf_payload])
         .output()
         .expect("rtk cmd should start");
@@ -396,7 +400,7 @@ fn multi_argument_percent_and_crlf_payloads_remain_data() {
 fn hidden_transport_bounds_the_cmd_line_when_a_percent_operand_is_present() {
     let long_operand = "x".repeat(8_050);
     let native = native_cmd(&format!("dir %RTK_CMD_LITERAL% {long_operand}"));
-    let rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let rtk = common::rtk_command()
         .args(["cmd", "dir", "%RTK_CMD_LITERAL%", &long_operand])
         .output()
         .expect("rtk cmd should start");
@@ -410,7 +414,7 @@ fn multi_argument_python_line_break_payload_executes_once_and_matches_native() {
     let line_break = "first line\r\nsecond line with spaces & echo injected > marker.txt";
     let trailing_slash = "tail\r\nslash\\";
     let code = "import json, sys; print(json.dumps(sys.argv[1:]))";
-    let rtk = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let rtk = common::rtk_command()
         .args([
             "cmd",
             "python",
@@ -465,7 +469,7 @@ fn multi_argument_pipe_input_redirection_and_caret_payloads_remain_data() {
             ),
         ),
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let output = common::rtk_command()
             .args(["cmd", "echo", &payload])
             .output()
             .expect("rtk cmd should start");
@@ -514,14 +518,14 @@ fn machine_consumed_builtin_output_is_native_even_for_structured_display_command
         directory.path().display()
     ));
     assert_dir_parity(&format!("dir /a:-d /o:n \"{}\"", spaced.display()));
-    let mut native_multiarg_command = Command::new("cmd.exe");
+    let mut native_multiarg_command = common::native_command("cmd.exe");
     native_multiarg_command
         .args(["/D", "/S", "/C"])
         .raw_arg(format!("dir \"{}\"", spaced.display()));
     let native_multiarg_dir = native_multiarg_command
         .output()
         .expect("native cmd.exe should start");
-    let captured_multiarg_dir = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let captured_multiarg_dir = common::rtk_command()
         .args(["cmd", "dir", spaced.to_str().unwrap()])
         .output()
         .expect("rtk cmd should start");
@@ -563,7 +567,7 @@ fn hidden_cmd_runner_keeps_caret_escaped_dir_b_native() {
     for switches in ["/^b", "/s/^b", "/^B/s", "/s^/b", "/S^/B"] {
         let source = format!("dir {switches} {}", directory.path().display());
         let native = native_cmd(&source);
-        let hidden = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let hidden = common::rtk_command()
             .args(["__cmd-run", "--hex", &hex_encode(source.as_bytes())])
             .output()
             .expect("hidden cmd runner should start");
@@ -580,14 +584,17 @@ fn hidden_cmd_runner_keeps_caret_escaped_dir_b_native() {
 
 #[test]
 fn alternate_and_interactive_dir_layouts_stay_native_in_the_hidden_runner() {
-    let directory = tempdir().unwrap();
+    // DIR lists `..`: give it a private parent whose timestamp cannot be
+    // changed by another test creating files in the shared temp directory.
+    let parent = tempdir().unwrap();
+    let directory = tempfile::tempdir_in(parent.path()).unwrap();
     fs::write(directory.path().join("visible.txt"), "payload").unwrap();
     fs::create_dir(directory.path().join("nested")).unwrap();
 
     for switches in ["/p", "/q", "/x", "/w", "/d", "/r", "/s/q", "/s^/x"] {
         let source = format!("dir {switches} {}", directory.path().display());
         let native = native_cmd(&source);
-        let hidden = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let hidden = common::rtk_command()
             .args(["__cmd-run", "--hex", &hex_encode(source.as_bytes())])
             .output()
             .expect("hidden cmd runner should start");
@@ -627,12 +634,12 @@ fn hidden_cmd_runner_filters_with_complete_lossless_tee_and_native_result_metada
         .collect::<Vec<_>>();
     let source = "set RTK_CMD_RUNNER_";
 
-    let native = Command::new("cmd.exe")
+    let native = common::native_command("cmd.exe")
         .args(["/D", "/S", "/C", source])
         .envs(environment.iter().map(|(key, value)| (key, value)))
         .output()
         .expect("native cmd.exe should start");
-    let filtered = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let filtered = common::rtk_command()
         .args(["__cmd-run", "--hex", &hex_encode(source.as_bytes())])
         .env("APPDATA", &appdata)
         .env("RTK_TEE_DIR", &tee_dir)
@@ -700,12 +707,12 @@ fn hidden_cmd_runner_filters_with_complete_lossless_tee_and_native_result_metada
         hint.starts_with("rtk read -l none --recovery "),
         "shell-neutral recovery hint: {hint}"
     );
-    let rtk_bin = std::path::Path::new(env!("CARGO_BIN_EXE_rtk"));
+    let rtk_bin = common::rtk_bin();
     let mut recovery_path = vec![rtk_bin.parent().unwrap().to_path_buf()];
     recovery_path.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
-    let mut recovered_command = Command::new("cmd.exe");
+    let mut recovered_command = common::native_command("cmd.exe");
     recovered_command
         .args(["/D", "/V:ON", "/S", "/C"])
         .raw_arg(hint)
@@ -779,7 +786,7 @@ fn hidden_cmd_runner_serializes_lossless_tee_commits_between_processes() {
     )
     .unwrap();
 
-    let loaded_config = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let loaded_config = common::rtk_command()
         .arg("config")
         .env("APPDATA", &appdata)
         .output()
@@ -792,7 +799,7 @@ fn hidden_cmd_runner_serializes_lossless_tee_commits_between_processes() {
 
     let source = "set RTK_TEE_LOCK_CHILD_";
     let child = |name: &str| {
-        Command::new(env!("CARGO_BIN_EXE_rtk"))
+        common::rtk_command()
             .args(["__cmd-run", "--hex", &hex_encode(source.as_bytes())])
             .env("APPDATA", &appdata)
             .env("RTK_TEE_DIR", &tee_dir)
@@ -903,7 +910,7 @@ fn hidden_cmd_runner_serializes_lossless_tee_commits_between_processes() {
 fn hidden_cmd_runner_keeps_failed_structured_query_native() {
     let source = "assoc .rtk_cmd_runner_missing_extension";
     let native = native_cmd(source);
-    let hidden = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let hidden = common::rtk_command()
         .args(["__cmd-run", "--hex", &hex_encode(source.as_bytes())])
         .output()
         .expect("hidden cmd runner should start");

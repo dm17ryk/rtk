@@ -737,11 +737,10 @@ fn contains_dynamic_invocation(names: &[String], source: &str) -> bool {
 
 fn filtering_requested() -> bool {
     io::stdout().is_terminal()
-        || std::env::var("RTK_POWERSHELL_FILTER")
-            .ok()
+        || crate::core::user_env::var("RTK_POWERSHELL_FILTER")
             .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         || matches!(
-            std::env::var("RTK_OUTPUT_AUDIENCE").ok().as_deref(),
+            crate::core::user_env::var("RTK_OUTPUT_AUDIENCE").as_deref(),
             Some("agent")
         )
 }

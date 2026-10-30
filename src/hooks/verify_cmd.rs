@@ -35,7 +35,7 @@ pub fn run(filter: Option<String>, require_all: bool) -> Result<()> {
         println!("{}/{} tests passed", passed, total);
     }
 
-    if let Some(count) = legacy_stdout_inventory_count(&std::env::current_dir()?)? {
+    if let Some(count) = legacy_stdout_inventory_count(&crate::core::user_dirs::current_dir()?)? {
         println!("ai_output_legacy_paths={count}");
     }
 

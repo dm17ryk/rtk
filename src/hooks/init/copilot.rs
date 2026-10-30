@@ -1,6 +1,7 @@
 //! Copilot agent: hook install/uninstall helpers.
 
 use super::*;
+use crate::core::user_dirs;
 use crate::hooks::constants::{
     COPILOT_HOME_ENV, COPILOT_HOOK_FILE, COPILOT_INSTRUCTIONS_FILE, COPILOT_USER_DIR, GITHUB_DIR,
     HOOKS_SUBDIR,
@@ -35,7 +36,7 @@ pub(crate) const COPILOT_HOOK_JSON: &str = r#"{
 ///
 /// Installs in the current working directory's `.github/` subdirectory.
 pub fn run_copilot(ctx: InitContext) -> Result<()> {
-    run_copilot_at(Path::new("."), ctx)
+    run_copilot_at(&user_dirs::in_working_dir("."), ctx)
 }
 
 /// Same as [`run_copilot`] but operates relative to an explicit base path.
@@ -85,7 +86,7 @@ fn run_copilot_at(base: &Path, ctx: InitContext) -> Result<()> {
 /// Entry point for `rtk init --uninstall --copilot` (project-scoped, like install).
 pub fn uninstall_copilot(ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    let removed = uninstall_copilot_at(Path::new("."), ctx)?;
+    let removed = uninstall_copilot_at(&user_dirs::in_working_dir("."), ctx)?;
 
     if removed.is_empty() {
         println!("RTK Copilot support was not installed (nothing to remove)");
@@ -161,8 +162,8 @@ fn uninstall_copilot_at(base: &Path, ctx: InitContext) -> Result<Vec<String>> {
 
 pub(crate) fn copilot_user_dir() -> Result<PathBuf> {
     resolve_config_dir(
-        std::env::var_os(COPILOT_HOME_ENV),
-        dirs::home_dir(),
+        user_dirs::env_path(COPILOT_HOME_ENV),
+        user_dirs::home(),
         COPILOT_USER_DIR,
         "Cannot determine Copilot config directory. Set $COPILOT_HOME or $HOME.",
     )

@@ -1,5 +1,6 @@
 //! Filters bun output — install logs, package lists, and pm commands.
 
+use crate::core::shell::display_args;
 use crate::core::utils::{join_or_ok, resolved_command, strip_ansi, truncate};
 use anyhow::Result;
 use serde::Deserialize;
@@ -157,7 +158,7 @@ pub fn run_pkg(subcmd: &str, args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: bun {} {}", subcmd, args.join(" "));
     }
 
-    let display = format!("{} {}", subcmd, args.join(" "));
+    let display = format!("{} {}", subcmd, display_args(args));
     let tee_label = format!("bun_{}", subcmd);
     crate::core::runner::run_ai_from_filter(
         cmd,
@@ -220,7 +221,7 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
 
     let mut cmd = resolved_command("bun");
     cmd.arg("test").args(args);
-    let display = format!("test {}", args.join(" "));
+    let display = format!("test {}", display_args(args));
     crate::core::runner::run_test_cmd(
         cmd,
         "bun",
@@ -228,6 +229,7 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
         "bun_test",
         crate::core::runner::TestEcosystem::Bun,
         verbose,
+        false,
     )
 }
 
