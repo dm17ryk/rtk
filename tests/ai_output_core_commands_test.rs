@@ -1,3 +1,5 @@
+mod common;
+
 use std::process::{Command, Output};
 
 use rusqlite::Connection;
@@ -12,7 +14,7 @@ struct Metrics {
 }
 
 fn rtk() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_rtk"))
+    common::rtk_command()
 }
 
 fn run_rtk(database: &std::path::Path, tee_dir: &std::path::Path, args: &[&str]) -> Output {

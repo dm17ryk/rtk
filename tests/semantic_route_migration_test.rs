@@ -1,11 +1,12 @@
+mod common;
+
 use rusqlite::Connection;
-use std::process::Command;
 
 #[test]
 fn cargo_human_failure_uses_ai_contract_and_preserves_exit() {
     let temp = tempfile::tempdir().expect("tempdir");
     let db = temp.path().join("history.db");
-    let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let output = common::rtk_command()
         .args(["cargo", "check", "--quiet"])
         .current_dir(temp.path())
         .env("RTK_DB_PATH", &db)
@@ -38,7 +39,7 @@ fn cargo_human_failure_uses_ai_contract_and_preserves_exit() {
 #[test]
 fn cargo_machine_help_stays_exact() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let output = common::rtk_command()
         .args(["cargo", "check", "--message-format=json"])
         .current_dir(temp.path())
         .env("RTK_TEE", "0")

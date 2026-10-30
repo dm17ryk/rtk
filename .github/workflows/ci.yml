@@ -27,7 +27,7 @@ jobs:
     name: test presence
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 50
       - name: Check filter modules have tests
@@ -39,7 +39,7 @@ jobs:
     name: fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -50,25 +50,89 @@ jobs:
     needs: fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets
+        # `proxy/` is not a workspace member (it would break
+        # `cargo install --git`), so it gets its own job below. Here
+        # --workspace covers `rtk` + `engine`; a bare `cargo clippy` would
+        # never lint the daemon.
+      - run: cargo clippy --workspace --all-targets
+
+  rustdoc:
+    name: rustdoc
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps
 
   # ─── Parallel gates (all need code to compile) ───
 
+  # `proxy/` is not a workspace member -- a second binary-bearing package
+  # breaks `cargo install --git`, the command every README prints. So the
+  # daemon gets its own lint and test job here; --workspace above covers only
+  # `rtk` + `engine`.
+  proxy:
+    name: proxy (lint + test)
+    runs-on: ubuntu-latest
+    needs: clippy
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --manifest-path proxy/Cargo.toml --all --check
+      - run: cargo clippy --manifest-path proxy/Cargo.toml --all-targets
+      - run: cargo test --manifest-path proxy/Cargo.toml
+
+  # The Apache-2.0 edition. Two things must hold: it builds and passes its own
+  # tests, and its dependency graph contains no BUSL crate. The purity check is
+  # what stops the feature rotting -- without it the first ungated
+  # `rtk_engine::` call breaks the oss build and nobody notices until a release.
+  oss:
+    name: oss edition (build + purity)
+    runs-on: ubuntu-latest
+    needs: clippy
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --no-default-features --all-targets
+      - run: cargo test --no-default-features
+      # Match the crate-name column, not the whole line: the checkout path
+      # can contain 'rtk-engine', which would match every line's path and
+      # fail a clean tree.
+      - name: No BUSL crate in the Apache-2.0 edition
+        run: |
+          crates=$(cargo tree -p rtk --no-default-features -e normal --prefix none | awk '{print $1}' | sort -u)
+          if printf '%s\n' "$crates" | grep -qx 'rtk-engine'; then
+            echo "::error::rtk-engine reached the Apache-2.0 edition's dependency graph"
+            cargo tree -p rtk --no-default-features -e normal | grep -nE '(^|[^a-z-])rtk-engine v'
+            exit 1
+          fi
+          echo "Apache-2.0 edition links no BUSL crate."
+
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.os }}${{ matrix.target && format(', {0}', matrix.target) || '' }})
     needs: clippy
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+          - os: windows-latest
+          - os: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -77,10 +141,10 @@ jobs:
           python-version: "3.x"
       - name: Install test tools (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get install -y ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep fish
       - name: Install test tools (macOS)
         if: matrix.os == 'macos-latest'
-        run: brew install ripgrep
+        run: brew install ripgrep fish
       - name: Install test tools (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
@@ -100,6 +164,11 @@ jobs:
           }
           if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
             throw 'ripgrep was not available after installation'
+          }
+          $gitBin = Join-Path (Split-Path (Split-Path (Get-Command git).Source)) 'bin'
+          if (Test-Path (Join-Path $gitBin 'sh.exe')) {
+            $env:Path = "$gitBin;$env:Path"
+            Add-Content -Path $env:GITHUB_PATH -Value $gitBin
           }
       - uses: Swatinem/rust-cache@v2
       - name: Build candidate binary (Unix)
@@ -232,6 +301,11 @@ jobs:
           if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
             throw 'ripgrep was not available after installation'
           }
+          $gitBin = Join-Path (Split-Path (Split-Path (Get-Command git).Source)) 'bin'
+          if (Test-Path (Join-Path $gitBin 'sh.exe')) {
+            $env:Path = "$gitBin;$env:Path"
+            Add-Content -Path $env:GITHUB_PATH -Value $gitBin
+          }
       - uses: Swatinem/rust-cache@v2
       - name: Build and smoke-test native command paths
         shell: pwsh
@@ -262,9 +336,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $rtk pwsh -NoProfile -NonInteractive -Command "Write-Output rtk-pwsh-smoke"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test "cmds::windows::tests::" --bin rtk
+          cargo test "cmds::windows::tests::" --lib
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test "cmds::powershell::" --bin rtk
+          cargo test "cmds::powershell::" --lib
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --test windows_cmd_e2e
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -284,6 +358,28 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --all --no-fail-fast
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  test-windows-gnu:
+    name: test (windows-latest, x86_64-pc-windows-gnu)
+    needs: clippy
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install test tools
+        shell: pwsh
+        run: |
+          choco install ripgrep --no-progress --yes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $gitBin = Join-Path (Split-Path (Split-Path (Get-Command git).Source)) 'bin'
+          Add-Content -Path $env:GITHUB_PATH -Value $gitBin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --target x86_64-pc-windows-gnu
 
   live-codex:
     name: live Codex host (opt-in; skipped means unverified)
@@ -377,7 +473,7 @@ jobs:
     needs: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -468,7 +564,7 @@ jobs:
       - name: Clippy security lints
         run: |
           echo "### Clippy Security Lints" >> $GITHUB_STEP_SUMMARY
-          if cargo clippy --all-targets -- -W clippy::unwrap_used -W clippy::panic -W clippy::expect_used 2>&1 | tee clippy.log | grep -E "warning:|error:"; then
+          if cargo clippy --workspace --all-targets -- -W clippy::unwrap_used -W clippy::panic -W clippy::expect_used 2>&1 | tee clippy.log | grep -E "warning:|error:"; then
             echo "Security-related lints triggered:" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             grep -E "warning:|error:" clippy.log | head -20 >> $GITHUB_STEP_SUMMARY
@@ -500,7 +596,7 @@ jobs:
     container:
       image: semgrep/semgrep
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Semgrep PR baseline scan
@@ -515,7 +611,7 @@ jobs:
     needs: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -531,7 +627,7 @@ jobs:
         run: pip install ruff pytest mypy
 
       - name: Install Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: "stable"
 
@@ -548,10 +644,14 @@ jobs:
     if: github.base_ref == 'develop'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
+      # `gh pr diff` uses the diff media type, which GitHub refuses with HTTP
+      # 406 above 20,000 lines -- and this job is advisory, so a large PR must
+      # not fail it. The files API has no such ceiling, so fall back to
+      # per-file patches and carry on with whatever context is available.
       - name: Gather PR context
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

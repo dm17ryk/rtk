@@ -114,7 +114,7 @@ pub fn validate_cwd(cwd: Option<&Path>) -> Result<Option<PathBuf>> {
     let absolute = if cwd.is_absolute() {
         cwd.to_path_buf()
     } else {
-        std::env::current_dir()
+        crate::core::user_dirs::current_dir()
             .context("Failed to resolve current directory")?
             .join(cwd)
     };
@@ -381,7 +381,7 @@ fn join_pipe_reader(
 
 pub fn debug_enabled() -> bool {
     matches!(
-        std::env::var("RTK_DEBUG").ok().as_deref(),
+        crate::core::user_env::var("RTK_DEBUG").as_deref(),
         Some("1" | "true" | "yes")
     )
 }

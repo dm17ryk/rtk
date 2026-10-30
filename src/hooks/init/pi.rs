@@ -2,6 +2,10 @@
 //! uninstall, stock-content checks and the shared-ownership tracking between the two agents
 //! live together here.
 use super::*;
+#[cfg(test)]
+use crate::core::test_isolation;
+use crate::core::user_dirs;
+use crate::core::user_env;
 use crate::hooks::constants::{
     OMP_DIR, OMP_LOCAL_DIR, PI_AGENT_STATE_FILE, PI_CODING_AGENT_DIR_ENV, PI_DIR,
     PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
@@ -72,11 +76,12 @@ const KNOWN_PI_PLUGIN_HASHES: &[&str] = &[
     "eb56dd08b8d5f4704906d037d70b357d84d827abe1063135cc7c998efe6cf7f2",
     "628308173ae41c488b76bcf90eafbd4c0c72435927645d81cdbec652eac4b107",
     "3eb16108f51a29c2a62a453d5c97a6ea2da8aea1061da34c50fdcfaa32dc0ff7",
+    "def594058835ce23d82abd6872a8359144a4486ed0905ff12e59fedb2260b472",
 ];
 
 /// Resolve Pi config directory, honouring `PI_CODING_AGENT_DIR` override.
 fn resolve_pi_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var(PI_CODING_AGENT_DIR_ENV)
+    if let Some(dir) = user_env::var(PI_CODING_AGENT_DIR_ENV)
         && !dir.is_empty()
     {
         return Ok(PathBuf::from(dir));
@@ -96,7 +101,7 @@ fn pi_plugin_path_for_scope(global: bool) -> Result<PathBuf> {
     if global {
         Ok(pi_plugin_path(&resolve_pi_dir()?))
     } else {
-        Ok(PathBuf::from(PI_LOCAL_DIR)
+        Ok(user_dirs::in_working_dir(PI_LOCAL_DIR)
             .join(PI_EXTENSIONS_SUBDIR)
             .join(PI_PLUGIN_FILE))
     }
@@ -662,16 +667,17 @@ fn with_pi_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
     let pi_dir = tmp.path().join("pi_agent");
     fs::create_dir_all(&pi_dir).unwrap();
 
-    temp_env::with_var(PI_CODING_AGENT_DIR_ENV, Some(&pi_dir), || f(&pi_dir));
+    test_isolation::with_agent_dir(tmp.path(), PI_CODING_AGENT_DIR_ENV, &pi_dir, || f(&pi_dir));
 }
 
 #[cfg(test)]
 fn with_omp_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
-    // OMP reuses PI_CODING_AGENT_DIR, so share the Pi environment lock.
     let omp_dir = tmp.path().join("omp_agent");
     fs::create_dir_all(&omp_dir).unwrap();
 
-    temp_env::with_var(PI_CODING_AGENT_DIR_ENV, Some(&omp_dir), || f(&omp_dir));
+    test_isolation::with_agent_dir(tmp.path(), PI_CODING_AGENT_DIR_ENV, &omp_dir, || {
+        f(&omp_dir)
+    });
 }
 
 /// Return the OMP extension install path for the given scope.
@@ -681,7 +687,7 @@ fn omp_extension_path_for_scope(global: bool) -> Result<PathBuf> {
             .join(PI_EXTENSIONS_SUBDIR)
             .join(PI_PLUGIN_FILE))
     } else {
-        Ok(PathBuf::from(OMP_LOCAL_DIR)
+        Ok(user_dirs::in_working_dir(OMP_LOCAL_DIR)
             .join(PI_EXTENSIONS_SUBDIR)
             .join(PI_PLUGIN_FILE))
     }
@@ -691,7 +697,7 @@ fn omp_extension_path_for_scope(global: bool) -> Result<PathBuf> {
 /// `PI_CODING_AGENT_DIR` for this relocation, so RTK follows the same
 /// override instead of introducing a second path configuration.
 fn resolve_omp_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var(PI_CODING_AGENT_DIR_ENV)
+    if let Some(dir) = user_env::var(PI_CODING_AGENT_DIR_ENV)
         && !dir.is_empty()
     {
         return Ok(PathBuf::from(dir));
@@ -908,11 +914,31 @@ fn print_omp_extension_status(label: &str, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Returns true if Pi or OMP RTK extension is installed.
+pub fn is_configured() -> bool {
+    // 1. Pi extension (local or global)
+    for global in [false, true] {
+        if let Ok(path) = pi_plugin_path_for_scope(global)
+            && path.is_file()
+        {
+            return true;
+        }
+    }
+    // 2. OMP extension (local or global)
+    for global in [false, true] {
+        if let Ok(path) = omp_extension_path_for_scope(global)
+            && path.is_file()
+        {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::process::Command;
-    use tempfile::TempDir;
 
     /// Install the Pi extension (hook-only; no AGENTS.md injection).
     ///
@@ -933,7 +959,7 @@ mod tests {
 
     #[test]
     fn test_run_pi_mode_global_installs_plugin() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_pi_dir_override(&tmp, |pi_dir| {
             run_pi_mode(true, InitContext::default()).unwrap();
 
@@ -957,7 +983,7 @@ mod tests {
 
     #[test]
     fn test_run_pi_mode_global_does_not_create_agents_md() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_pi_dir_override(&tmp, |pi_dir| {
             run_pi_mode(true, InitContext::default()).unwrap();
 
@@ -968,7 +994,7 @@ mod tests {
 
     #[test]
     fn test_pi_global_uninstall_removes_plugin() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_pi_dir_override(&tmp, |pi_dir| {
             run_pi_mode(true, InitContext::default()).unwrap();
 
@@ -992,7 +1018,7 @@ mod tests {
 
     #[test]
     fn test_pi_plugin_path_for_scope_global() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_pi_dir_override(&tmp, |pi_dir| {
             let path = pi_plugin_path_for_scope(true).unwrap();
             assert_eq!(path, pi_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE));
@@ -1002,17 +1028,26 @@ mod tests {
     #[test]
     fn test_pi_plugin_path_for_scope_local() {
         let path = pi_plugin_path_for_scope(false).unwrap();
-        assert_eq!(
-            path,
-            PathBuf::from(PI_LOCAL_DIR)
-                .join(PI_EXTENSIONS_SUBDIR)
-                .join(PI_PLUGIN_FILE)
+        assert!(
+            path.ends_with(
+                PathBuf::from(PI_LOCAL_DIR)
+                    .join(PI_EXTENSIONS_SUBDIR)
+                    .join(PI_PLUGIN_FILE)
+            ),
+            "the project's own extension path, got {}",
+            path.display()
+        );
+        let project = user_dirs::current_dir().expect("a test build has a project");
+        assert!(
+            path.starts_with(&project),
+            "in the project, not the home: {}",
+            path.display()
         );
     }
 
     #[test]
     fn test_run_pi_mode_global_dry_run_writes_nothing() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_pi_dir_override(&tmp, |pi_dir| {
             run_pi_mode(
                 true,
@@ -1040,7 +1075,7 @@ mod tests {
 
     #[test]
     fn test_pi_global_uninstall_dry_run_keeps_plugin() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_pi_dir_override(&tmp, |pi_dir| {
             run_pi_mode(true, InitContext::default()).unwrap();
             let plugin = pi_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
@@ -1072,11 +1107,31 @@ mod tests {
     }
 
     #[test]
+    fn test_pi_install_refuses_modified_extension() {
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
+
+        let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PI_PLUGIN_FILE);
+        let modified = "// user-modified extension\nexport default () => {}\n";
+        fs::write(&path, modified).unwrap();
+
+        let result = run_pi_mode_with_patch_mode(false, PatchMode::Skip, InitContext::default());
+
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("was not changed"),
+            "unexpected error: {}",
+            err
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), modified);
+    }
+
+    #[test]
     fn test_pi_uninstall_modified_extension_bails() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -1092,7 +1147,6 @@ mod tests {
             false,
             InitContext::default(),
         );
-        std::env::set_current_dir(&cwd).unwrap();
 
         let err = result.unwrap_err();
         assert!(
@@ -1106,10 +1160,8 @@ mod tests {
 
     #[test]
     fn test_pi_uninstall_modified_extension_dry_run_is_preview() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -1128,7 +1180,6 @@ mod tests {
                 ..InitContext::default()
             },
         );
-        std::env::set_current_dir(&cwd).unwrap();
 
         result.unwrap();
         assert!(path.exists(), "dry-run must preserve modified extension");
@@ -1174,17 +1225,20 @@ mod tests {
             return;
         }
 
-        let revisions = Command::new("git")
-            .current_dir(manifest_dir)
-            .args([
-                "rev-list",
-                "HEAD",
-                "--full-history",
-                "--",
-                "hooks/pi/rtk.ts",
-            ])
-            .output()
-            .expect("git must be available to verify Pi extension history");
+        let git = |args: &[&str]| {
+            let mut cmd = Command::new("git");
+            cmd.current_dir(manifest_dir).args(args);
+            test_isolation::isolate_git(&mut cmd);
+            cmd.output()
+        };
+        let revisions = git(&[
+            "rev-list",
+            "HEAD",
+            "--full-history",
+            "--",
+            "hooks/pi/rtk.ts",
+        ])
+        .expect("git must be available to verify Pi extension history");
         assert!(
             revisions.status.success(),
             "git rev-list failed: {}",
@@ -1202,10 +1256,7 @@ mod tests {
 
         for commit in commits {
             let object = format!("{commit}:hooks/pi/rtk.ts");
-            let file = Command::new("git")
-                .current_dir(manifest_dir)
-                .args(["show", object.as_str()])
-                .output()
+            let file = git(&["show", object.as_str()])
                 .expect("git must be available to inspect Pi extension history");
             if !file.status.success() {
                 // A revision that deletes the file is not an installable stock
@@ -1243,10 +1294,8 @@ mod tests {
 
     #[test]
     fn test_global_uninstall_detects_shared_pi_omp_extension() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
         with_omp_dir_override(&tmp, |omp_dir| {
             let omp_path = omp_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
             let pi_path = pi_plugin_path_for_scope(true).unwrap();
@@ -1286,23 +1335,31 @@ mod tests {
                 ExtensionShareStatus::Shared
             );
         });
-        std::env::set_current_dir(&cwd).unwrap();
     }
 
     #[test]
     fn test_omp_extension_path_for_scope_local() {
         let path = omp_extension_path_for_scope(false).unwrap();
-        assert_eq!(
-            path,
-            PathBuf::from(OMP_LOCAL_DIR)
-                .join(PI_EXTENSIONS_SUBDIR)
-                .join(PI_PLUGIN_FILE)
+        assert!(
+            path.ends_with(
+                PathBuf::from(OMP_LOCAL_DIR)
+                    .join(PI_EXTENSIONS_SUBDIR)
+                    .join(PI_PLUGIN_FILE)
+            ),
+            "the project's own extension path, got {}",
+            path.display()
+        );
+        let project = user_dirs::current_dir().expect("a test build has a project");
+        assert!(
+            path.starts_with(&project),
+            "in the project, not the home: {}",
+            path.display()
         );
     }
 
     #[test]
     fn test_omp_extension_path_for_scope_global_honours_pi_dir_override() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_omp_dir_override(&tmp, |omp_dir| {
             let path = omp_extension_path_for_scope(true).unwrap();
             assert_eq!(
@@ -1314,7 +1371,7 @@ mod tests {
 
     #[test]
     fn test_omp_global_install_and_uninstall_use_override() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_omp_dir_override(&tmp, |omp_dir| {
             run_omp_mode(true, InitContext::default()).unwrap();
 
@@ -1345,13 +1402,10 @@ mod tests {
 
     #[test]
     fn test_omp_local_install_writes_shared_pi_extension() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         run_omp_mode(false, InitContext::default()).unwrap();
-        std::env::set_current_dir(&cwd).unwrap();
 
         let path = tmp
             .path()
@@ -1364,10 +1418,8 @@ mod tests {
 
     #[test]
     fn test_omp_install_refuses_modified_extension() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -1376,7 +1428,6 @@ mod tests {
         fs::write(&path, modified).unwrap();
 
         let result = run_omp_mode_with_patch_mode(false, PatchMode::Skip, InitContext::default());
-        std::env::set_current_dir(&cwd).unwrap();
 
         let err = result.unwrap_err();
         assert!(
@@ -1389,10 +1440,8 @@ mod tests {
 
     #[test]
     fn test_omp_install_dry_run_reports_refusal_without_error() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -1407,7 +1456,6 @@ mod tests {
                 ..InitContext::default()
             },
         );
-        std::env::set_current_dir(&cwd).unwrap();
 
         result.unwrap();
         assert_eq!(fs::read_to_string(path).unwrap(), modified);
@@ -1415,10 +1463,8 @@ mod tests {
 
     #[test]
     fn test_omp_local_install_dry_run_writes_nothing() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         run_omp_mode(
             false,
@@ -1429,7 +1475,6 @@ mod tests {
             },
         )
         .unwrap();
-        std::env::set_current_dir(&cwd).unwrap();
 
         let path = tmp
             .path()
@@ -1442,10 +1487,8 @@ mod tests {
 
     #[test]
     fn test_omp_local_uninstall_removes_plugin() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         run_omp_mode(false, InitContext::default()).unwrap();
         let result = uninstall(
@@ -1457,7 +1500,6 @@ mod tests {
             true,
             InitContext::default(),
         );
-        std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
         let path = tmp
@@ -1470,10 +1512,8 @@ mod tests {
 
     #[test]
     fn test_omp_local_uninstall_dry_run_keeps_plugin() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         run_omp_mode(false, InitContext::default()).unwrap();
         let plugin = tmp
@@ -1499,7 +1539,6 @@ mod tests {
                 ..Default::default()
             },
         );
-        std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
         assert!(
@@ -1510,10 +1549,8 @@ mod tests {
 
     #[test]
     fn test_omp_uninstall_modified_extension_bails() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -1533,7 +1570,6 @@ mod tests {
             true,
             InitContext::default(),
         );
-        std::env::set_current_dir(&cwd).unwrap();
 
         let err = result.unwrap_err();
         assert!(
@@ -1547,10 +1583,8 @@ mod tests {
 
     #[test]
     fn test_omp_uninstall_modified_extension_dry_run_is_preview() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -1573,7 +1607,6 @@ mod tests {
                 ..InitContext::default()
             },
         );
-        std::env::set_current_dir(&cwd).unwrap();
 
         result.unwrap();
         assert!(path.exists(), "dry-run must preserve modified extension");
@@ -1581,10 +1614,8 @@ mod tests {
 
     #[test]
     fn test_omp_uninstall_unreadable_extension_is_left_alone() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -1600,7 +1631,6 @@ mod tests {
             true,
             InitContext::default(),
         );
-        std::env::set_current_dir(&cwd).unwrap();
 
         let err = result.unwrap_err();
         assert!(
@@ -1613,10 +1643,8 @@ mod tests {
 
     #[test]
     fn test_omp_uninstall_unrelated_content_dry_run_left_alone() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -1639,7 +1667,6 @@ mod tests {
                 ..InitContext::default()
             },
         );
-        std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
         assert!(path.exists(), "non-RTK extension must be left in place");
@@ -1647,10 +1674,8 @@ mod tests {
 
     #[test]
     fn test_omp_uninstall_missing_dry_run_is_noop() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         let result = uninstall(
             false,
@@ -1664,19 +1689,15 @@ mod tests {
                 ..InitContext::default()
             },
         );
-        std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
     }
 
     #[test]
     fn test_run_pi_mode_local_installs_plugin() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         let result = run_pi_mode(false, InitContext::default());
-        std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
         let plugin = tmp
@@ -1689,9 +1710,9 @@ mod tests {
 
     #[test]
     fn test_run_pi_mode_global_creates_plugin_when_dir_absent() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         let absent_dir = tmp.path().join("no_such_pi_dir");
-        temp_env::with_var(PI_CODING_AGENT_DIR_ENV, Some(&absent_dir), || {
+        user_env::with_path(PI_CODING_AGENT_DIR_ENV, Some(&absent_dir), || {
             run_pi_mode(true, InitContext::default())
         })
         .unwrap();
@@ -1708,10 +1729,8 @@ mod tests {
 
     #[test]
     fn test_pi_local_uninstall_removes_plugin() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         run_pi_mode(false, InitContext::default()).unwrap();
         let result = uninstall(
@@ -1723,7 +1742,6 @@ mod tests {
             false,
             InitContext::default(),
         );
-        std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
         let plugin = tmp
@@ -1736,10 +1754,8 @@ mod tests {
 
     #[test]
     fn test_run_pi_mode_local_dry_run_writes_nothing() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         let result = run_pi_mode(
             false,
@@ -1749,7 +1765,6 @@ mod tests {
                 ..Default::default()
             },
         );
-        std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
         assert!(
@@ -1760,10 +1775,8 @@ mod tests {
 
     #[test]
     fn test_pi_local_uninstall_dry_run_keeps_plugin() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         run_pi_mode(false, InitContext::default()).unwrap();
         let plugin = tmp
@@ -1789,7 +1802,6 @@ mod tests {
                 ..Default::default()
             },
         );
-        std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
         assert!(
@@ -1799,11 +1811,32 @@ mod tests {
     }
 
     #[test]
+    fn test_pi_install_dry_run_reports_refusal_without_error() {
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
+
+        let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PI_PLUGIN_FILE);
+        let modified = "// user-modified extension\nexport default () => {}\n";
+        fs::write(&path, modified).unwrap();
+
+        let result = run_pi_mode(
+            false,
+            InitContext {
+                dry_run: true,
+                ..InitContext::default()
+            },
+        );
+
+        result.unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), modified);
+    }
+
+    #[test]
     fn test_pi_uninstall_unreadable_extension_is_left_alone() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -1819,7 +1852,6 @@ mod tests {
             false,
             InitContext::default(),
         );
-        std::env::set_current_dir(&cwd).unwrap();
 
         let err = result.unwrap_err();
         assert!(
@@ -1832,10 +1864,8 @@ mod tests {
 
     #[test]
     fn test_pi_uninstall_unrelated_content_left_alone() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -1856,7 +1886,6 @@ mod tests {
             InitContext::default(),
         )
         .unwrap();
-        std::env::set_current_dir(&cwd).unwrap();
 
         assert!(path.exists(), "non-RTK extension must be left in place");
     }

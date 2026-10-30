@@ -1,17 +1,16 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
 use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON};
-use super::init::resolve_claude_dir;
 use super::is_claude_hook_command;
-use crate::core::constants::RTK_DATA_DIR;
+use crate::core::user_dirs;
 use crate::core::utils::from_json_str;
 use std::path::{Path, PathBuf};
 
-const CURRENT_HOOK_VERSION: u8 = 4;
+pub const CURRENT_HOOK_VERSION: u8 = 4;
 const WARN_INTERVAL_SECS: u64 = 24 * 3600;
 
 /// Hook status for diagnostics and `rtk gain`.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum HookStatus {
     /// Hook is installed and up to date.
     Ok,
@@ -56,7 +55,7 @@ impl CodexHookStatus {
 /// `rtk gain` must not report a missing Claude hook when the active agent uses
 /// a plugin or a different native hook integration.
 pub fn any_integration_installed() -> bool {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::core::user_dirs::home() else {
         return false;
     };
     integration_installed_in(&home)
@@ -112,10 +111,10 @@ fn codex_integration_installed(home: &std::path::Path) -> bool {
 /// The hook is considered ready only when exactly one RTK Bash handler is
 /// registered and an absolute executable path, if supplied, still exists.
 pub fn codex_status() -> CodexHookStatus {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::core::user_dirs::home() else {
         return CodexHookStatus::MissingConfig;
     };
-    let codex_home = std::env::var_os("CODEX_HOME")
+    let codex_home = crate::core::user_env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| home.join(super::constants::CODEX_DIR));
@@ -212,45 +211,6 @@ pub(crate) fn claude_hook_installed_in(claude_dir: &std::path::Path) -> bool {
 
 /// Return the current hook status without printing anything.
 /// Returns `Ok` if no Claude Code is detected (not applicable).
-pub fn status() -> HookStatus {
-    // Don't warn users who don't have Claude Code installed
-    let claude_dir = match resolve_claude_dir() {
-        Ok(d) => d,
-        Err(_) => return HookStatus::Ok,
-    };
-    if !claude_dir.exists() {
-        return HookStatus::Ok;
-    }
-
-    // Check for new binary command in settings.json first
-    if binary_hook_registered(&claude_dir) {
-        // If old script file still exists alongside new command, report Outdated
-        // (migration not complete — user should run `rtk init -g` to clean up)
-        let old_hook = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
-        if old_hook.exists() {
-            return HookStatus::Outdated;
-        }
-        return HookStatus::Ok;
-    }
-
-    // Fall back to legacy script file check
-    let Some(hook_path) = hook_installed_path() else {
-        return if any_integration_installed() {
-            HookStatus::Ok
-        } else {
-            HookStatus::Missing
-        };
-    };
-    let Ok(content) = std::fs::read_to_string(&hook_path) else {
-        return HookStatus::Outdated; // exists but unreadable — treat as needs-update
-    };
-    if parse_hook_version(&content) >= CURRENT_HOOK_VERSION {
-        HookStatus::Ok
-    } else {
-        HookStatus::Outdated
-    }
-}
-
 /// Check if the native binary command is registered in settings.json
 pub(crate) fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
     let settings_path = claude_dir.join(SETTINGS_JSON);
@@ -276,6 +236,36 @@ pub(crate) fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
         .any(is_claude_hook_command)
+}
+
+/// All non-Claude agent probes for active RTK hook/plugin installation.
+/// Every agent owns its own probe inside `src/hooks/init/<agent>.rs`.
+const AGENT_PROBES: &[fn() -> bool] = &[
+    super::init::antigravity::is_configured,
+    super::init::cursor::is_configured,
+    super::init::gemini::is_configured,
+    super::init::opencode::is_configured,
+    super::init::codex::is_configured,
+    super::init::droid::is_configured,
+    super::init::trae::is_configured,
+    super::init::hermes::is_configured,
+    super::init::pi::is_configured,
+    super::init::vibe::is_configured,
+];
+
+/// Returns true if at least one supported non-Claude agent has an active hook/plugin configured.
+pub fn is_any_agent_configured() -> bool {
+    AGENT_PROBES.iter().any(|probe| probe())
+}
+
+/// Returns the hook status for Claude Code without printing anything.
+/// Returns `HookStatus::Ok` if Claude Code is not installed on this system.
+///
+/// Note: This probe is intentionally specific to Claude Code because `rtk discover`
+/// and legacy transcript analysis rely specifically on Claude's hook status.
+/// General warning checks also consult [`is_any_agent_configured`].
+pub fn status() -> HookStatus {
+    super::init::claude::hook_status()
 }
 
 /// Check if the installed hook is missing or outdated, warn once per day.
@@ -305,8 +295,8 @@ fn check_and_warn() -> Option<()> {
     if status == HookStatus::Ok {
         return Some(());
     }
-    let suppress_missing =
-        status == HookStatus::Missing && crate::core::config::hook_warning_suppressed();
+    let suppress_missing = status == HookStatus::Missing
+        && (crate::core::config::hook_warning_suppressed() || is_any_agent_configured());
     let warning = warning_text(status, suppress_missing)?;
 
     // Rate limit: warn once per day
@@ -339,20 +329,16 @@ pub fn parse_hook_version(content: &str) -> u8 {
     0 // No version tag = version 0 (outdated)
 }
 
-fn hook_installed_path() -> Option<PathBuf> {
-    let claude_dir = resolve_claude_dir().ok()?;
-    let path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
-    if path.exists() { Some(path) } else { None }
-}
-
 fn warn_marker_path() -> Option<PathBuf> {
-    let data_dir = dirs::data_local_dir()?.join(RTK_DATA_DIR);
+    let data_dir = user_dirs::data()?;
     Some(data_dir.join(".hook_warn_last"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_isolation;
+    use crate::core::user_env;
     use crate::hooks::constants::{
         CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
         HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HERMES_PLUGINS_SUBDIR,
@@ -597,22 +583,321 @@ mod tests {
 
     #[test]
     fn test_status_returns_valid_variant() {
-        // Skip on machines without Claude Code
-        let home = match dirs::home_dir() {
-            Some(h) => h,
-            None => return,
+        // `status()` resolves through `CLAUDE_CONFIG_DIR`; pinned so both
+        // states can be asserted.
+        let tmp = test_isolation::tempdir();
+        let claude_dir = tmp.path().join(".claude");
+        user_env::with_path("CLAUDE_CONFIG_DIR", Some(&claude_dir), || {
+            assert_eq!(
+                status(),
+                HookStatus::Ok,
+                "no Claude dir: nothing to warn about"
+            );
+            std::fs::create_dir_all(&claude_dir).expect("create Claude dir");
+            assert_eq!(
+                status(),
+                HookStatus::Missing,
+                "a Claude dir with no rtk hook"
+            );
+        });
+    }
+
+    #[test]
+    fn test_probes_ignore_foreign_hooks_in_agent_files() {
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(home.join(".gemini")).expect("create .gemini");
+        std::fs::create_dir_all(home.join(".vibe")).expect("create .vibe");
+        std::fs::create_dir_all(&ws).expect("create ws");
+
+        test_isolation::with_root(&home, || {
+            let _entered = test_isolation::enter(&ws);
+            std::fs::write(
+                home.join(".gemini/settings.json"),
+                r#"{"hooks":{"BeforeTool":[{"matcher":"run_shell_command","hooks":[{"type":"command","command":"/usr/local/bin/audit-shell"}]}]}}"#,
+            )
+            .expect("write gemini settings");
+            std::fs::write(
+                home.join(".vibe/hooks.toml"),
+                "[[hooks]]\nname = \"audit\"\ntype = \"pre_tool\"\nmatch = \"bash\"\ncommand = \"rtk-audit\"\n",
+            )
+            .expect("write vibe hooks");
+
+            assert!(
+                !super::super::init::gemini::is_configured(),
+                "a non-rtk BeforeTool hook is not an rtk install"
+            );
+            assert!(
+                !super::super::init::vibe::is_configured(),
+                "a Vibe hook not named rtk-rewrite is not an rtk install"
+            );
+            assert!(!is_any_agent_configured(), "no agent is configured");
+        });
+    }
+
+    #[test]
+    fn test_check_and_warn_suppressed_when_agent_configured() {
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(home.join(".claude")).expect("create .claude");
+        std::fs::create_dir_all(&ws).expect("create ws");
+
+        test_isolation::with_root(&home, || {
+            let _entered = test_isolation::enter(&ws);
+            let marker = warn_marker_path().expect("marker path");
+
+            // With OpenCode plugin present, check_and_warn must not warn or touch marker
+            let opencode_plugin = home.join(".config/opencode/plugins/rtk.ts");
+            std::fs::create_dir_all(opencode_plugin.parent().unwrap()).unwrap();
+            std::fs::write(&opencode_plugin, b"export default {}").unwrap();
+
+            check_and_warn();
+            assert!(
+                !marker.exists(),
+                "check_and_warn must not warn when an agent is configured"
+            );
+
+            // Once removed, check_and_warn warns and touches the daily marker
+            std::fs::remove_file(&opencode_plugin).unwrap();
+            check_and_warn();
+            assert!(
+                marker.exists(),
+                "check_and_warn must warn and write marker when no agent is configured"
+            );
+        });
+    }
+
+    #[test]
+    fn test_all_agent_probes_and_arms_in_process() {
+        use crate::hooks::init::{InitContext, PatchMode};
+
+        // Helper that runs `f(home, ws)` inside an isolated home + workspace
+        let run_isolated = |f: &dyn Fn(&std::path::Path, &std::path::Path)| {
+            let tmp = test_isolation::tempdir();
+            let home = tmp.path().join("home");
+            let ws = tmp.path().join("ws");
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::create_dir_all(&ws).unwrap();
+            test_isolation::with_root(&home, || {
+                let _entered = test_isolation::enter(&ws);
+                assert!(
+                    !is_any_agent_configured(),
+                    "precondition: fresh isolated env has no configured agent"
+                );
+                f(&home, &ws);
+            });
         };
-        let claude_dir = home.join(".claude");
-        if !claude_dir.exists() {
-            assert_eq!(status(), HookStatus::Ok);
-            return;
-        }
-        // With .claude dir present, status must be one of the valid variants
-        let s = status();
-        assert!(
-            s == HookStatus::Ok || s == HookStatus::Outdated || s == HookStatus::Missing,
-            "Expected valid HookStatus variant, got {:?}",
-            s
-        );
+
+        // 1. Antigravity (local & global)
+        run_isolated(&|_home, _ws| {
+            super::super::init::antigravity::run_antigravity_mode(false, InitContext::default())
+                .unwrap();
+            assert!(is_any_agent_configured(), "antigravity local");
+            super::super::init::antigravity::uninstall_antigravity_mode(
+                false,
+                InitContext::default(),
+            )
+            .unwrap();
+            assert!(!is_any_agent_configured(), "antigravity local uninstalled");
+
+            super::super::init::antigravity::run_antigravity_mode(true, InitContext::default())
+                .unwrap();
+            assert!(is_any_agent_configured(), "antigravity global");
+            super::super::init::antigravity::uninstall_antigravity_mode(
+                true,
+                InitContext::default(),
+            )
+            .unwrap();
+            assert!(!is_any_agent_configured(), "antigravity global uninstalled");
+        });
+
+        // 2. Cursor (configured vs unregistered script)
+        run_isolated(&|home, _ws| {
+            let cursor_hooks = home.join(".cursor/hooks");
+            std::fs::create_dir_all(&cursor_hooks).unwrap();
+            std::fs::write(cursor_hooks.join("rtk-rewrite.sh"), "#!/bin/sh\n").unwrap();
+            assert!(
+                !is_any_agent_configured(),
+                "unregistered cursor script must not count as configured"
+            );
+            std::fs::remove_file(cursor_hooks.join("rtk-rewrite.sh")).unwrap();
+
+            std::fs::write(
+                home.join(".cursor/hooks.json"),
+                r#"{"version":1,"hooks":{"preToolUse":[{"matcher":"Shell","command":"rtk hook cursor"}]}}"#,
+            )
+            .unwrap();
+            assert!(is_any_agent_configured(), "cursor hooks.json");
+            std::fs::remove_file(home.join(".cursor/hooks.json")).unwrap();
+            assert!(!is_any_agent_configured(), "cursor removed");
+        });
+
+        // 3. Gemini (run_shell_command, wildcard *, non-shell matcher, unregistered script)
+        run_isolated(&|home, _ws| {
+            super::super::init::gemini::run_gemini(
+                true,
+                false,
+                PatchMode::Auto,
+                InitContext::default(),
+            )
+            .unwrap();
+            assert!(is_any_agent_configured(), "gemini init");
+
+            // Wildcard matcher
+            std::fs::write(
+                home.join(".gemini/settings.json"),
+                r#"{"hooks":{"BeforeTool":[{"matcher":"*","hooks":[{"command":"rtk hook gemini"}]}]}}"#,
+            )
+            .unwrap();
+            assert!(is_any_agent_configured(), "gemini wildcard matcher");
+
+            // Non-shell matcher must be rejected
+            std::fs::write(
+                home.join(".gemini/settings.json"),
+                r#"{"hooks":{"BeforeTool":[{"matcher":"ReadFile","hooks":[{"command":"rtk hook gemini"}]}]}}"#,
+            )
+            .unwrap();
+            assert!(!is_any_agent_configured(), "gemini non-shell matcher");
+
+            // Unregistered script file alone must be rejected
+            std::fs::remove_file(home.join(".gemini/settings.json")).unwrap();
+            let gemini_hooks = home.join(".gemini/hooks");
+            std::fs::create_dir_all(&gemini_hooks).unwrap();
+            std::fs::write(gemini_hooks.join("rtk-hook-gemini.sh"), "#!/bin/sh\n").unwrap();
+            assert!(!is_any_agent_configured(), "gemini unregistered script");
+        });
+
+        // 4. Codex
+        run_isolated(&|home, _ws| {
+            std::fs::create_dir_all(home.join(".codex")).unwrap();
+            std::fs::write(
+                home.join(".codex/hooks.json"),
+                r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook codex"}]}]}}"#,
+            )
+            .unwrap();
+            assert!(is_any_agent_configured(), "codex configured");
+            std::fs::remove_file(home.join(".codex/hooks.json")).unwrap();
+            assert!(!is_any_agent_configured(), "codex removed");
+        });
+
+        // 5. Droid
+        run_isolated(&|_home, _ws| {
+            super::super::init::droid::run_droid_mode(true, InitContext::default()).unwrap();
+            assert!(is_any_agent_configured(), "droid global");
+            super::super::init::droid::uninstall_droid(true, InitContext::default()).unwrap();
+            assert!(!is_any_agent_configured(), "droid uninstalled");
+        });
+
+        // 6. Trae (local & global)
+        run_isolated(&|_home, _ws| {
+            super::super::init::trae::run_trae_mode(false, InitContext::default()).unwrap();
+            assert!(is_any_agent_configured(), "trae local");
+            super::super::init::trae::uninstall_trae_mode(false, InitContext::default()).unwrap();
+            assert!(!is_any_agent_configured(), "trae local uninstalled");
+
+            super::super::init::trae::run_trae_mode(true, InitContext::default()).unwrap();
+            assert!(is_any_agent_configured(), "trae global");
+            super::super::init::trae::uninstall_trae_mode(true, InitContext::default()).unwrap();
+            assert!(!is_any_agent_configured(), "trae global uninstalled");
+        });
+
+        // 7. Hermes (full init/uninstall + individual arms)
+        run_isolated(&|home, _ws| {
+            super::super::init::hermes::run_hermes_mode(InitContext::default()).unwrap();
+            assert!(is_any_agent_configured(), "hermes init");
+            super::super::init::hermes::uninstall_hermes(InitContext::default()).unwrap();
+            assert!(!is_any_agent_configured(), "hermes uninstalled");
+
+            // Plugin file arm alone
+            let plugin_init = home.join(".hermes/plugins/rtk-rewrite/__init__.py");
+            std::fs::create_dir_all(plugin_init.parent().unwrap()).unwrap();
+            std::fs::write(&plugin_init, "# plugin\n").unwrap();
+            assert!(is_any_agent_configured(), "hermes plugin file arm");
+            std::fs::remove_file(&plugin_init).unwrap();
+            assert!(!is_any_agent_configured(), "hermes plugin file removed");
+
+            // config.yaml arm alone
+            std::fs::write(
+                home.join(".hermes/config.yaml"),
+                "plugins:\n  enabled:\n    - rtk-rewrite\n",
+            )
+            .unwrap();
+            assert!(is_any_agent_configured(), "hermes config.yaml arm");
+            std::fs::write(
+                home.join(".hermes/config.yaml"),
+                "plugins:\n  enabled:\n    - other\n",
+            )
+            .unwrap();
+            assert!(!is_any_agent_configured(), "hermes unrelated config.yaml");
+        });
+
+        // 8. Pi & OMP (local & global)
+        run_isolated(&|_home, _ws| {
+            super::super::init::pi::run_pi_mode_with_patch_mode(
+                false,
+                PatchMode::Auto,
+                InitContext::default(),
+            )
+            .unwrap();
+            assert!(is_any_agent_configured(), "pi local");
+            std::fs::remove_file(user_dirs::in_working_dir(".pi/extensions/rtk.ts")).unwrap();
+            assert!(!is_any_agent_configured(), "pi local removed");
+
+            super::super::init::pi::run_pi_mode_with_patch_mode(
+                true,
+                PatchMode::Auto,
+                InitContext::default(),
+            )
+            .unwrap();
+            assert!(is_any_agent_configured(), "pi global");
+            std::fs::remove_file(
+                user_dirs::home()
+                    .unwrap()
+                    .join(".pi/agent/extensions/rtk.ts"),
+            )
+            .unwrap();
+            assert!(!is_any_agent_configured(), "pi global removed");
+
+            super::super::init::pi::run_omp_mode_with_patch_mode(
+                false,
+                PatchMode::Auto,
+                InitContext::default(),
+            )
+            .unwrap();
+            assert!(is_any_agent_configured(), "omp local");
+            std::fs::remove_file(user_dirs::in_working_dir(".omp/extensions/rtk.ts")).unwrap();
+            assert!(!is_any_agent_configured(), "omp local removed");
+
+            super::super::init::pi::run_omp_mode_with_patch_mode(
+                true,
+                PatchMode::Auto,
+                InitContext::default(),
+            )
+            .unwrap();
+            assert!(is_any_agent_configured(), "omp global");
+            std::fs::remove_file(
+                user_dirs::home()
+                    .unwrap()
+                    .join(".omp/agent/extensions/rtk.ts"),
+            )
+            .unwrap();
+            assert!(!is_any_agent_configured(), "omp global removed");
+        });
+
+        // 9. Vibe
+        run_isolated(&|_home, _ws| {
+            super::super::init::vibe::run_vibe_mode(
+                true,
+                false,
+                PatchMode::Auto,
+                InitContext::default(),
+            )
+            .unwrap();
+            assert!(is_any_agent_configured(), "vibe global");
+            super::super::init::vibe::uninstall_vibe(InitContext::default()).unwrap();
+            assert!(!is_any_agent_configured(), "vibe uninstalled");
+        });
     }
 }

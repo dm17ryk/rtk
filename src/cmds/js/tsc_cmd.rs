@@ -104,7 +104,7 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
         return runner::run_streamed(
             cmd,
             "tsc",
-            &args.join(" "),
+            &crate::core::shell::display_args(args),
             Box::new(BlockStreamFilter::new(TscHandler::new())),
             runner::RunOptions::with_tee("tsc"),
         );
@@ -113,7 +113,7 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     runner::run_ai_filtered_with_exit(
         cmd,
         "tsc",
-        &args.join(" "),
+        &crate::core::shell::display_args(args),
         BudgetClass::Diagnostic,
         |raw, exit_code| {
             Ok(runner::document_from_filtered(

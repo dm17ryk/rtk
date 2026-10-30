@@ -1,12 +1,14 @@
-/// Compact filter for `wc` — strips redundant paths and alignment padding.
-///
-/// Compression examples:
-/// - `wc file.py`     → `30L 96W 978B`
-/// - `wc -l file.py`  → `30`
-/// - `wc -w file.py`  → `96`
-/// - `wc -c file.py`  → `978`
-/// - `wc -l *.py`     → table with common path prefix stripped
+//! Compact filter for `wc` — strips redundant paths and alignment padding.
+//!
+//! Compression examples:
+//! - `wc file.py`     → `30L 96W 978B`
+//! - `wc -l file.py`  → `30`
+//! - `wc -w file.py`  → `96`
+//! - `wc -c file.py`  → `978`
+//! - `wc -l *.py`     → table with common path prefix stripped
+
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::display_args;
 use crate::core::utils::{ChildArgExt, resolved_command};
 #[cfg(windows)]
 use crate::core::utils::{HostCommand, resolve_host_command};
@@ -25,7 +27,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     cmd.child_args(args);
 
     if verbose > 0 {
-        eprintln!("Running: wc {}", args.join(" "));
+        eprintln!("Running: wc {}", display_args(args));
     }
 
     let mode = detect_mode(args);
@@ -42,7 +44,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_ai_from_filter(
         cmd,
         "wc",
-        &args.join(" "),
+        &display_args(args),
         crate::core::ai_output::BudgetClass::Collection,
         |stdout| filter_wc_output(stdout, &mode),
         opts,
@@ -109,8 +111,8 @@ fn run_windows_native(args: &[String], verbose: u8) -> Result<i32> {
     println!("{}", rendered);
     let timer = crate::core::tracking::TimedExecution::start();
     timer.track(
-        &format!("wc {}", args.join(" ")),
-        &format!("rtk wc {}", args.join(" ")),
+        &format!("wc {}", display_args(args)),
+        &format!("rtk wc {}", display_args(args)),
         &rendered,
         &rendered,
     );

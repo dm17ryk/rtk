@@ -1,11 +1,13 @@
 //! MCP response-envelope contract checks at the real stdio boundary.
 
+mod common;
+
 use serde_json::Value;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 fn call_mcp(arguments: Value) -> Value {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut child = common::rtk_command()
         .arg("mcp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

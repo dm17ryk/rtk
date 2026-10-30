@@ -1,11 +1,13 @@
 //! Deterministic output-only host-adapter contract checks.
 
+mod common;
+
 use serde_json::Value;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 fn run_adapter(payload: &str) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut child = common::rtk_command()
         .args(["hook", "claude", "--event", "post-tool-use"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

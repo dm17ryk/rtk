@@ -1,5 +1,6 @@
+mod common;
+
 use std::fs;
-use std::process::Command;
 
 #[test]
 fn rg_large_line_is_summarized_without_raw_fallback() {
@@ -8,7 +9,7 @@ fn rg_large_line_is_summarized_without_raw_fallback() {
     let content = format!("needle {}\n", "x".repeat(70 * 1024));
     fs::write(&file, content).expect("fixture");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let output = common::rtk_command()
         .args(["rg", "needle", file.to_str().expect("path")])
         .env("RTK_TEE", "0")
         .output()
@@ -39,7 +40,7 @@ fn rg_large_result_set_reports_total_and_omission() {
         .collect::<String>();
     fs::write(&file, content).expect("fixture");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let output = common::rtk_command()
         .args(["rg", "needle", file.to_str().expect("path")])
         .env("RTK_TEE", "0")
         .output()

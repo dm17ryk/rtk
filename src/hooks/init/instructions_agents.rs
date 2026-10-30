@@ -1,6 +1,7 @@
 //! Instruction-only agents: configured by writing an instructions file, no hook installed.
 
 use super::*;
+use crate::core::user_dirs;
 
 /// Agents without a command hook must prefix `rtk` themselves, which only the `full` level
 /// teaches, so they always receive `RTK_AWARENESS_FULL`. This prints the one-line note that
@@ -66,7 +67,7 @@ pub(super) fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
 }
 
 pub fn run_kilocode_mode(ctx: InitContext) -> Result<()> {
-    run_kilocode_mode_at(&std::env::current_dir()?, ctx)
+    run_kilocode_mode_at(&user_dirs::current_dir()?, ctx)
 }
 
 pub(super) fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
@@ -93,34 +94,6 @@ pub(super) fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<
     Ok(())
 }
 
-pub fn run_antigravity_mode(ctx: InitContext) -> Result<()> {
-    run_antigravity_mode_at(&std::env::current_dir()?, ctx)
-}
-
-pub(super) fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
-    print_instructions_agents_awareness_note("Antigravity", ctx);
-    // Antigravity reads .agents/rules/ from the project root (workspace-scoped)
-    let target_dir = base_dir.join(".agents/rules");
-    let rules_path = target_dir.join("antigravity-rtk-rules.md");
-    install_agent_rules(
-        &rules_path,
-        antigravity_rules(),
-        "Antigravity rules",
-        "rtk init --agent antigravity",
-        ctx,
-    )?;
-    if ctx.dry_run {
-        print_dry_run_footer();
-    } else {
-        println!("\nRTK configured for Google Antigravity.\n");
-        println!("  Rules: .agents/rules/antigravity-rtk-rules.md");
-        println!("  Antigravity will now use rtk commands for token savings.");
-        println!("  Test with: git status\n");
-    }
-
-    Ok(())
-}
-
 // Kimi AI support
 //
 // Kimi Code CLI has NO `.kimirules` convention — that file is never read.
@@ -131,7 +104,7 @@ pub(super) fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Resu
 // inject an RTK instructions block into AGENTS.md — same mechanism as Codex.
 
 pub fn run_kimi_mode(ctx: InitContext) -> Result<()> {
-    run_kimi_mode_at(&std::env::current_dir()?, ctx)
+    run_kimi_mode_at(&user_dirs::current_dir()?, ctx)
 }
 
 pub(super) fn run_kimi_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
@@ -191,31 +164,6 @@ mod tests {
     }
 
     #[test]
-    fn test_antigravity_mode_creates_rules_file() {
-        let temp = TempDir::new().unwrap();
-        run_antigravity_mode_at(temp.path(), InitContext::default()).unwrap();
-
-        let rules_path = temp.path().join(".agents/rules/antigravity-rtk-rules.md");
-        assert!(rules_path.exists(), "Rules file should be created");
-        let content = fs::read_to_string(&rules_path).unwrap();
-        assert!(content.contains("RTK"), "Rules file should contain RTK");
-    }
-
-    #[test]
-    fn test_antigravity_mode_is_idempotent() {
-        let temp = TempDir::new().unwrap();
-        run_antigravity_mode_at(temp.path(), InitContext::default()).unwrap();
-
-        let path = temp.path().join(".agents/rules/antigravity-rtk-rules.md");
-        let first = fs::read_to_string(&path).unwrap();
-
-        // Second run should not overwrite
-        run_antigravity_mode_at(temp.path(), InitContext::default()).unwrap();
-        let second = fs::read_to_string(&path).unwrap();
-        assert_eq!(first, second, "Idempotent: content should not change");
-    }
-
-    #[test]
     fn test_kimi_mode_writes_agents_md() {
         let temp = TempDir::new().unwrap();
         run_kimi_mode_at(temp.path(), InitContext::default()).unwrap();
@@ -266,14 +214,6 @@ mod tests {
                     .unwrap()
                     .contains(RTK_AWARENESS_FULL),
                 "kilocode with level {level}"
-            );
-
-            run_antigravity_mode_at(temp.path(), ctx).unwrap();
-            assert!(
-                fs::read_to_string(temp.path().join(".agents/rules/antigravity-rtk-rules.md"))
-                    .unwrap()
-                    .contains(RTK_AWARENESS_FULL),
-                "antigravity with level {level}"
             );
 
             run_kimi_mode_at(temp.path(), ctx).unwrap();
