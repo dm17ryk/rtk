@@ -1521,6 +1521,12 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// List tree entries; plain path lists are folded by directory
+    LsTree {
+        /// Git ls-tree arguments (tree-ish, paths, flags)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported git subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -2495,39 +2501,61 @@ fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
     opencode: bool,
     gemini: bool,
     codex: bool,
+    patch_mode: hooks::init::PatchMode,
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
     uninstall_standard: UninstallStandard,
-) -> Result<()>
+) -> Result<i32>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
-    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
+    UninstallStandard: FnOnce(
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        hooks::init::PatchMode,
+        hooks::init::InitContext,
+    ) -> Result<i32>,
 {
+    if ctx.verbose > 0 {
+        eprintln!(
+            "[rtk-debug] init.uninstall agent={agent:?} global={global} opencode={opencode} gemini={gemini} codex={codex}"
+        );
+    }
     if gemini || codex {
-        return uninstall_standard(global, gemini, codex, false, false, ctx);
+        return uninstall_standard(global, gemini, codex, false, false, false, patch_mode, ctx);
     }
     if opencode {
-        return hooks::init::uninstall_opencode_mode(ctx);
+        return hooks::init::uninstall_opencode_mode(ctx).map(|()| 0);
     }
-
     match agent {
-        Some(AgentTarget::Trae) => hooks::init::uninstall_trae_mode(global, ctx),
+        Some(AgentTarget::Trae) => hooks::init::uninstall_trae_mode(global, ctx).map(|()| 0),
         Some(AgentTarget::Omp) => {
-            hooks::init::uninstall_omp_with_patch_mode(global, hooks::init::PatchMode::Ask, ctx)
+            uninstall_standard(global, false, false, false, false, true, patch_mode, ctx)
         }
-        Some(AgentTarget::Hermes) => uninstall_hermes(ctx),
-        Some(AgentTarget::Droid) => hooks::init::uninstall_droid(global, ctx),
-        Some(AgentTarget::Vibe) => hooks::init::uninstall_vibe(ctx),
-        Some(AgentTarget::Cursor) => uninstall_standard(global, false, false, true, false, ctx),
-        Some(AgentTarget::Pi) => uninstall_standard(global, false, false, false, true, ctx),
-        Some(AgentTarget::Windsurf) => hooks::init::uninstall_windsurf_mode(ctx),
-        Some(AgentTarget::Cline) => hooks::init::uninstall_cline_mode(ctx),
-        Some(AgentTarget::Kilocode) => hooks::init::uninstall_kilocode_mode(ctx),
-        Some(AgentTarget::Antigravity) => hooks::init::uninstall_antigravity_mode(global, ctx),
-        Some(AgentTarget::Kimi) => hooks::init::uninstall_kimi_mode(ctx),
-        Some(AgentTarget::Claude) | None if !global => hooks::init::uninstall_claude_local(ctx),
+        Some(AgentTarget::Hermes) => uninstall_hermes(ctx).map(|()| 0),
+        Some(AgentTarget::Droid) => hooks::init::uninstall_droid(global, ctx).map(|()| 0),
+        Some(AgentTarget::Vibe) => hooks::init::uninstall_vibe(ctx).map(|()| 0),
+        Some(AgentTarget::Cursor) => {
+            uninstall_standard(global, false, false, true, false, false, patch_mode, ctx)
+        }
+        Some(AgentTarget::Pi) => {
+            uninstall_standard(global, false, false, false, true, false, patch_mode, ctx)
+        }
+        Some(AgentTarget::Windsurf) => hooks::init::uninstall_windsurf_mode(ctx).map(|()| 0),
+        Some(AgentTarget::Cline) => hooks::init::uninstall_cline_mode(ctx).map(|()| 0),
+        Some(AgentTarget::Kilocode) => hooks::init::uninstall_kilocode_mode(ctx).map(|()| 0),
+        Some(AgentTarget::Antigravity) => {
+            hooks::init::uninstall_antigravity_mode(global, ctx).map(|()| 0)
+        }
+        Some(AgentTarget::Kimi) => hooks::init::uninstall_kimi_mode(ctx).map(|()| 0),
+        Some(AgentTarget::Claude) | None if !global => {
+            hooks::init::uninstall_claude_local(ctx).map(|()| 0)
+        }
         Some(AgentTarget::Claude) | None => {
-            uninstall_standard(true, false, false, false, false, ctx)
+            uninstall_standard(true, false, false, false, false, false, patch_mode, ctx)
         }
     }
 }
@@ -2945,6 +2973,13 @@ fn run_cli() -> Result<i32> {
                 GitCommands::Other(args) => {
                     git_cmd::run_passthrough(&args, &global_args, cli.verbose)?
                 }
+                GitCommands::LsTree { args } => git_cmd::run(
+                    git_cmd::GitCommand::LsTree,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
             }
         }
 
@@ -3264,23 +3299,23 @@ fn run_cli() -> Result<i32> {
                     hooks::mcp_config::uninstall(mcp_client, global, ctx)?;
                 }
             } else if uninstall {
-                uninstall_init_dispatch(
+                let exit_code = uninstall_init_dispatch(
                     agent,
                     global,
                     opencode,
                     gemini,
                     codex,
+                    patch_mode,
                     ctx,
                     hooks::init::uninstall_hermes,
-                    |global, gemini, codex, cursor, pi, ctx| {
-                        hooks::init::uninstall_with_patch_mode(
-                            global, gemini, codex, cursor, pi, false, patch_mode, ctx,
-                        )
-                    },
+                    hooks::init::uninstall_with_patch_mode,
                 )?;
-                if manage_mcp {
+                if manage_mcp && exit_code == 0 {
                     hooks::mcp_config::uninstall(mcp_client, global, ctx)?;
+                } else if manage_mcp && cli.verbose > 0 {
+                    eprintln!("[rtk-debug] init.uninstall mcp-cleanup=deferred exit={exit_code}");
                 }
+                return Ok(exit_code);
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -4006,7 +4041,8 @@ fn run_cli() -> Result<i32> {
                     return Ok(2);
                 };
                 match path.decide(&raw) {
-                    HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => {
+                    HookDecision::AllowRewrite(rewritten)
+                    | HookDecision::AskRewrite(rewritten, _) => {
                         println!("{}", rewritten);
                         0
                     }
@@ -4880,6 +4916,7 @@ mod tests {
             false,
             false,
             false,
+            hooks::init::PatchMode::Ask,
             ctx,
             |ctx| {
                 hermes_called.set(true);
@@ -4887,9 +4924,9 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
-            |_, _, _, _, _, _| {
+            |_, _, _, _, _, _, _, _| {
                 standard_called.set(true);
-                Ok(())
+                Ok(0)
             },
         );
 
@@ -4937,13 +4974,15 @@ mod tests {
             false,
             false,
             false,
+            hooks::init::PatchMode::Auto,
             hooks::init::InitContext::default(),
             |_| panic!("Pi must not use Hermes cleanup"),
-            |global, gemini, codex, cursor, pi, _| {
+            |global, gemini, codex, cursor, pi, omp, patch_mode, _| {
                 standard_called.set(true);
                 assert!(global && pi);
-                assert!(!gemini && !codex && !cursor);
-                Ok(())
+                assert!(!gemini && !codex && !cursor && !omp);
+                assert_eq!(patch_mode, hooks::init::PatchMode::Auto);
+                Ok(0)
             },
         )
         .expect("Pi cleanup succeeds");
