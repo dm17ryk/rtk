@@ -92,18 +92,16 @@ fn codex_integration_installed(home: &std::path::Path) -> bool {
         .ok()
         .is_some_and(|content| content.contains("<!-- rtk-instructions"));
 
-    if crate::service::debug_enabled() {
-        eprintln!(
-            "[rtk-debug] hook_check.codex decision={} agents_reference={} instructions_marker={}",
-            if agents_has_rtk || instructions_are_rtk {
-                "installed"
-            } else {
-                "not-installed"
-            },
-            agents_has_rtk,
-            instructions_are_rtk
-        );
-    }
+    crate::core::debug_log::log(format_args!(
+        "hook_check.codex decision={} agents_reference={} instructions_marker={}",
+        if agents_has_rtk || instructions_are_rtk {
+            "installed"
+        } else {
+            "not-installed"
+        },
+        agents_has_rtk,
+        instructions_are_rtk
+    ));
     agents_has_rtk || instructions_are_rtk || codex_status_in(&codex_dir) == CodexHookStatus::Ready
 }
 

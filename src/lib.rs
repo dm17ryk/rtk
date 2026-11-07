@@ -824,11 +824,7 @@ enum Commands {
 
     /// Interactive local dashboard for savings, commands, health, and tee artifacts
     #[command(alias = "tui")]
-    Dashboard {
-        /// Filter the dashboard to the current project
-        #[arg(short, long)]
-        project: bool,
-    },
+    Dashboard(analytics::dashboard::Options),
 
     /// Manage telemetry consent and data (RGPD/GDPR)
     Telemetry {
@@ -3786,8 +3782,8 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Dashboard { project } => {
-            analytics::dashboard::run(project)?;
+        Commands::Dashboard(options) => {
+            analytics::dashboard::run(&options)?;
             0
         }
 

@@ -98,8 +98,82 @@ directory and `.log` files.
 
 ## Dashboard
 
-Run rtk dashboard (or its rtk tui alias) for a local interactive view of the
-same tracking data. It provides Overview, Commands, Activity, Health, and
-Artifacts tabs, supports global or current-project scope, and refreshes every
-30 seconds. Press 1-5 to select a tab, Tab or n/p to navigate, and q or Esc
-to exit.
+Run `rtk dashboard` (or `rtk tui`) for Overview, Commands, Error Commands,
+Activity, Health, and Artifacts tabs. Use `--project` for the current project
+and its subdirectories. Data refreshes every 30 seconds; `r` refreshes immediately.
+
+Every tab loads all available rows. The terminal shows as many rows as fit,
+with the visible range and total in the table title. Sorts apply to the entire
+table before paging, so commands with zero or negative savings are accessible.
+
+| Keys | Action |
+| --- | --- |
+| `1`-`6`, `Tab` / `Shift+Tab`, `n` / `p` | Select a tab |
+| `s` / `S` | Next / previous sort column |
+| `o` | Toggle ascending / descending order |
+| Up / Down or `k` / `j` | Scroll one row |
+| Page Up / Page Down | Scroll one page |
+| Home / End | First / last page |
+| `q` / Esc | Exit |
+
+The active column and direction appear in the header and table title. Each tab
+remembers its sort and scroll position across tab switches and refreshes.
+Commands and errors expose command, count, saved tokens, weighted average
+savings, average execution time, impact, latest date (UTC), and remaining output.
+The Error Commands tab also sorts by error. Activity groups these metrics by
+UTC day; Health sorts by name/value; Artifacts sorts by size, modification date
+(UTC), or path. Impact represents total tokens saved, so its order matches Saved;
+zero and negative savings have an empty impact bar. Tracking and artifact
+retention settings still determine which records are available.
+
+Use the same controls from the CLI or through MCP `run_filtered`, for example:
+
+```bash
+rtk dashboard --tab commands --sort avg --order asc
+rtk dashboard --tab commands --sort output --order desc
+rtk dashboard --tab errors --sort count --order desc --plain
+rtk dashboard --tab activity --sort date --order asc --plain
+```
+
+`--plain` prints every row of the selected tab; redirected/non-terminal output
+uses this mode automatically. `--sort` initializes tabs that have the selected
+column; other tabs retain their default column.
+
+Artifact discovery is best-effort. If the tee directory or an entry cannot be
+read, the Artifacts tab reports a warning and retains any entries it could read;
+commands and the other analytics tabs remain available.
+
+With `RTK_DEBUG=1`, diagnostics sharing the interactive terminal are buffered
+and emitted to stderr after the dashboard closes. The last 256 messages are
+retained, with an omission count for longer sessions. Redirect stderr to a file
+to stream and retain all diagnostics immediately without disturbing the screen.
+Plain exports also continue logging immediately.
+
+### Understanding efficiency
+
+This fork counts every recorded input size in headline, daily, weekly, and monthly
+statistics. RTK measures output reduction before client processing. The client
+applies its own output limits after RTK returns the filtered result; those limits
+vary by tool, configuration, and client and are not RTK accounting limits.
+
+An upstream update excluded executions above 7,500 estimated input tokens, based
+on 30,000 characters divided by four. That excluded large raw outputs even when
+RTK reduced them below the client's limit. This fork removes that cutoff. Existing
+history is recalculated when queried; no database migration or history reset is
+needed. The legacy JSON `oversized_excluded` field remains present and is zero.
+
+The global percentage is weighted saved tokens divided by input tokens, including
+exact/unfiltered executions. Supported efficiency excludes the `exact` output
+contract. These are token-weighted ratios, rather than averages of command
+percentages. Large executions can therefore change them substantially.
+
+The dashboard excludes runtime errors from its efficiency and activity metrics
+and reports them on the Error Commands tab. Diagnostic tables use signed savings,
+exposing output expansion as negative savings. Headline totals retain the existing
+per-execution nonnegative savings convention. These metrics describe RTK's output
+reduction; they do not measure the client's final token consumption or bill.
+
+Claude Code's [output limits](https://code.claude.com/docs/en/tools-reference#output-limits)
+apply to the command result it receives. The default successful Bash inline limit
+is approximately 30,000 characters; `bashOutputMaxChars` can configure that limit.
+It is separate from the model's context window.

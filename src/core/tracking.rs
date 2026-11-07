@@ -284,6 +284,28 @@ pub struct ResidualCommandStats {
     pub exact_count: usize,
 }
 
+/// Complete diagnostic groups for the dashboard, including every input size.
+#[derive(Debug, Clone, Default)]
+pub struct DashboardMetrics {
+    pub command: String,
+    pub error: String,
+    pub count: usize,
+    pub input: usize,
+    pub output: usize,
+    /// Signed so output expansion remains visible instead of looking like zero savings.
+    pub saved: i64,
+    pub average_time_ms: u64,
+    /// Normalized UTC timestamp; lexical order is chronological.
+    pub latest: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum DashboardGrouping {
+    Command,
+    Error,
+    Day,
+}
+
 /// Aggregated statistics across all recorded commands.
 #[derive(Debug)]
 pub struct AttributionRow {
@@ -351,12 +373,15 @@ pub struct GainSummary {
     /// Activity rows, oldest first: (date, saved_tokens). The caller may limit the rows.
     pub by_day: Vec<(String, usize)>,
     /// Total number of days represented by the dashboard activity query.
+    #[allow(dead_code)] // Compatibility fields for bounded summary API consumers.
     pub activity_total_days: usize,
     /// Runtime-error command groups returned for the dashboard error tab.
+    #[allow(dead_code)] // Compatibility fields for bounded summary API consumers.
     pub error_commands: Vec<ErrorCommandStats>,
     /// Total number of runtime-error command groups before the viewport limit.
+    #[allow(dead_code)] // Compatibility fields for bounded summary API consumers.
     pub error_command_groups: usize,
-    /// Rows left out of the totals above: input over [`HEADLINE_INPUT_CAP_TOKENS`]
+    /// Compatibility field for exports. Always zero: every input size is included.
     pub oversized_excluded: usize,
 }
 
@@ -534,15 +559,6 @@ pub fn average_time_ms(total_time_ms: u64, timed_commands: usize) -> u64 {
 /// `user_version` triggers exactly one re-run of the full migration sequence, then
 /// the pragma is updated so subsequent opens skip straight past it.
 const SCHEMA_VERSION: i64 = 6;
-
-/// Ceiling on a row's `input_tokens` for rate-bearing aggregates (the gain
-/// headline and the daily/weekly/monthly tables). 7,500 DB tokens is exactly
-/// 30,000 chars at the bytes/4 estimate — Claude Code's default Bash output
-/// limit (BASH_MAX_OUTPUT_LENGTH), i.e. the most the agent would have
-/// ingested without rtk. Rows above it claim savings against bytes the agent
-/// would never have seen; they stay in the diagnostic listings and are
-/// counted in `GainSummary::oversized_excluded`.
-pub const HEADLINE_INPUT_CAP_TOKENS: usize = 7_500;
 
 /// Create all tables/indexes, run column migrations, and stamp `user_version` to
 /// `SCHEMA_VERSION` for the on-disk tracker DB.
@@ -1612,7 +1628,7 @@ impl Tracker {
     /// Get summary statistics with an optional command-result limit.
     ///
     /// `Some(n)` preserves the historical top-command behavior. `None` is
-    /// used by the dashboard, which applies its own terminal-height limit.
+    /// used by the dashboard, which sorts and scrolls the complete history.
     pub fn get_summary_filtered_with_command_limit(
         &self,
         project_path: Option<&str>,
@@ -1623,6 +1639,7 @@ impl Tracker {
 
     /// Get the dashboard summary with errored executions excluded from the
     /// efficiency, impact, and activity metrics.
+    #[allow(dead_code)] // Retain the existing bounded dashboard API for callers.
     pub fn get_dashboard_summary(
         &self,
         project_path: Option<&str>,
@@ -1641,12 +1658,94 @@ impl Tracker {
         Ok(summary)
     }
 
+    /// Dashboard headline only: group listings are loaded separately by
+    /// `get_dashboard_metrics`, so never build or retain duplicate breakdowns.
+    pub fn get_dashboard_headline(&self, project_path: Option<&str>) -> Result<GainSummary> {
+        self.get_summary_totals_filtered(project_path, false)
+    }
+
+    /// Aggregate every available diagnostic row before the UI sorts or pages it.
+    /// Errors remain separate from successful commands and activity. Only static
+    /// SQL fragments are interpolated; project values stay bound parameters.
+    pub fn get_dashboard_metrics(
+        &self,
+        project_path: Option<&str>,
+        grouping: DashboardGrouping,
+    ) -> Result<Vec<DashboardMetrics>> {
+        let (label, group, error_filter) = match grouping {
+            DashboardGrouping::Command => ("rtk_cmd", "rtk_cmd", "runtime_error IS NULL"),
+            DashboardGrouping::Error => (
+                "rtk_cmd",
+                "rtk_cmd, runtime_error",
+                "runtime_error IS NOT NULL",
+            ),
+            DashboardGrouping::Day => (
+                "DATE(timestamp)",
+                "DATE(timestamp)",
+                "runtime_error IS NULL",
+            ),
+        };
+        let error = if matches!(grouping, DashboardGrouping::Error) {
+            "runtime_error"
+        } else {
+            "''"
+        };
+        let timing = timing_sql("rtk_cmd");
+        let query = format!(
+            "SELECT {label}, {error}, COUNT(*),
+                    COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(saved_tokens), 0),
+                    COALESCE(AVG(CASE WHEN {timing} = 1 THEN exec_time_ms END), 0),
+                    COALESCE(MAX(datetime(timestamp)), '')
+             FROM commands
+             WHERE {error_filter}
+               AND (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+             GROUP BY {group}
+             ORDER BY {label}, {error}"
+        );
+        let (project_exact, project_glob) = project_filter_params(project_path);
+        let mut statement = self.conn.prepare(&query)?;
+        let rows = statement.query_map(params![project_exact, project_glob], |row| {
+            Ok(DashboardMetrics {
+                command: row.get(0)?,
+                error: row.get(1)?,
+                count: row.get::<_, i64>(2)? as usize,
+                input: row.get::<_, i64>(3)? as usize,
+                output: row.get::<_, i64>(4)? as usize,
+                saved: row.get(5)?,
+                average_time_ms: row.get::<_, f64>(6)? as u64,
+                latest: row.get(7)?,
+            })
+        })?;
+        let rows = rows.collect::<Result<Vec<_>, _>>()?;
+        crate::core::debug_log::log(format_args!(
+            "dashboard.query grouping={grouping:?} project={} groups={} limit=none input_cap=none",
+            project_path.is_some(),
+            rows.len()
+        ));
+        Ok(rows)
+    }
+
     fn get_summary_filtered_with_options(
         &self,
         project_path: Option<&str>,
         command_limit: Option<usize>,
         include_errors: bool,
         activity_limit: Option<usize>,
+    ) -> Result<GainSummary> {
+        let mut summary = self.get_summary_totals_filtered(project_path, include_errors)?;
+        summary.by_command = self.get_by_command(project_path, command_limit, include_errors)?;
+        let (by_day, activity_total_days) =
+            self.get_by_day(project_path, include_errors, activity_limit)?;
+        summary.by_day = by_day;
+        summary.activity_total_days = activity_total_days;
+        Ok(summary)
+    }
+
+    fn get_summary_totals_filtered(
+        &self,
+        project_path: Option<&str>,
+        include_errors: bool,
     ) -> Result<GainSummary> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut total_commands = 0usize;
@@ -1657,7 +1756,6 @@ impl Tracker {
         let mut supported_saved = 0usize;
         let mut total_time_ms = 0u64;
         let mut error_count = 0usize;
-        let mut oversized_excluded = 0usize;
         let mut timed_commands = 0usize;
 
         let mut stmt = self.conn.prepare(
@@ -1689,10 +1787,6 @@ impl Tracker {
                     continue;
                 }
             }
-            if input > HEADLINE_INPUT_CAP_TOKENS {
-                oversized_excluded += 1;
-                continue;
-            }
             total_commands += 1;
             total_input += input;
             total_output += output;
@@ -1719,10 +1813,10 @@ impl Tracker {
         };
 
         let avg_time_ms = average_time_ms(total_time_ms, timed_commands);
-
-        let by_command = self.get_by_command(project_path, command_limit, include_errors)?;
-        let (by_day, activity_total_days) =
-            self.get_by_day(project_path, include_errors, activity_limit)?;
+        crate::core::debug_log::log(format_args!(
+            "tracking.summary input_cap=none project={} include_errors={include_errors} commands={total_commands} input={total_input} output={total_output} saved={total_saved} errors={error_count}",
+            project_path.is_some()
+        ));
 
         Ok(GainSummary {
             total_commands,
@@ -1734,12 +1828,12 @@ impl Tracker {
             error_count,
             total_time_ms,
             avg_time_ms,
-            by_command,
-            by_day,
-            activity_total_days,
+            by_command: Vec::new(),
+            by_day: Vec::new(),
+            activity_total_days: 0,
             error_commands: Vec::new(),
             error_command_groups: 0,
-            oversized_excluded,
+            oversized_excluded: 0,
         })
     }
 
@@ -1785,6 +1879,7 @@ impl Tracker {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    #[allow(dead_code)] // Used by the compatibility bounded dashboard API.
     fn get_error_commands(
         &self,
         project_path: Option<&str>,
@@ -1959,44 +2054,36 @@ impl Tracker {
                 SUM(CASE WHEN {timing} = 1 THEN 1 ELSE 0 END) as timed_commands
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
-               AND input_tokens <= ?3
              GROUP BY DATE(timestamp)
              ORDER BY DATE(timestamp) DESC"
             ), // added: project filter
         )?;
 
-        let rows = stmt.query_map(
-            params![
-                project_exact,
-                project_glob,
-                HEADLINE_INPUT_CAP_TOKENS as i64
-            ],
-            |row| {
-                // added: params
-                let input = row.get::<_, i64>(2)? as usize;
-                let saved = row.get::<_, i64>(4)?.max(0) as usize; // clamp net-negative group
-                let commands = row.get::<_, i64>(1)? as usize;
-                let total_time = row.get::<_, i64>(5)? as u64;
-                let timed_commands = row.get::<_, i64>(6)? as usize;
-                let savings_pct = if input > 0 {
-                    (saved as f64 / input as f64) * 100.0
-                } else {
-                    0.0
-                };
+        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+            // added: params
+            let input = row.get::<_, i64>(2)? as usize;
+            let saved = row.get::<_, i64>(4)?.max(0) as usize; // clamp net-negative group
+            let commands = row.get::<_, i64>(1)? as usize;
+            let total_time = row.get::<_, i64>(5)? as u64;
+            let timed_commands = row.get::<_, i64>(6)? as usize;
+            let savings_pct = if input > 0 {
+                (saved as f64 / input as f64) * 100.0
+            } else {
+                0.0
+            };
 
-                Ok(DayStats {
-                    date: row.get(0)?,
-                    commands,
-                    input_tokens: input,
-                    output_tokens: row.get::<_, i64>(3)? as usize,
-                    saved_tokens: saved,
-                    savings_pct,
-                    total_time_ms: total_time,
-                    avg_time_ms: average_time_ms(total_time, timed_commands),
-                    timed_commands,
-                })
-            },
-        )?;
+            Ok(DayStats {
+                date: row.get(0)?,
+                commands,
+                input_tokens: input,
+                output_tokens: row.get::<_, i64>(3)? as usize,
+                saved_tokens: saved,
+                savings_pct,
+                total_time_ms: total_time,
+                avg_time_ms: average_time_ms(total_time, timed_commands),
+                timed_commands,
+            })
+        })?;
 
         let mut result: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
         result.reverse();
@@ -2042,45 +2129,37 @@ impl Tracker {
                 SUM(CASE WHEN {timing} = 1 THEN 1 ELSE 0 END) as timed_commands
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
-               AND input_tokens <= ?3
              GROUP BY week_start
              ORDER BY week_start DESC"
             ), // added: project filter
         )?;
 
-        let rows = stmt.query_map(
-            params![
-                project_exact,
-                project_glob,
-                HEADLINE_INPUT_CAP_TOKENS as i64
-            ],
-            |row| {
-                // added: params
-                let input = row.get::<_, i64>(3)? as usize;
-                let saved = row.get::<_, i64>(5)?.max(0) as usize; // clamp net-negative group
-                let commands = row.get::<_, i64>(2)? as usize;
-                let total_time = row.get::<_, i64>(6)? as u64;
-                let timed_commands = row.get::<_, i64>(7)? as usize;
-                let savings_pct = if input > 0 {
-                    (saved as f64 / input as f64) * 100.0
-                } else {
-                    0.0
-                };
+        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+            // added: params
+            let input = row.get::<_, i64>(3)? as usize;
+            let saved = row.get::<_, i64>(5)?.max(0) as usize; // clamp net-negative group
+            let commands = row.get::<_, i64>(2)? as usize;
+            let total_time = row.get::<_, i64>(6)? as u64;
+            let timed_commands = row.get::<_, i64>(7)? as usize;
+            let savings_pct = if input > 0 {
+                (saved as f64 / input as f64) * 100.0
+            } else {
+                0.0
+            };
 
-                Ok(WeekStats {
-                    week_start: row.get(0)?,
-                    week_end: row.get(1)?,
-                    commands,
-                    input_tokens: input,
-                    output_tokens: row.get::<_, i64>(4)? as usize,
-                    saved_tokens: saved,
-                    savings_pct,
-                    total_time_ms: total_time,
-                    avg_time_ms: average_time_ms(total_time, timed_commands),
-                    timed_commands,
-                })
-            },
-        )?;
+            Ok(WeekStats {
+                week_start: row.get(0)?,
+                week_end: row.get(1)?,
+                commands,
+                input_tokens: input,
+                output_tokens: row.get::<_, i64>(4)? as usize,
+                saved_tokens: saved,
+                savings_pct,
+                total_time_ms: total_time,
+                avg_time_ms: average_time_ms(total_time, timed_commands),
+                timed_commands,
+            })
+        })?;
 
         let mut result: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
         result.reverse();
@@ -2125,44 +2204,36 @@ impl Tracker {
                 SUM(CASE WHEN {timing} = 1 THEN 1 ELSE 0 END) as timed_commands
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
-               AND input_tokens <= ?3
              GROUP BY month
              ORDER BY month DESC"
             ), // added: project filter
         )?;
 
-        let rows = stmt.query_map(
-            params![
-                project_exact,
-                project_glob,
-                HEADLINE_INPUT_CAP_TOKENS as i64
-            ],
-            |row| {
-                // added: params
-                let input = row.get::<_, i64>(2)? as usize;
-                let saved = row.get::<_, i64>(4)?.max(0) as usize; // clamp net-negative group
-                let commands = row.get::<_, i64>(1)? as usize;
-                let total_time = row.get::<_, i64>(5)? as u64;
-                let timed_commands = row.get::<_, i64>(6)? as usize;
-                let savings_pct = if input > 0 {
-                    (saved as f64 / input as f64) * 100.0
-                } else {
-                    0.0
-                };
+        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+            // added: params
+            let input = row.get::<_, i64>(2)? as usize;
+            let saved = row.get::<_, i64>(4)?.max(0) as usize; // clamp net-negative group
+            let commands = row.get::<_, i64>(1)? as usize;
+            let total_time = row.get::<_, i64>(5)? as u64;
+            let timed_commands = row.get::<_, i64>(6)? as usize;
+            let savings_pct = if input > 0 {
+                (saved as f64 / input as f64) * 100.0
+            } else {
+                0.0
+            };
 
-                Ok(MonthStats {
-                    month: row.get(0)?,
-                    commands,
-                    input_tokens: input,
-                    output_tokens: row.get::<_, i64>(3)? as usize,
-                    saved_tokens: saved,
-                    savings_pct,
-                    total_time_ms: total_time,
-                    avg_time_ms: average_time_ms(total_time, timed_commands),
-                    timed_commands,
-                })
-            },
-        )?;
+            Ok(MonthStats {
+                month: row.get(0)?,
+                commands,
+                input_tokens: input,
+                output_tokens: row.get::<_, i64>(3)? as usize,
+                saved_tokens: saved,
+                savings_pct,
+                total_time_ms: total_time,
+                avg_time_ms: average_time_ms(total_time, timed_commands),
+                timed_commands,
+            })
+        })?;
 
         let mut result: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
         result.reverse();
@@ -2660,16 +2731,14 @@ fn open_and_prepare(mode: MigrationMode) -> Result<Connection> {
             // every time.
             let current_version: i64 =
                 conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-            if crate::service::debug_enabled() {
-                eprintln!(
-                    "[rtk-debug] tracking.schema current={current_version} required={SCHEMA_VERSION} decision={}",
-                    if current_version < SCHEMA_VERSION {
-                        "migrate"
-                    } else {
-                        "current"
-                    }
-                );
-            }
+            crate::core::debug_log::log(format_args!(
+                "tracking.schema current={current_version} required={SCHEMA_VERSION} decision={}",
+                if current_version < SCHEMA_VERSION {
+                    "migrate"
+                } else {
+                    "current"
+                }
+            ));
             if current_version < SCHEMA_VERSION {
                 run_schema_migrations(&conn)?;
             }
@@ -3605,7 +3674,7 @@ mod tests {
     }
 
     #[test]
-    fn monday_week_join_preserves_input_eligibility_boundary() {
+    fn monday_week_join_includes_inputs_on_both_sides_of_former_cutoff() {
         let tracker = Tracker::new_in_memory().unwrap();
         insert_weekly_command(
             &tracker,
@@ -3629,10 +3698,10 @@ mod tests {
         assert_eq!(weeks.len(), 1);
         assert_eq!(weeks[0].week_start, "2026-09-28");
         assert_eq!(weeks[0].week_end, "2026-10-04");
-        assert_eq!(weeks[0].commands, 1);
-        assert_eq!(weeks[0].input_tokens, 7500);
-        assert_eq!(weeks[0].saved_tokens, 6000);
-        assert_eq!(weeks[0].total_time_ms, 5);
+        assert_eq!(weeks[0].commands, 2);
+        assert_eq!(weeks[0].input_tokens, 15001);
+        assert_eq!(weeks[0].saved_tokens, 13501);
+        assert_eq!(weeks[0].total_time_ms, 25);
     }
 
     #[test]
@@ -3960,44 +4029,74 @@ mod tests {
         assert_eq!(test_record.savings_pct, 80.0);
     }
 
-    /// The headline family (summary + period tables) excludes rows whose
-    /// input exceeds what the agent would have ingested; the diagnostic
-    /// listings keep them, and the exclusion is counted so it can be shown.
+    /// Client output budgets are applied after RTK and cannot exclude raw inputs.
     #[test]
-    fn oversized_rows_leave_the_headline_but_stay_diagnosable() {
-        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
-
+    fn every_input_size_contributes_to_headline_and_period_rates() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        for (input, output) in [(1000, 500), (7500, 2500), (7501, 2500), (1_000_000, 100)] {
+            tracker
+                .record("test", &format!("rtk size-{input}"), input, output, 5)
+                .unwrap();
+        }
         tracker
-            .record("ls", "rtk ls", 1_000, 500, 5)
-            .expect("Failed to record normal row");
-        tracker
-            .record("cat huge.log", "rtk cat huge.log", 1_000_000, 100, 5)
-            .expect("Failed to record oversized row");
-
-        let summary = tracker.get_summary().expect("Failed to get summary");
-        assert_eq!(summary.oversized_excluded, 1);
-        assert_eq!(summary.total_commands, 1);
-        assert_eq!(summary.total_input, 1_000);
+            .record_with_output(
+                "exact",
+                "rtk bypass",
+                10_000,
+                10_000,
+                5,
+                OutputTracking {
+                    contract: "exact".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let summary = tracker.get_summary().unwrap();
+        assert_eq!(summary.oversized_excluded, 0);
+        assert_eq!(summary.total_commands, 5);
+        assert_eq!(summary.total_input, 1_026_001);
+        assert_eq!(summary.total_output, 15_600);
+        assert_eq!(summary.total_saved, 1_010_401);
+        assert!((summary.avg_savings_pct - 1_010_401.0 * 100.0 / 1_026_001.0).abs() < 0.000_001);
         assert!(
-            (summary.avg_savings_pct - 50.0).abs() < 0.01,
-            "headline must be the capped rate, got {}",
-            summary.avg_savings_pct
+            (summary.supported_avg_savings_pct - 1_010_401.0 * 100.0 / 1_016_001.0).abs()
+                < 0.000_001
         );
-
-        let days = tracker
-            .get_all_days_filtered(None)
-            .expect("Failed to get days");
-        assert_eq!(days.len(), 1);
-        assert_eq!(days[0].input_tokens, 1_000, "period tables use the cap too");
-
-        let diagnosable = summary
-            .by_command
-            .iter()
-            .any(|(cmd, _, saved, _, _)| cmd == "rtk cat huge.log" && *saved > 900_000);
+        let days = tracker.get_all_days().unwrap();
+        let weeks = tracker.get_by_week().unwrap();
+        let months = tracker.get_by_month().unwrap();
+        assert_eq!(days.iter().map(|r| r.commands).sum::<usize>(), 5);
+        assert_eq!(weeks.iter().map(|r| r.commands).sum::<usize>(), 5);
+        assert_eq!(months.iter().map(|r| r.commands).sum::<usize>(), 5);
+        assert_eq!(
+            days.iter().map(|r| r.input_tokens).sum::<usize>(),
+            summary.total_input
+        );
+        assert_eq!(
+            weeks.iter().map(|r| r.input_tokens).sum::<usize>(),
+            summary.total_input
+        );
+        assert_eq!(
+            months.iter().map(|r| r.input_tokens).sum::<usize>(),
+            summary.total_input
+        );
+        assert_eq!(
+            days.iter().map(|r| r.saved_tokens).sum::<usize>(),
+            summary.total_saved
+        );
+        assert_eq!(
+            weeks.iter().map(|r| r.saved_tokens).sum::<usize>(),
+            summary.total_saved
+        );
+        assert_eq!(
+            months.iter().map(|r| r.saved_tokens).sum::<usize>(),
+            summary.total_saved
+        );
         assert!(
-            diagnosable,
-            "the oversized row must stay visible in by_command: {:?}",
-            summary.by_command
+            summary
+                .by_command
+                .iter()
+                .any(|(cmd, _, saved, _, _)| cmd == "rtk size-1000000" && *saved == 999_900)
         );
     }
 
@@ -4605,6 +4704,110 @@ mod tests {
         assert!((summary.avg_savings_pct - 43.75).abs() < f64::EPSILON);
         assert!((summary.supported_avg_savings_pct - (140.0 / 220.0 * 100.0)).abs() < 0.000_001);
         assert_eq!(summary.by_command.len(), 14);
+    }
+
+    #[test]
+    fn dashboard_metrics_load_all_groups_and_preserve_negative_savings() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        for i in 0..60 {
+            tracker
+                .record("test", &format!("rtk test-{i:02}"), 100, 100 - i, i as u64)
+                .unwrap();
+        }
+        tracker.record("large", "rtk large", 8000, 100, 10).unwrap();
+        tracker
+            .record("expanded", "rtk expanded", 100, 110, 10)
+            .unwrap();
+        tracker
+            .record_with_output(
+                "error",
+                "rtk error",
+                100,
+                10,
+                5,
+                OutputTracking {
+                    runtime_error: Some("filter_failed".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let summary = tracker.get_dashboard_headline(None).unwrap();
+        assert!(summary.by_command.is_empty());
+        assert!(summary.by_day.is_empty());
+        assert_eq!(summary.activity_total_days, 0);
+        assert_eq!(summary.total_commands, 62);
+        assert_eq!(summary.oversized_excluded, 0);
+        assert_eq!(summary.error_count, 1);
+        let commands = tracker
+            .get_dashboard_metrics(None, DashboardGrouping::Command)
+            .unwrap();
+        assert_eq!(commands.len(), 62);
+        assert_eq!(
+            commands
+                .iter()
+                .find(|m| m.command == "rtk expanded")
+                .unwrap()
+                .saved,
+            -10
+        );
+        assert_eq!(
+            commands
+                .iter()
+                .find(|m| m.command == "rtk large")
+                .unwrap()
+                .saved,
+            7900
+        );
+        assert!(commands.iter().any(|m| m.saved == 0));
+        let errors = tracker
+            .get_dashboard_metrics(None, DashboardGrouping::Error)
+            .unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].error, "filter_failed");
+        let activity = tracker
+            .get_dashboard_metrics(None, DashboardGrouping::Day)
+            .unwrap();
+        assert_eq!(activity.iter().map(|m| m.count).sum::<usize>(), 62);
+    }
+
+    #[test]
+    fn dashboard_metrics_normalize_dates_and_respect_project_boundaries() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        let child = format!("/project{}child", std::path::MAIN_SEPARATOR);
+        for (project, date, input, output, contract) in [
+            ("/project", "2026-01-02T01:00:00+02:00", 100, 10, "legacy"),
+            (
+                child.as_str(),
+                "2026-01-01T23:30:00+00:00",
+                200,
+                200,
+                "exact",
+            ),
+            (
+                "/project-other",
+                "2026-02-01T00:00:00+00:00",
+                100,
+                0,
+                "legacy",
+            ),
+        ] {
+            tracker.conn.execute("INSERT INTO commands (original_cmd, rtk_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms, timestamp, project_path, output_contract) VALUES ('test', 'rtk test', ?1, ?2, ?1-?2, (?1-?2)*100.0/?1, 10, ?3, ?4, ?5)",
+                params![input, output, date, project, contract]).unwrap();
+        }
+        let commands = tracker
+            .get_dashboard_metrics(Some("/project"), DashboardGrouping::Command)
+            .unwrap();
+        assert_eq!(commands.len(), 1);
+        let command = &commands[0];
+        assert_eq!(command.count, 2);
+        assert_eq!(command.latest, "2026-01-01 23:30:00");
+        assert_eq!(command.input, 300);
+        let days = tracker
+            .get_dashboard_metrics(Some("/project"), DashboardGrouping::Day)
+            .unwrap();
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].command, "2026-01-01");
+        assert_eq!(days[0].count, 2);
     }
 
     #[test]

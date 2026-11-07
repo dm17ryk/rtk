@@ -749,15 +749,6 @@ pub fn run(
             ),
         );
         print_efficiency_meter(summary.avg_savings_pct);
-        if summary.oversized_excluded > 0 {
-            print_kpi(
-                "Excluded",
-                format!(
-                    "{} oversized outputs (input past the ~30k-char agent cap)",
-                    summary.oversized_excluded
-                ),
-            );
-        }
         for gap in crate::hooks::init::claude_hook_gaps() {
             print_kpi(
                 "Hook needed",

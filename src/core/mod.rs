@@ -9,6 +9,7 @@ pub mod call_context;
 pub mod classify;
 pub mod config;
 pub mod constants;
+pub(crate) mod debug_log;
 pub mod display_helpers;
 pub mod filter;
 pub mod guard;
