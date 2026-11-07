@@ -2,10 +2,10 @@ src/cmds/cloud/aws_cmd.rs	prints=2	stdout_handles=0	fingerprint=40824930f40f8203
 src/cmds/cloud/container.rs	prints=12	stdout_handles=0	fingerprint=2e82e5fa93d2400f
 src/cmds/cloud/curl_cmd.rs	prints=0	stdout_handles=1	fingerprint=1ebadae4eeed3eaa
 src/cmds/cloud/wget_cmd.rs	prints=4	stdout_handles=0	fingerprint=61b870bbe143bc69
-src/cmds/dotnet/dotnet_cmd.rs	prints=3	stdout_handles=0	fingerprint=21917135ca4eabdd
+src/cmds/dotnet/dotnet_cmd.rs	prints=3	stdout_handles=0	fingerprint=414e87de8bf26c17
 src/cmds/git/diff_cmd.rs	prints=3	stdout_handles=1	fingerprint=54204c5a30907dee
-src/cmds/git/git_cmd.rs	prints=17	stdout_handles=1	fingerprint=06aa9cd65f589014
-src/cmds/go/go_cmd.rs	prints=2	stdout_handles=0	fingerprint=fe3eaf4cb1bcaf0a
+src/cmds/git/git_cmd.rs	prints=18	stdout_handles=2	fingerprint=30ace15a3e1fcbb4
+src/cmds/go/go_cmd.rs	prints=2	stdout_handles=0	fingerprint=0182ac8296025763
 src/cmds/js/ng_cmd.rs	prints=1	stdout_handles=1	fingerprint=a8b8ca0894b581c9
 src/cmds/js/pnpm_cmd.rs	prints=3	stdout_handles=0	fingerprint=f4f6bc5e01855ace
 src/cmds/js/prisma_cmd.rs	prints=3	stdout_handles=0	fingerprint=ebdec5d150f78d0b
@@ -19,9 +19,9 @@ src/cmds/system/format_cmd.rs	prints=1	stdout_handles=0	fingerprint=bf2d57642a49
 src/cmds/system/json_cmd.rs	prints=2	stdout_handles=0	fingerprint=0602fe3a5182d2e1
 src/cmds/system/local_llm.rs	prints=2	stdout_handles=0	fingerprint=678d966a5d4a2d4a
 src/cmds/system/log_cmd.rs	prints=2	stdout_handles=0	fingerprint=2c3b927630066b00
-src/cmds/system/ls.rs	prints=1	stdout_handles=0	fingerprint=cedc46337640f0ca
-src/cmds/system/pipe_cmd.rs	prints=1	stdout_handles=1	fingerprint=89389e737db59be8
-src/cmds/system/read.rs	prints=3	stdout_handles=4	fingerprint=100f6be473237fd8
+src/cmds/system/ls.rs	prints=1	stdout_handles=0	fingerprint=d5a5cb65b67bb82a
+src/cmds/system/pipe_cmd.rs	prints=1	stdout_handles=1	fingerprint=68d340f8bb222e65
+src/cmds/system/read.rs	prints=3	stdout_handles=4	fingerprint=97eded9fe9336572
 src/cmds/system/search.rs	prints=4	stdout_handles=0	fingerprint=fb034e20ecf65042
 src/cmds/system/summary.rs	prints=2	stdout_handles=0	fingerprint=1f81eb23dee1037b
 src/cmds/system/wc_cmd.rs	prints=1	stdout_handles=0	fingerprint=594b217acf79ca0f

@@ -296,6 +296,14 @@ mod tests {
     // Copilot tests
 
     #[test]
+    fn test_copilot_instructions_exclude_shell_builtins_from_prefix_rule() {
+        crate::hooks::init::tests::assert_prefix_rule_spares_builtins(
+            "copilot",
+            copilot_instructions(),
+        );
+    }
+
+    #[test]
     fn test_copilot_init_preserves_existing_instructions() {
         let temp = TempDir::new().unwrap();
         let github_dir = temp.path().join(".github");
