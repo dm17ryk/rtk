@@ -288,13 +288,6 @@ fn draw_tracker_panel(f: &mut Frame, area: Rect, summary: Option<&TrackerSummary
             s.avg_savings_pct,
         ),
     ];
-    let mut lines = lines;
-    if s.oversized_excluded > 0 {
-        lines.push(kpi_line(
-            "Excluded",
-            format!("{} oversized outputs", s.oversized_excluded),
-        ));
-    }
     f.render_widget(Paragraph::new(lines), text_area);
     f.render_widget(savings_gauge(s.avg_savings_pct), gauge_area);
 }
