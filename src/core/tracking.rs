@@ -1658,10 +1658,10 @@ impl Tracker {
         Ok(summary)
     }
 
-    /// All dashboard groups, independent of terminal size. Existing limited APIs
-    /// remain available to other consumers.
-    pub fn get_dashboard_summary_all(&self, project_path: Option<&str>) -> Result<GainSummary> {
-        self.get_summary_filtered_with_options(project_path, None, false, None)
+    /// Dashboard headline only: group listings are loaded separately by
+    /// `get_dashboard_metrics`, so never build or retain duplicate breakdowns.
+    pub fn get_dashboard_headline(&self, project_path: Option<&str>) -> Result<GainSummary> {
+        self.get_summary_totals_filtered(project_path, false)
     }
 
     /// Aggregate every available diagnostic row before the UI sorts or pages it.
@@ -1718,13 +1718,11 @@ impl Tracker {
             })
         })?;
         let rows = rows.collect::<Result<Vec<_>, _>>()?;
-        if crate::service::debug_enabled() {
-            eprintln!(
-                "[rtk-debug] dashboard.query grouping={grouping:?} project={} groups={} limit=none input_cap=none",
-                project_path.is_some(),
-                rows.len()
-            );
-        }
+        crate::core::debug_log::log(format_args!(
+            "dashboard.query grouping={grouping:?} project={} groups={} limit=none input_cap=none",
+            project_path.is_some(),
+            rows.len()
+        ));
         Ok(rows)
     }
 
@@ -1734,6 +1732,20 @@ impl Tracker {
         command_limit: Option<usize>,
         include_errors: bool,
         activity_limit: Option<usize>,
+    ) -> Result<GainSummary> {
+        let mut summary = self.get_summary_totals_filtered(project_path, include_errors)?;
+        summary.by_command = self.get_by_command(project_path, command_limit, include_errors)?;
+        let (by_day, activity_total_days) =
+            self.get_by_day(project_path, include_errors, activity_limit)?;
+        summary.by_day = by_day;
+        summary.activity_total_days = activity_total_days;
+        Ok(summary)
+    }
+
+    fn get_summary_totals_filtered(
+        &self,
+        project_path: Option<&str>,
+        include_errors: bool,
     ) -> Result<GainSummary> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut total_commands = 0usize;
@@ -1801,16 +1813,10 @@ impl Tracker {
         };
 
         let avg_time_ms = average_time_ms(total_time_ms, timed_commands);
-        if crate::service::debug_enabled() {
-            eprintln!(
-                "[rtk-debug] tracking.summary input_cap=none project={} include_errors={include_errors} commands={total_commands} input={total_input} output={total_output} saved={total_saved} errors={error_count}",
-                project_path.is_some()
-            );
-        }
-
-        let by_command = self.get_by_command(project_path, command_limit, include_errors)?;
-        let (by_day, activity_total_days) =
-            self.get_by_day(project_path, include_errors, activity_limit)?;
+        crate::core::debug_log::log(format_args!(
+            "tracking.summary input_cap=none project={} include_errors={include_errors} commands={total_commands} input={total_input} output={total_output} saved={total_saved} errors={error_count}",
+            project_path.is_some()
+        ));
 
         Ok(GainSummary {
             total_commands,
@@ -1822,9 +1828,9 @@ impl Tracker {
             error_count,
             total_time_ms,
             avg_time_ms,
-            by_command,
-            by_day,
-            activity_total_days,
+            by_command: Vec::new(),
+            by_day: Vec::new(),
+            activity_total_days: 0,
             error_commands: Vec::new(),
             error_command_groups: 0,
             oversized_excluded: 0,
@@ -2725,16 +2731,14 @@ fn open_and_prepare(mode: MigrationMode) -> Result<Connection> {
             // every time.
             let current_version: i64 =
                 conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-            if crate::service::debug_enabled() {
-                eprintln!(
-                    "[rtk-debug] tracking.schema current={current_version} required={SCHEMA_VERSION} decision={}",
-                    if current_version < SCHEMA_VERSION {
-                        "migrate"
-                    } else {
-                        "current"
-                    }
-                );
-            }
+            crate::core::debug_log::log(format_args!(
+                "tracking.schema current={current_version} required={SCHEMA_VERSION} decision={}",
+                if current_version < SCHEMA_VERSION {
+                    "migrate"
+                } else {
+                    "current"
+                }
+            ));
             if current_version < SCHEMA_VERSION {
                 run_schema_migrations(&conn)?;
             }
@@ -4727,8 +4731,11 @@ mod tests {
                 },
             )
             .unwrap();
-        let summary = tracker.get_dashboard_summary_all(None).unwrap();
-        assert_eq!(summary.by_command.len(), 62);
+        let summary = tracker.get_dashboard_headline(None).unwrap();
+        assert!(summary.by_command.is_empty());
+        assert!(summary.by_day.is_empty());
+        assert_eq!(summary.activity_total_days, 0);
+        assert_eq!(summary.total_commands, 62);
         assert_eq!(summary.oversized_excluded, 0);
         assert_eq!(summary.error_count, 1);
         let commands = tracker

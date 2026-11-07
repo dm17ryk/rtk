@@ -103,6 +103,11 @@ pub fn run(options: &Options) -> Result<()> {
         return Ok(());
     }
 
+    // Declared before the terminal, so queued diagnostics flush only after
+    // terminal cleanup (including early initialization errors).
+    let _deferred_debug = io::stderr()
+        .is_terminal()
+        .then(crate::core::debug_log::defer);
     terminal::enable_raw_mode().context("Failed to enable dashboard input")?;
     let mut stdout = io::stdout();
     if let Err(error) = execute!(stdout, EnterAlternateScreen, cursor::Hide) {
@@ -196,16 +201,14 @@ fn refresh_data(data: &mut DashboardData, project: bool, status: &mut Option<Str
             *status = Some(format!("Refresh failed: {error:#}"));
         }
     }
-    if crate::service::debug_enabled() {
-        eprintln!(
-            "[rtk-debug] dashboard.refresh decision={} project={project}",
-            if status.is_none() {
-                "replaced"
-            } else {
-                "retained_previous"
-            }
-        );
-    }
+    crate::core::debug_log::log(format_args!(
+        "dashboard.refresh decision={} project={project}",
+        if status.is_none() {
+            "replaced"
+        } else {
+            "retained_previous"
+        }
+    ));
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -291,13 +294,11 @@ impl DashboardState {
 }
 
 fn debug_event(event: &str, state: &DashboardState) {
-    if crate::service::debug_enabled() {
-        let tab = state.tabs[state.tab];
-        eprintln!(
-            "[rtk-debug] dashboard.input event={event} tab={} column={} order={:?} offset={}",
-            state.tab, tab.column, tab.order, tab.offset
-        );
-    }
+    let tab = state.tabs[state.tab];
+    crate::core::debug_log::log(format_args!(
+        "dashboard.input event={event} tab={} column={} order={:?} offset={}",
+        state.tab, tab.column, tab.order, tab.offset
+    ));
 }
 
 #[derive(Debug, Clone)]
@@ -326,6 +327,8 @@ struct Column {
     width: Constraint,
 }
 struct TableData {
+    /// Optional discovery failures belong to this table, never the whole dashboard.
+    warning: Option<String>,
     title: &'static str,
     columns: Vec<Column>,
     rows: Vec<ViewRow>,
@@ -434,11 +437,15 @@ fn draw_table(frame: &mut Frame, table: &TableData, state: &mut TabState, area: 
         table.rows.len(),
         table.columns[state.column].label
     );
-    if table.rows.is_empty() {
-        frame.render_widget(
-            Paragraph::new("  No data available.").block(panel(title)),
-            area,
+    let mut block = panel(title);
+    if let Some(warning) = &table.warning {
+        block = block.title_bottom(
+            Line::from(format!(" Warning: {} ", display_cell(warning)))
+                .style(Style::default().fg(Color::Yellow)),
         );
+    }
+    if table.rows.is_empty() {
+        frame.render_widget(Paragraph::new("  No data available.").block(block), area);
         return;
     }
     let sorted = table.sorted(*state);
@@ -467,7 +474,7 @@ fn draw_table(frame: &mut Frame, table: &TableData, state: &mut TabState, area: 
         Table::new(rows, table.columns.iter().map(|c| c.width))
             .header(header)
             .column_spacing(1)
-            .block(panel(title)),
+            .block(block),
         area,
     );
 }
@@ -636,6 +643,9 @@ fn plain_dashboard_text(data: &DashboardData, state: &DashboardState) -> String 
                 .join("\t"),
         );
     }
+    if let Some(warning) = &table.warning {
+        lines.push(format!("Warning: {}", display_cell(warning)));
+    }
     format!("{}\n", lines.join("\n"))
 }
 
@@ -652,30 +662,44 @@ impl DashboardData {
     fn load(project: bool) -> Result<Self> {
         let tracker = Tracker::new().context("Failed to initialize tracking database")?;
         let project_path = project.then(current_project_path_string);
+        Self::from_tracker(&tracker, project_path, list_artifacts())
+    }
+
+    fn from_tracker(
+        tracker: &Tracker,
+        project_path: Option<String>,
+        artifacts: Result<ArtifactDiscovery>,
+    ) -> Result<Self> {
         let project = project_path.as_deref();
         let summary = tracker
-            .get_dashboard_summary_all(project)
+            .get_dashboard_headline(project)
             .context("Failed to load dashboard headline")?;
         let commands = tracker.get_dashboard_metrics(project, DashboardGrouping::Command)?;
         let errors = tracker.get_dashboard_metrics(project, DashboardGrouping::Error)?;
         let activity = tracker.get_dashboard_metrics(project, DashboardGrouping::Day)?;
         let all_count = commands.iter().map(|row| row.count).sum::<usize>();
-        let artifacts = list_artifacts()?;
+        let artifacts = artifacts.unwrap_or_else(|error| {
+            crate::core::debug_log::log(format_args!(
+                "dashboard.artifacts decision=discovery_failed"
+            ));
+            ArtifactDiscovery {
+                warning: Some(format!("Artifact discovery unavailable: {error:#}")),
+                ..Default::default()
+            }
+        });
         let tables = vec![
             metric_table("Commands (all recorded)", &commands, false, false),
             metric_table("Error Commands", &errors, true, false),
             metric_table("Daily Activity (all recorded)", &activity, false, true),
-            health_table(&summary, project, artifacts.len()),
-            artifact_table(&artifacts),
+            health_table(&summary, project, artifacts.artifacts.len()),
+            artifact_table(&artifacts.artifacts, artifacts.warning),
         ];
-        if crate::service::debug_enabled() {
-            eprintln!(
-                "[rtk-debug] dashboard.load project={} successful={all_count} errors={} tables={} limits=none",
-                project.is_some(),
-                summary.error_count,
-                tables.len()
-            );
-        }
+        crate::core::debug_log::log(format_args!(
+            "dashboard.load project={} successful={all_count} errors={} tables={} limits=none",
+            project.is_some(),
+            summary.error_count,
+            tables.len()
+        ));
         Ok(Self {
             summary,
             tables,
@@ -789,6 +813,7 @@ fn metric_table(
         })
         .unwrap_or(0);
     TableData {
+        warning: None,
         title,
         columns,
         rows,
@@ -823,6 +848,7 @@ fn health_table(summary: &GainSummary, project: Option<&str>, artifacts: usize) 
         ("MCP execution", "local stdio / bounded".to_string()),
     ];
     TableData {
+        warning: None,
         title: "Integration Health",
         columns: vec![
             column(SortField::Name, "Name", 30),
@@ -844,38 +870,86 @@ struct Artifact {
     size: u64,
     modified: Option<SystemTime>,
 }
-fn list_artifacts() -> Result<Vec<Artifact>> {
+#[derive(Default)]
+struct ArtifactDiscovery {
+    artifacts: Vec<Artifact>,
+    warning: Option<String>,
+}
+
+fn list_artifacts() -> Result<ArtifactDiscovery> {
     let config = Config::load().context("Failed to load RTK configuration")?;
     let Some(directory) = crate::core::tee::get_tee_dir(&config) else {
-        return Ok(Vec::new());
+        return Ok(ArtifactDiscovery::default());
     };
-    let entries = match std::fs::read_dir(&directory) {
+    Ok(discover_artifacts(&directory))
+}
+
+fn discover_artifacts(directory: &std::path::Path) -> ArtifactDiscovery {
+    let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error).context("Failed to list tee artifacts"),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            crate::core::debug_log::log(format_args!("dashboard.artifacts decision=missing"));
+            return ArtifactDiscovery::default();
+        }
+        Err(error) => {
+            crate::core::debug_log::log(format_args!(
+                "dashboard.artifacts decision=unavailable kind={:?}",
+                error.kind()
+            ));
+            return ArtifactDiscovery {
+                warning: Some(format!("Cannot list tee artifacts: {error}")),
+                ..Default::default()
+            };
+        }
     };
-    let mut artifacts = Vec::new();
-    for entry in entries {
-        let entry = entry.context("Failed to read tee artifact entry")?;
+    collect_artifacts(entries.map(|entry| {
+        let entry = entry?;
         let path = entry.path();
         if path.extension().is_none_or(|extension| extension != "log") {
-            continue;
+            return Ok(None);
         }
-        // A running RTK may rotate files between read_dir and metadata.
-        match entry.metadata() {
-            Ok(metadata) if metadata.is_file() => artifacts.push(Artifact {
-                path,
-                size: metadata.len(),
-                modified: metadata.modified().ok(),
-            }),
-            Ok(_) => {}
+        let metadata = entry.metadata()?;
+        if !metadata.is_file() {
+            return Ok(None);
+        }
+        Ok(Some(Artifact {
+            path,
+            size: metadata.len(),
+            modified: metadata.modified().ok(),
+        }))
+    }))
+}
+
+fn collect_artifacts(
+    entries: impl IntoIterator<Item = io::Result<Option<Artifact>>>,
+) -> ArtifactDiscovery {
+    let mut discovery = ArtifactDiscovery::default();
+    let mut skipped = 0usize;
+    for entry in entries {
+        match entry {
+            Ok(Some(artifact)) => discovery.artifacts.push(artifact),
+            Ok(None) => {}
+            // RTK can rotate artifacts while this directory is being enumerated.
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context("Failed to inspect tee artifact"),
+            Err(error) => {
+                skipped += 1;
+                discovery
+                    .warning
+                    .get_or_insert_with(|| format!("Cannot inspect a tee artifact: {error}"));
+            }
         }
     }
-    Ok(artifacts)
+    if let Some(warning) = &mut discovery.warning {
+        *warning = format!("Skipped {skipped} artifact entries. {warning}");
+    }
+    crate::core::debug_log::log(format_args!(
+        "dashboard.artifacts decision=enumerated found={} skipped={skipped}",
+        discovery.artifacts.len()
+    ));
+    discovery
 }
-fn artifact_table(artifacts: &[Artifact]) -> TableData {
+
+fn artifact_table(artifacts: &[Artifact], warning: Option<String>) -> TableData {
     let rows = artifacts
         .iter()
         .map(|artifact| {
@@ -895,6 +969,7 @@ fn artifact_table(artifacts: &[Artifact]) -> TableData {
         })
         .collect();
     TableData {
+        warning,
         title: "Tee Artifacts",
         columns: vec![
             column(SortField::Size, "Size", 10),
@@ -977,6 +1052,7 @@ mod tests {
             metric_table("Error Commands", &commands, true, false),
             metric_table("Daily Activity (all recorded)", &commands, false, true),
             TableData {
+                warning: None,
                 title: "Health",
                 columns: vec![column(SortField::Name, "Name", 0)],
                 rows: commands
@@ -996,6 +1072,7 @@ mod tests {
                         modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(i as u64)),
                     })
                     .collect::<Vec<_>>(),
+                None,
             ),
         ];
         DashboardData {
@@ -1019,6 +1096,86 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn unavailable_artifacts_do_not_block_any_other_tab_or_plain_export() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        tracker.record("test", "rtk test", 100, 20, 3).unwrap();
+        let data = DashboardData::from_tracker(
+            &tracker,
+            None,
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "inaccessible tee directory",
+            )
+            .into()),
+        )
+        .unwrap();
+        assert_eq!(data.summary.total_commands, 1);
+        assert_eq!(data.table(1).rows.len(), 1);
+        assert!(data.summary.by_command.is_empty());
+        assert!(data.summary.by_day.is_empty());
+        for tab in 0..6 {
+            let mut state = DashboardState::new(&Options::default(), &data);
+            state.tab = tab;
+            let plain = plain_dashboard_text(&data, &state);
+            let rendered = screen(&data, &mut state, 130, 24);
+            if tab == 5 {
+                assert!(plain.contains("Warning: Artifact discovery unavailable:"));
+                assert!(rendered.contains("Warning:"));
+            } else {
+                assert!(!plain.contains("Artifact discovery unavailable"));
+                assert!(!rendered.contains("Warning:"));
+            }
+        }
+        // A subsequent refresh with a recovered directory clears only its warning.
+        let recovered =
+            DashboardData::from_tracker(&tracker, None, Ok(ArtifactDiscovery::default())).unwrap();
+        assert!(recovered.table(5).warning.is_none());
+        assert_eq!(recovered.table(1).rows.len(), data.table(1).rows.len());
+    }
+
+    #[test]
+    fn artifact_scan_continues_after_an_unreadable_entry() {
+        let artifact = |name: &str| {
+            Some(Artifact {
+                path: name.into(),
+                size: 1,
+                modified: None,
+            })
+        };
+        let scan = collect_artifacts([
+            Ok(artifact("before.log")),
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+            Err(io::Error::new(io::ErrorKind::NotFound, "rotated")),
+            Ok(artifact("after.log")),
+        ]);
+        assert_eq!(scan.artifacts.len(), 2);
+        assert!(
+            scan.warning
+                .as_ref()
+                .unwrap()
+                .contains("Skipped 1 artifact entries")
+        );
+        let table = artifact_table(&scan.artifacts, scan.warning);
+        assert_eq!(table.rows.len(), 2);
+        assert!(table.warning.is_some());
+    }
+
+    #[test]
+    fn artifact_directory_io_failure_becomes_a_table_warning() {
+        let temporary = tempfile::tempdir().unwrap();
+        let not_a_directory = temporary.path().join("file");
+        std::fs::write(&not_a_directory, b"test").unwrap();
+        let scan = discover_artifacts(&not_a_directory);
+        assert!(scan.artifacts.is_empty());
+        assert!(scan.warning.unwrap().contains("Cannot list tee artifacts:"));
+        assert!(
+            discover_artifacts(&temporary.path().join("missing"))
+                .warning
+                .is_none()
+        );
     }
 
     #[test]

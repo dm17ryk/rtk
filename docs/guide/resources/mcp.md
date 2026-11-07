@@ -139,6 +139,16 @@ rtk dashboard --tab activity --sort date --order asc --plain
 uses this mode automatically. `--sort` initializes tabs that have the selected
 column; other tabs retain their default column.
 
+Artifact discovery is best-effort. If the tee directory or an entry cannot be
+read, the Artifacts tab reports a warning and retains any entries it could read;
+commands and the other analytics tabs remain available.
+
+With `RTK_DEBUG=1`, diagnostics sharing the interactive terminal are buffered
+and emitted to stderr after the dashboard closes. The last 256 messages are
+retained, with an omission count for longer sessions. Redirect stderr to a file
+to stream and retain all diagnostics immediately without disturbing the screen.
+Plain exports also continue logging immediately.
+
 ### Understanding efficiency
 
 This fork counts every recorded input size in headline, daily, weekly, and monthly
