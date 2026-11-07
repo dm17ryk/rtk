@@ -329,8 +329,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     };
 
     let native = native_listing(args);
-    // Empty stdout is still a valid baseline when native ls fails. Dropping
-    // it would expose headers emitted only by our parse-aid long listing.
+    // Keep native stdout available even on failure. The producer's exit code
+    // below determines when an empty failed baseline is authoritative.
     let listed = native.as_ref().map(|(stdout, _)| stdout.as_str());
     if verbose > 0 {
         eprintln!(
@@ -346,6 +346,19 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         &label,
         BudgetClass::Collection,
         |raw, code| {
+            // A failed producer must preserve an empty native error response.
+            // A successful normalized spelling (such as BSD --all -> -a) needs
+            // its own listing when the original spelling failed without output.
+            let listed = listed.filter(|stdout| {
+                code != 0
+                    || native.as_ref().is_some_and(|(_, succeeded)| *succeeded)
+                    || !stdout.is_empty()
+            });
+            if verbose > 0 && listed.is_none() && native.is_some() {
+                eprintln!(
+                    "[rtk-debug] ls baseline=parse-aid reason=native-failed-empty producer-exit={code}"
+                );
+            }
             let baseline = listed.unwrap_or(raw);
             let filtered = match (code, &native) {
                 (0, _) => render(raw, listed, show_all, show_long, verbose),
