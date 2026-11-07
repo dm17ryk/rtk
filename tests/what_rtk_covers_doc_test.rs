@@ -1,4 +1,3 @@
-#![cfg(unix)]
 //! Verifies that commands documented in `what-rtk-covers.md` are actually
 //! rewritten by RTK's hook rules (#4695).
 //!
@@ -141,7 +140,12 @@ fn documented_tools() -> std::collections::BTreeSet<String> {
                             .next()
                             .filter(|w| !w.starts_with('-'))
                         {
-                            tools.insert(first_word.to_string());
+                            // ESP-IDF's executable and its RTK route have different names.
+                            let tool = match first_word {
+                                "idf.py" => "idf",
+                                other => other,
+                            };
+                            tools.insert(tool.to_string());
                         }
                         start = open_idx + close + 1;
                     } else {

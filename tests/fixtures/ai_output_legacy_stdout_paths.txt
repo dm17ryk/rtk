@@ -19,7 +19,7 @@ src/cmds/system/format_cmd.rs	prints=1	stdout_handles=0	fingerprint=bf2d57642a49
 src/cmds/system/json_cmd.rs	prints=2	stdout_handles=0	fingerprint=0602fe3a5182d2e1
 src/cmds/system/local_llm.rs	prints=2	stdout_handles=0	fingerprint=678d966a5d4a2d4a
 src/cmds/system/log_cmd.rs	prints=2	stdout_handles=0	fingerprint=2c3b927630066b00
-src/cmds/system/ls.rs	prints=1	stdout_handles=0	fingerprint=b34d7820e8bb517a
+src/cmds/system/ls.rs	prints=1	stdout_handles=0	fingerprint=8ed6ee2ae46bc41b
 src/cmds/system/pipe_cmd.rs	prints=1	stdout_handles=1	fingerprint=68d340f8bb222e65
 src/cmds/system/read.rs	prints=3	stdout_handles=4	fingerprint=97eded9fe9336572
 src/cmds/system/search.rs	prints=4	stdout_handles=0	fingerprint=fb034e20ecf65042

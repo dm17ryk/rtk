@@ -123,6 +123,10 @@ listing into `head`, `tail`, or `cat`.
 | Command | What changes |
 |---------|--------------|
 | `make` | Errors and warnings highlighted, noise stripped |
+| `cmake --build build` | Build summary and grouped compiler diagnostics |
+| `ninja` | Build summary with actionable warnings and errors |
+| `idf.py build` | ESP-IDF build summary and grouped compiler diagnostics |
+| `cppcheck src` | Static-analysis diagnostics grouped by file and severity |
 
 ## Files and Search
 

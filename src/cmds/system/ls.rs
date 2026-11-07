@@ -329,14 +329,14 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     };
 
     let native = native_listing(args);
-    let listed = native
-        .as_ref()
-        .filter(|(stdout, succeeded)| *succeeded || !stdout.is_empty())
-        .map(|(stdout, _)| stdout.as_str());
+    // Empty stdout is still a valid baseline when native ls fails. Dropping
+    // it would expose headers emitted only by our parse-aid long listing.
+    let listed = native.as_ref().map(|(stdout, _)| stdout.as_str());
     if verbose > 0 {
         eprintln!(
-            "[rtk-debug] ls baseline=native available={} bytes={}",
+            "[rtk-debug] ls baseline=native available={} succeeded={:?} bytes={}",
             listed.is_some(),
+            native.as_ref().map(|(_, succeeded)| succeeded),
             listed.map_or(0, str::len)
         );
     }
